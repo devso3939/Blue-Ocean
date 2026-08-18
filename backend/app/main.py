@@ -555,3 +555,20 @@ async def city_resolution_handler(request, exc: CityResolutionError):
 @app.exception_handler(Exception)
 async def unhandled_handler(request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": f"{type(exc).__name__}: {exc}"})
+
+
+# ---------------------------------------------------------------------------
+# Serve frontend static files (for Render / Docker deployment)
+# ---------------------------------------------------------------------------
+import os
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+
+_frontend_dir = Path(os.environ.get("BLUEOCEAN_FRONTEND_DIR", "/app/frontend_out"))
+if _frontend_dir.is_dir() and (_frontend_dir / "index.html").exists():
+    # Mount Next.js static assets first (most specific)
+    _static = _frontend_dir / "_next" / "static"
+    if _static.is_dir():
+        app.mount("/_next/static", StaticFiles(directory=str(_static)), name="next-static")
+    # Mount the rest of the frontend (html=True enables index.html fallback)
+    app.mount("/", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")
