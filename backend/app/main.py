@@ -563,6 +563,7 @@ async def unhandled_handler(request, exc: Exception):
 import os
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import FileResponse as StarletteFileResponse
 
 _frontend_dir = Path(os.environ.get("BLUEOCEAN_FRONTEND_DIR", "/app/frontend_out"))
 if _frontend_dir.is_dir() and (_frontend_dir / "index.html").exists():
@@ -570,5 +571,15 @@ if _frontend_dir.is_dir() and (_frontend_dir / "index.html").exists():
     _static = _frontend_dir / "_next" / "static"
     if _static.is_dir():
         app.mount("/_next/static", StaticFiles(directory=str(_static)), name="next-static")
-    # Mount the rest of the frontend (html=True enables index.html fallback)
-    app.mount("/", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")
+
+    _index_html = _frontend_dir / "index.html"
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        """SPA catch-all: serve the file if it exists, otherwise index.html."""
+        # Try to serve the exact file first (favicon.ico, manifest.json, etc.)
+        file_path = _frontend_dir / full_path
+        if file_path.is_file():
+            return StarletteFileResponse(str(file_path))
+        # For everything else (dynamic routes), serve index.html
+        return StarletteFileResponse(str(_index_html))
