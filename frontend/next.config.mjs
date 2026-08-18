@@ -1,12 +1,13 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  // Static export for GitHub Pages / static hosting
-  output: "export",
-  trailingSlash: true,
   images: { unoptimized: true },
-  // Disable rewrites for static export (API calls go directly to backend)
-  // rewrites are only used in local development
 };
+
+// Only enable static export for production builds (GitHub Pages)
+if (process.env.NODE_ENV === 'production' && process.env.STATIC_EXPORT === '1') {
+  nextConfig.output = 'export';
+  nextConfig.trailingSlash = true;
+}
 
 export default nextConfig;

@@ -254,21 +254,31 @@ def country_cities(cca2: str):
         except Exception:
             en_names = {}
 
+    from .services.dedup import are_same_city
+
     out = []
-    seen_names: set[str] = set()
     seen_qids: set[str] = set()
+    seen_displays: list[str] = []  # keep for fuzzy dedup
+    seen_pops: list[int] = []  # population for cross-script dedup
     for c in cands:
         cname = c.get("label") or c.get("name") or ""
         if not cname:
             continue
         en = c.get("qid") and en_names.get(c["qid"])
         display = en or cname
-        # Deduplicate by English name OR Wikidata QID (same city, different divisions)
-        name_lower = display.lower().strip()
+        pop = c.get("pop") or 0
+        # Deduplicate by English name, Wikidata QID, fuzzy name match, or population proximity
         qid = c.get("qid")
-        if name_lower in seen_names or (qid and qid in seen_qids):
+        if qid and qid in seen_qids:
             continue
-        seen_names.add(name_lower)
+        display_lower = display.lower().strip()
+        if any(are_same_city(display, s) for s in seen_displays):
+            continue
+        # Cross-script dedup: same population (within 5%) likely means same city
+        if pop > 0 and any(abs(pop - sp) / max(sp, 1) < 0.05 for sp in seen_pops):
+            continue
+        seen_displays.append(display)
+        seen_pops.append(pop)
         if qid:
             seen_qids.add(qid)
         city_id = f"{slugify(display)}-{cc}"
