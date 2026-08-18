@@ -1,0 +1,60 @@
+name: Deploy Frontend to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build with Next.js (static export)
+        working-directory: frontend
+        run: |
+          # Enable static export for GitHub Pages
+          sed -i 's|// output: "export"|output: "export"|' next.config.mjs
+          sed -i 's|// trailingSlash: true|trailingSlash: true|' next.config.mjs
+          sed -i 's|// images: { unoptimized: true }|images: { unoptimized: true }|' next.config.mjs
+          npm run build
+        env:
+          NEXT_PUBLIC_API_URL: https://blue-ocean-api.onrender.com/api
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: frontend/out
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

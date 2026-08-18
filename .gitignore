@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+backend/.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pip/
+
+# Build output
+frontend/.next/
+frontend/out/
+*.egg-info/
+dist/
+build/
+
+# Data files (large, should not be in git)
+backend/data/places.sqlite
+backend/data/cache.sqlite
+backend/data/snapshots/
+backend/data/exports/
+*.db
+*.sqlite
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Freebuff internal
+.freebuff/
+
+# Logs
+*.log
+*.log.err
+server.log
+
+# Tools (local runtimes)
+.tools/**
+.tools/*
+
+# Taxonomy sample (regenerated)
+backend/taxonomy_sample.json

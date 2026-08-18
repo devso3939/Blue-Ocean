@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: blue-ocean-api
+    runtime: python
+    buildCommand: cd backend && pip install -r requirements.txt
+    startCommand: cd backend && python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12"
+      - key: BLUEOCEAN_DATA_DIR
+        value: /data
+    disk:
+      name: blue-ocean-data
+      mountPath: /data
+      sizeGB: 10
