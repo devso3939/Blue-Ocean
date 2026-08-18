@@ -1,0 +1,19 @@
+app = "blue-ocean-api"
+primary_region = "ams"
+
+[build]
+
+[http_service]
+  internal_port = 8010
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[env]
+  PYTHON_VERSION = "3.12"
+  BLUEOCEAN_DATA_DIR = "/data"
+
+[mounts]
+  source = "blue_ocean_data"
+  destination = "/data"
