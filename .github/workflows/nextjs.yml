@@ -48,12 +48,7 @@ jobs:
 
       - name: Build with Next.js
         working-directory: frontend
-        run: |
-          # Enable static export for GitHub Pages
-          sed -i 's|// output: "export"|output: "export"|' next.config.mjs
-          sed -i 's|// trailingSlash: true|trailingSlash: true|' next.config.mjs
-          sed -i 's|// images: { unoptimized: true }|images: { unoptimized: true }|' next.config.mjs
-          npm run build
+        run: npm run build
         env:
           NEXT_PUBLIC_API_URL: https://blue-ocean-api.onrender.com/api
 
