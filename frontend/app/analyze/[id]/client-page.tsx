@@ -413,64 +413,8 @@ export default function AnalysisPage({ id }: { id: string }) {
       )}
 
       {/* Demand signals */}
-      {analysis.methodology?.demand_detection && (
-        <Card className="border-emerald-500/30 bg-gradient-to-br from-emerald-500/10 to-transparent">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <TrendingUp className="h-4 w-4 text-emerald-400" /> Demand Signals
-              <Badge variant="secondary" className="text-[10px]">
-                from Google Trends, Reddit, Wikipedia
-              </Badge>
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {(() => {
-              const dd = analysis.methodology.demand_detection;
-              return (
-                <div className="space-y-3">
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-500/20 text-lg font-bold text-emerald-400">
-                      {dd.score}
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium">Demand Score</p>
-                      <p className="text-xs text-muted-foreground">{dd.explanation}</p>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-3 text-xs">
-                    {dd.normalized?.google_trends > 0 && (
-                      <div className="rounded-lg bg-muted/50 p-2">
-                        <p className="text-muted-foreground">Google Trends</p>
-                        <p className="font-medium">{dd.normalized.google_trends}/100</p>
-                      </div>
-                    )}
-                    {dd.normalized?.reddit > 0 && (
-                      <div className="rounded-lg bg-muted/50 p-2">
-                        <p className="text-muted-foreground">Reddit Activity</p>
-                        <p className="font-medium">{dd.normalized.reddit}/100</p>
-                      </div>
-                    )}
-                    {dd.normalized?.wikipedia > 0 && (
-                      <div className="rounded-lg bg-muted/50 p-2">
-                        <p className="text-muted-foreground">Knowledge Demand</p>
-                        <p className="font-medium">{dd.normalized.wikipedia}/100</p>
-                      </div>
-                    )}
-                    {dd.normalized?.web_density > 0 && (
-                      <div className="rounded-lg bg-muted/50 p-2">
-                        <p className="text-muted-foreground">Web Presence</p>
-                        <p className="font-medium">{dd.normalized.web_density}/100</p>
-                      </div>
-                    )}
-                  </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    Sources: {dd.sources?.join(', ') || 'Calculated'} · Demand adds up to 15% to the final opportunity score.
-                  </p>
-                </div>
-              );
-            })()}
-          </CardContent>
-        </Card>
+      {m.demand_detection && (
+        <DemandCard demand={m.demand_detection as Record<string, any>} />
       )}
 
       {/* Market context */}
@@ -958,5 +902,47 @@ function StartupEstimate({ market }: { market: MarketContext }) {
         )}
       </div>
     </div>
+  );
+}
+
+function DemandCard({ demand }: { demand: any }) {
+  if (!demand) return null;
+  return (
+    <Card className="border-emerald-500/30 bg-gradient-to-br from-emerald-500/10 to-transparent">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <TrendingUp className="h-4 w-4 text-emerald-400" /> Demand Signals
+          <Badge variant="secondary" className="text-[10px]">from Google Trends, Reddit, Wikipedia</Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-500/20 text-lg font-bold text-emerald-400">
+              {demand.score}
+            </div>
+            <div>
+              <p className="text-sm font-medium">Demand Score</p>
+              <p className="text-xs text-muted-foreground">{demand.explanation}</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 text-xs">
+            {(demand.normalized?.google_trends ?? 0) > 0 && (
+              <div className="rounded-lg bg-muted/50 p-2"><p className="text-muted-foreground">Google Trends</p><p className="font-medium">{demand.normalized.google_trends}/100</p></div>
+            )}
+            {(demand.normalized?.reddit ?? 0) > 0 && (
+              <div className="rounded-lg bg-muted/50 p-2"><p className="text-muted-foreground">Reddit Activity</p><p className="font-medium">{demand.normalized.reddit}/100</p></div>
+            )}
+            {(demand.normalized?.wikipedia ?? 0) > 0 && (
+              <div className="rounded-lg bg-muted/50 p-2"><p className="text-muted-foreground">Knowledge Demand</p><p className="font-medium">{demand.normalized.wikipedia}/100</p></div>
+            )}
+            {(demand.normalized?.web_density ?? 0) > 0 && (
+              <div className="rounded-lg bg-muted/50 p-2"><p className="text-muted-foreground">Web Presence</p><p className="font-medium">{demand.normalized.web_density}/100</p></div>
+            )}
+          </div>
+          <p className="text-[11px] text-muted-foreground">Sources: {demand.sources?.join(', ') || 'Calculated'} · Demand adds up to 15% to the final opportunity score.</p>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
