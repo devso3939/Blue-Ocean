@@ -11,7 +11,7 @@ from typing import Any, Callable, Optional
 from .. import config
 from ..cache import cache
 from ..models import CityMeta, OpportunitiesResult, OpportunityRow, PeerCity
-from ..taxonomy import FAMILY_LABEL, is_commercial, label_for
+from ..taxonomy import FAMILY_LABEL, get_category, is_commercial, label_for
 from . import analysis as analysis_service
 from . import peers as peers_service
 from . import snapshot as snapshot_service
@@ -56,17 +56,27 @@ def scan_opportunities(city_id: str, filters: Optional[dict[str, Any]] = None,
             pass
 
     if progress:
-        progress("loading", 0.1, "Loading city snapshot…")
+        progress("loading", 0.05, "Loading city snapshot…")
     city = snapshot_service.ensure_city(city_id)
-    snap = snapshot_service.get_or_build_snapshot(city, progress=progress, force=force)
+
+    def _snap_progress(stage: str, frac: float, msg: str) -> None:
+        if progress:
+            progress(stage, 0.05 + frac * 0.35, msg)
+
+    snap = snapshot_service.get_or_build_snapshot(city, progress=_snap_progress, force=force)
 
     if progress:
-        progress("peers", 0.35, "Preparing peer cities…")
-    peers, peer_info = peers_service.select_peers(city, progress=progress)
-    peers = peers_service.ensure_peer_snapshots(peers, progress=progress)
+        progress("peers", 0.42, "Preparing peer cities…")
+
+    def _peer_progress(stage: str, frac: float, msg: str) -> None:
+        if progress:
+            progress(stage, 0.42 + frac * 0.28, msg)
+
+    peers, peer_info = peers_service.select_peers(city, progress=_peer_progress)
+    peers = peers_service.ensure_peer_snapshots(peers, progress=_peer_progress)
 
     if progress:
-        progress("analyzing", 0.7, "Aggregating category counts…")
+        progress("analyzing", 0.72, "Aggregating category counts…")
 
     # Candidates come from leaf counts (specific business types, no taxonomy
     # roots); counts are computed LIVE from the DB with taxonomy equivalents
@@ -174,6 +184,24 @@ def scan_opportunities(city_id: str, filters: Optional[dict[str, Any]] = None,
                 p.per_10k = round(p.count / p.population * 10000, 4)
 
         stats = analysis_service.compute_stats(cat, city_count, city.population, peer_rows_for_stats, context)
+
+        # Demand boost: increase score for categories with strong demand signals
+        try:
+            from .demand import compute_demand_score
+            cat_info = get_category(cat)
+            aliases = cat_info.get("aliases", []) if cat_info else []
+            demand = compute_demand_score(
+                category_label=stats.label,
+                city_name=city.name,
+                country_name=city.country,
+                category_aliases=aliases,
+            )
+            if demand and demand.get("score", 0) > 0:
+                demand_bonus = round(demand["score"] * 0.15)  # up to +15 points
+                stats.opportunity_score = min(100, (stats.opportunity_score or 0) + demand_bonus)
+                stats.score_label = analysis_service.score_label(stats.opportunity_score)
+        except Exception:
+            pass
 
         if stats.opportunity_score is None:
             continue

@@ -418,7 +418,7 @@ def analyze_category(city_id: str, category_id: str, progress: ProgressFn | None
     cached analysis.
     """
     if progress:
-        progress("resolving", 0.05, "Loading city…")
+        progress("resolving", 0.02, "Loading city…")
     city = snapshot_service.ensure_city(city_id)
     city_id = city.city_id  # canonical id (case/format-normalized)
 
@@ -434,17 +434,30 @@ def analyze_category(city_id: str, category_id: str, progress: ProgressFn | None
             except Exception:
                 pass
 
-    if progress:
-        progress("loading", 0.15, f"Loading businesses for {city.name}…")
-    snap = snapshot_service.get_or_build_snapshot(city, progress=progress, force=force)
+    # Progress budget: 0-10% resolving, 10-50% loading/categorizing,
+    # 50-80% peers, 80-95% analyzing, 95-100% done
+    def _city_progress(stage: str, frac: float, msg: str) -> None:
+        if progress:
+            # Map snapshot progress (0-1) into the 10-50% range
+            mapped = 0.10 + frac * 0.40
+            progress(stage, mapped, msg)
+
+    snap = snapshot_service.get_or_build_snapshot(city, progress=_city_progress, force=force)
 
     if progress:
-        progress("peers", 0.5, "Finding comparable cities…")
-    peers, peer_info = peers_service.select_peers(city, progress=progress)
-    peers = peers_service.ensure_peer_snapshots(peers, progress=progress)
+        progress("peers", 0.52, "Finding comparable cities…")
+
+    def _peer_progress(stage: str, frac: float, msg: str) -> None:
+        if progress:
+            # Map peer progress (0-1) into the 52-80% range
+            mapped = 0.52 + frac * 0.28
+            progress(stage, mapped, msg)
+
+    peers, peer_info = peers_service.select_peers(city, progress=_peer_progress)
+    peers = peers_service.ensure_peer_snapshots(peers, progress=_peer_progress)
 
     if progress:
-        progress("analyzing", 0.9, "Calculating market gap and scores…")
+        progress("analyzing", 0.82, "Calculating market gap and scores…")
 
     for p in peers:
         if p.snapshot_ready:
@@ -491,6 +504,34 @@ def analyze_category(city_id: str, category_id: str, progress: ProgressFn | None
             market_ctx = market_ctx.model_dump()
     except Exception:
         market_ctx = None
+
+    # Demand detection — real signals from Google Trends, Reddit, Wikipedia
+    demand_data = None
+    try:
+        from .demand import compute_demand_score
+        cat_info = get_category(category_id)
+        aliases = cat_info.get("aliases", []) if cat_info else []
+        demand_data = compute_demand_score(
+            category_label=stats.label,
+            city_name=city.name,
+            country_name=city.country,
+            category_aliases=aliases,
+        )
+    except Exception:
+        demand_data = None
+
+    # Enhance opportunity score with demand signal
+    if demand_data and demand_data.get("score", 0) > 0:
+        demand_weight = 0.15  # 15% of final score from demand
+        original_score = stats.opportunity_score or 0
+        demand_component = demand_data["score"] / 100 * 100  # normalize to 0-100
+        # Blend: original score (85%) + demand (15%)
+        blended = round(original_score * (1 - demand_weight) + demand_component * demand_weight)
+        stats.opportunity_score = min(100, max(0, blended))
+        stats.score_label = score_label(stats.opportunity_score)
+        if stats.score_components:
+            stats.score_components["demand_score"] = demand_data["score"]
+            stats.score_components["demand_weight"] = demand_weight
 
     places = snapshot_service.places_for_category(city_id, category_id, limit=3000)
 
@@ -549,6 +590,7 @@ def analyze_category(city_id: str, category_id: str, progress: ProgressFn | None
             f"{stats.score_components.get('market_size_score')})"
         ),
         "disclaimer": "Estimated supply gap is market intelligence, not guaranteed demand.",
+        "demand_detection": demand_data if demand_data else None,
     }
 
     analysis = MarketAnalysis(
