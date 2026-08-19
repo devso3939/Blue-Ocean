@@ -278,83 +278,40 @@ export async function queryBusinesses(
 
   onProgress?.(5, 'Downloading businesses from OpenStreetMap…');
 
-  // Split queries to avoid Overpass timeouts — amenity only for business types
+  // Single combined query with longer timeout — avoids multiple-request rate limiting
   const bbox = `${south},${west},${north},${east}`;
-  const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
-
-  // Q1: Food & drink amenities (small query)
-  const q1 = `[out:json][timeout:45];
+  
+  const query = `[out:json][timeout:90];
 (
-  node(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream"];
-  way(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream"];
-);
-out center body;`;
-
-  // Q2: Healthcare & finance amenities
-  const q2 = `[out:json][timeout:45];
-(
-  node(${bbox})["amenity"~"pharmacy|bank|hospital|clinic|dentist|veterinary"];
-  way(${bbox})["amenity"~"pharmacy|bank|hospital|clinic|dentist|veterinary"];
-);
-out center body;`;
-
-  // Q3: Other amenities (cinema, nightclub, car, library, school, etc.)
-  const q3 = `[out:json][timeout:45];
-(
-  node(${bbox})["amenity"~"cinema|nightclub|car_rental|library|post_office|school"];
-  way(${bbox})["amenity"~"cinema|nightclub|car_rental|library|post_office|school"];
-);
-out center body;`;
-
-  // Q4: Shops
-  const q4 = `[out:json][timeout:45];
-(
+  node(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream|pharmacy|bank|hospital|clinic|dentist|cinema|nightclub|car_rental|veterinary|library|post_office|school"];
+  way(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream|pharmacy|bank|hospital|clinic|dentist|cinema|nightclub|car_rental|veterinary|library|post_office|school"];
   node(${bbox})["shop"];
   way(${bbox})["shop"];
-);
-out center body;`;
-
-  // Q5: Tourism (hotels, hostels)
-  const q5 = `[out:json][timeout:45];
-(
   node(${bbox})["tourism"];
   way(${bbox})["tourism"];
-);
-out center body;`;
-
-  // Q6: Leisure (gyms, fitness, sports)
-  const q6 = `[out:json][timeout:45];
-(
   node(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall"];
   way(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall"];
 );
 out center body;`;
 
-  onProgress?.(10, 'Querying food & drink businesses…');
-  const d1 = await fetchOverpass(q1);
-  await wait(1500); // avoid rate limiting
-  onProgress?.(15, 'Querying healthcare & finance…');
-  const d2 = await fetchOverpass(q2);
-  await wait(1500);
-  onProgress?.(20, 'Querying entertainment & services…');
-  const d3 = await fetchOverpass(q3);
-  await wait(1500);
-  onProgress?.(25, 'Querying shops & retail…');
-  const d4 = await fetchOverpass(q4);
-  await wait(1500);
-  onProgress?.(30, 'Querying hotels & tourism…');
-  const d5 = await fetchOverpass(q5);
-  await wait(1500);
-  onProgress?.(35, 'Querying gyms & fitness centers…');
-  const d6 = await fetchOverpass(q6);
+  onProgress?.(10, 'Downloading businesses from OpenStreetMap…');
+  let data = await fetchOverpass(query, 90);
 
-  // Merge all results
-  const allElements: any[] = [];
-  for (const d of [d1, d2, d3, d4, d5, d6]) {
-    if (d?.elements) allElements.push(...d.elements);
+  // Fallback: if the combined query fails, try just shops + amenities with simpler query
+  if (!data?.elements?.length) {
+    onProgress?.(20, 'Trying alternative query…');
+    const simpleQuery = `[out:json][timeout:60];
+(
+  node(${bbox})["amenity"~"cafe|restaurant|bar|fast_food|pharmacy|bank"];
+  node(${bbox})["shop"];
+  node(${bbox})["leisure"~"fitness_centre|sports_centre"];
+  way(${bbox})["amenity"~"cafe|restaurant|bar|fast_food|pharmacy|bank"];
+  way(${bbox})["shop"];
+  way(${bbox})["leisure"~"fitness_centre|sports_centre"];
+);
+out center body;`;
+    data = await fetchOverpass(simpleQuery, 60);
   }
-  
-  const data = allElements.length > 0 ? { elements: allElements } : null;
 
   onProgress?.(50, 'Categorizing businesses…');
 
