@@ -10,6 +10,7 @@ import {
   type DemandSignal,
   type OpportunityResult,
 } from './clientEngine';
+import CompareView from './CompareView';
 
 function fmtNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return '—';
@@ -82,6 +83,7 @@ const CAT_COLORS: Record<string, string> = {
 };
 
 export default function App() {
+  const [compareMode, setCompareMode] = useState(false);
   const [selectedCountry, setSelectedCountry] = useState('');
   const [cityQuery, setCityQuery] = useState('');
   const [cityResults, setCityResults] = useState<CityResult[]>([]);
@@ -479,6 +481,33 @@ export default function App() {
     URL.revokeObjectURL(url);
   }, [filteredBiz, selectedOppCategory, selectedCity]);
 
+  if (compareMode) {
+    return (
+      <div className="min-h-screen bg-background">
+        <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md">
+          <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4">
+            <div className="flex items-center gap-2">
+              <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 text-white">
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+              </div>
+              <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Compare Cities</span></span>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>
+              <button
+                onClick={() => setCompareMode(false)}
+                className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-border text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all"
+              >
+                ← Back to Analysis
+              </button>
+            </div>
+          </div>
+        </header>
+        <CompareView />
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
@@ -490,7 +519,15 @@ export default function App() {
             </div>
             <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span></span>
           </div>
-          <div className="text-xs text-muted-foreground">OpenStreetMap · Nominatim · Wikipedia</div>
+          <div className="flex items-center gap-3">
+            <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>
+            <button
+              onClick={() => setCompareMode(!compareMode)}
+              className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${compareMode ? 'bg-primary text-primary-foreground' : 'border border-border text-muted-foreground hover:text-foreground hover:border-primary/50'}`}
+            >
+              {compareMode ? '← Back to Analysis' : '🏙️ Compare Cities'}
+            </button>
+          </div>
         </div>
       </header>
 
