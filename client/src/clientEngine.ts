@@ -60,6 +60,24 @@ export interface Business {
   openingHours: string;
   brand: string;
   cuisine: string;
+  description: string;
+  stars: string;          // rating 1-5
+  wheelchair: string;     // yes/no/limited
+  outdoor_seating: string; // yes/no
+  takeaway: string;       // yes/no
+  delivery: string;       // yes/no
+  smoking: string;        // yes/no/no
+  payment: string;        // cards/cash
+  diet_vegetarian: string;
+  diet_vegan: string;
+  diet_halal: string;
+  internet_access: string;
+  facebook: string;
+  instagram: string;
+  twitter: string;
+  wikidata: string;
+  wikipedia: string;
+  image: string;
 }
 
 export const CATEGORY_QUERIES: Record<string, { label: string }> = {
@@ -296,6 +314,24 @@ out center body;`;
       openingHours: tags.opening_hours || '',
       brand: tags.brand || '',
       cuisine: tags.cuisine || '',
+      description: tags.description || tags['description:en'] || '',
+      stars: tags.stars || tags.rating || '',
+      wheelchair: tags.wheelchair || '',
+      outdoor_seating: tags.outdoor_seating || '',
+      takeaway: tags.takeaway || '',
+      delivery: tags.delivery || '',
+      smoking: tags.smoking || '',
+      payment: tags.payment_cards || '',
+      diet_vegetarian: tags['diet:vegetarian'] || tags.vegetarian || '',
+      diet_vegan: tags['diet:vegan'] || tags.vegan || '',
+      diet_halal: tags['diet:halal'] || tags.halal || '',
+      internet_access: tags.internet_access || tags.wifi || '',
+      facebook: tags['contact:facebook'] || tags.facebook || '',
+      instagram: tags['contact:instagram'] || tags.instagram || '',
+      twitter: tags['contact:twitter'] || tags.twitter || '',
+      wikidata: tags.wikidata || '',
+      wikipedia: tags.wikipedia || '',
+      image: tags.image || tags['image:photo'] || tags['image:street_level'] || '',
     };
 
     if (!results.has(category)) results.set(category, []);
