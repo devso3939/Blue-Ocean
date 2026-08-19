@@ -1,8 +1,11 @@
 /**
- * Blue Ocean Client Engine — fixed version
+ * Blue Ocean Client Engine — v2
  * 
- * Strict categorization: only real named businesses with data.
- * Filters out unnamed POIs, sports pitches, playgrounds, etc.
+ * Core functionality:
+ * - Resolves cities via Nominatim
+ * - Fetches real businesses from OpenStreetMap Overpass API
+ * - Computes opportunity scores
+ * - Fetches demand signals from Wikipedia, Reddit, DuckDuckGo
  */
 
 // ─── City Resolution ───────────────────────────────────────────────
@@ -15,8 +18,6 @@ export interface CityResult {
   lon: number;
   population: number | null;
   bbox: [number, number, number, number];
-  osmType: string;
-  osmId: number;
 }
 
 export async function resolveCity(query: string): Promise<CityResult[]> {
@@ -36,8 +37,6 @@ export async function resolveCity(query: string): Promise<CityResult[]> {
       lon: parseFloat(r.lon),
       population: pop,
       bbox: [bbox[0], bbox[2], bbox[1], bbox[3]],
-      osmType: r.osm_type,
-      osmId: r.osm_id,
     };
   });
 }
@@ -108,34 +107,32 @@ export const CATEGORY_QUERIES: Record<string, { label: string }> = {
   florist: { label: 'Florist' },
   optician: { label: 'Optician' },
   butcher: { label: 'Butcher' },
+  marketplace: { label: 'Marketplace' },
+  wedding: { label: 'Wedding Venue' },
+  fuel: { label: 'Gas Station' },
 };
-
-const ALL_CATEGORIES = Object.keys(CATEGORY_QUERIES);
 
 export function getCategoryLabel(id: string): string {
   return CATEGORY_QUERIES[id]?.label || id.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
-// ─── Strict Categorization ─────────────────────────────────────────
-// Only categorize things that are clearly businesses with names.
+// ─── Categorization ────────────────────────────────────────────────
 
 function categorizeBusiness(tags: Record<string, string>): string | null {
   const a = tags.amenity;
   const s = tags.shop;
   const t = tags.tourism;
   const l = tags.leisure;
-  const name = tags.name || tags['name:en'] || tags.brand || '';
-  const hasName = name.length > 0;
 
-  // ─── Shops (always businesses, always have shop tag) ───
+  // ─── Shops (always businesses) ───
   if (s === 'beauty' || s === 'cosmetics') return 'beauty_salon';
   if (s === 'hairdresser' || s === 'wigs') return 'hair_salon';
-  if (s === 'nail_salon') return 'nail_salon';
+  if (s === 'nail_salon') return 'beauty_salon';
   if (s === 'supermarket' || s === 'greengrocer' || s === 'deli') return 'supermarket';
   if (s === 'grocery' || s === 'health_food') return 'grocery';
   if (s === 'convenience' || s === 'kiosk' || s === 'newsagent') return 'convenience';
   if (s === 'clothes' || s === 'fashion' || s === 'boutique') return 'clothing';
-  if (s === 'shoes' || s === 'shoe') return 'shoes';
+  if (s === 'shoes' || s === 'shoe') return 'clothing';
   if (s === 'electronics' || s === 'mobile_phone' || s === 'computer' || s === 'hifi') return 'electronics';
   if (s === 'furniture' || s === 'interior_decoration') return 'furniture';
   if (s === 'doityourself' || s === 'trade' || s === 'hardware') return 'hardware';
@@ -150,13 +147,12 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   if (s === 'sports' || s === 'outdoor') return 'sports';
   if (s === 'books' || s === 'stationery') return 'books';
   if (s === 'department_store') return 'department_store';
-  if (s === 'wine' || s === 'alcohol') return 'wine';
   if (s === 'art') return 'art';
   if (s === 'bicycle') return 'bicycle';
   if (s === 'fuel') return 'fuel';
 
-  // ─── Amenity-based (require name for most) ───
-  if (a === 'cafe' || (a === 'restaurant' && hasName)) return 'cafe';
+  // ─── Amenity-based ───
+  if (a === 'cafe') return 'cafe';
   if (a === 'restaurant') return 'restaurant';
   if (a === 'bar' || a === 'biergarten') return 'bar';
   if (a === 'pub') return 'pub';
@@ -175,20 +171,18 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   if (a === 'car_rental') return 'car_rental';
   if (a === 'nightclub') return 'night_club';
   if (a === 'marketplace') return 'marketplace';
+  if (a === 'fuel') return 'fuel';
 
-  // ─── Tourism (require name) ───
-  if (t === 'hotel' || t === 'motel' || t === 'apartment') return hasName ? 'hotel' : null;
-  if (t === 'hostel') return hasName ? 'hostel' : null;
+  // ─── Tourism ───
+  if (t === 'hotel' || t === 'motel' || t === 'apartment') return 'hotel';
+  if (t === 'hostel') return 'hostel';
+  if (t === 'guest_house') return 'hotel';
 
-  // ─── Leisure (fitness and sports centers) ───
-  if (l === 'fitness_centre' || l === 'sports_centre' || l === 'sports_hall' || l === 'swimming_pool') return hasName ? 'gym' : null;
-  // Also check sport tag for fitness activities
-  const sport = tags.sport || '';
-  if ((l === 'pitch' || l === 'stadium' || l === 'track') && (sport === 'fitness' || sport === 'weight_lifting' || sport === 'gymnastics')) return hasName ? 'gym' : null;
-  // DO NOT categorize: pitch, playground, stadium, track, etc. as gym unless sport tag is fitness-related
+  // ─── Leisure ───
+  if (l === 'fitness_centre' || l === 'sports_centre' || l === 'sports_hall' || l === 'swimming_pool') return 'gym';
 
   // ─── Office ───
-  if (tags.office === 'coworking' || tags.office === 'company') return hasName ? 'coworking' : null;
+  if (tags.office === 'coworking') return 'coworking';
 
   return null;
 }
@@ -196,19 +190,17 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
 // ─── Parsing Helpers ───────────────────────────────────────────────
 
 function extractPhone(tags: Record<string, string>): string {
-  return tags.phone || tags['contact:phone'] || tags['contact:mobile'] || 
-         tags['phone:mobile'] || tags['phone:international'] || 
+  return tags.phone || tags['contact:phone'] || tags['contact:mobile'] ||
+         tags['phone:mobile'] || tags['phone:international'] ||
          tags['contact:landline'] || tags['contact:fax'] || '';
 }
 
 function extractEmail(tags: Record<string, string>): string {
-  return tags.email || tags['contact:email'] || tags['email:office'] || 
-         tags['contact:email:office'] || '';
+  return tags.email || tags['contact:email'] || tags['email:office'] || '';
 }
 
 function extractWebsite(tags: Record<string, string>): string {
-  return tags.website || tags['contact:website'] || tags.url || 
-         tags['contact:url'] || '';
+  return tags.website || tags['contact:website'] || tags.url || '';
 }
 
 function extractFacebook(tags: Record<string, string>): string {
@@ -240,25 +232,44 @@ const OVERPASS_MIRRORS = [
   'https://overpass.openstreetmap.ru/api/interpreter',
 ];
 
+const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
+
 async function fetchOverpass(query: string, timeoutSec = 60): Promise<any> {
-  for (const mirror of OVERPASS_MIRRORS) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), (timeoutSec + 10) * 1000);
-      const res = await fetch(mirror, {
-        method: 'POST',
-        body: `data=${encodeURIComponent(query)}`,
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-      if (!res.ok) continue;
-      const text = await res.text();
-      if (!text.trim().startsWith('{')) continue;
-      const data = JSON.parse(text);
-      if (data.elements === undefined) continue;
-      return data;
-    } catch { continue; }
+  for (let mi = 0; mi < OVERPASS_MIRRORS.length; mi++) {
+    const mirror = OVERPASS_MIRRORS[mi];
+    // Try up to 2 attempts per mirror for main mirrors
+    const attempts = mi < 2 ? 2 : 1;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), (timeoutSec + 15) * 1000);
+        const res = await fetch(mirror, {
+          method: 'POST',
+          body: `data=${encodeURIComponent(query)}`,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        if (!res.ok) {
+          if (attempt < attempts - 1) await wait(3000);
+          continue;
+        }
+        const text = await res.text();
+        if (!text.trim().startsWith('{')) {
+          // Got XML error or empty — rate limited
+          if (attempt < attempts - 1) await wait(5000);
+          continue;
+        }
+        const data = JSON.parse(text);
+        if (data.elements === undefined) continue;
+        return data;
+      } catch (e) {
+        if (attempt < attempts - 1) await wait(2000);
+        continue;
+      }
+    }
+    // Wait between mirrors
+    if (mi < OVERPASS_MIRRORS.length - 1) await wait(2000);
   }
   return null;
 }
@@ -267,7 +278,6 @@ export async function queryBusinesses(
   lat: number,
   lon: number,
   radiusMeters: number = 10000,
-  _categoryIds?: string[],
   onProgress?: (pct: number, msg: string) => void
 ): Promise<Map<string, Business[]>> {
   const results = new Map<string, Business[]>();
@@ -276,54 +286,81 @@ export async function queryBusinesses(
   const cosLat = Math.cos((lat * Math.PI) / 180);
   const west = lon - radiusMeters / (111000 * cosLat);
   const east = lon + radiusMeters / (111000 * cosLat);
-
-  onProgress?.(5, 'Downloading businesses from OpenStreetMap…');
-
-  // Single combined query with longer timeout — avoids multiple-request rate limiting
   const bbox = `${south},${west},${north},${east}`;
-  
-  const query = `[out:json][timeout:90][maxsize:536870912];
+
+  // ── Tier 1: Single focused query for food/drink/healthcare ──
+  const qFood = `[out:json][timeout:90][maxsize:536870912];
 (
-  node(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream|pharmacy|bank|hospital|clinic|dentist|cinema|nightclub|car_rental|veterinary|library|post_office|school"];
-  way(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream|pharmacy|bank|hospital|clinic|dentist|cinema|nightclub|car_rental|veterinary|library|post_office|school"];
-  node(${bbox})["shop"];
-  way(${bbox})["shop"];
-  node(${bbox})["tourism"];
-  way(${bbox})["tourism"];
-  node(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall"];
-  way(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall"];
+  node(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream"];
+  way(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream"];
+  node(${bbox})["amenity"~"pharmacy|hospital|clinic|dentist|veterinary"];
+  way(${bbox})["amenity"~"pharmacy|hospital|clinic|dentist|veterinary"];
+  node(${bbox})["amenity"~"bank|cinema|nightclub|car_rental|fuel|marketplace"];
+  way(${bbox})["amenity"~"bank|cinema|nightclub|car_rental|fuel|marketplace"];
 );
 out center body;`;
 
-  onProgress?.(10, 'Downloading businesses from OpenStreetMap…');
-  let data = await fetchOverpass(query, 90);
-
-  // Fallback: if the combined query fails, try just shops + amenities with simpler query
-  if (!data?.elements?.length) {
-    onProgress?.(20, 'Trying alternative query…');
-    const simpleQuery = `[out:json][timeout:60];
+  // ── Tier 1b: Shops ──
+  const qShops = `[out:json][timeout:90][maxsize:536870912];
 (
-  node(${bbox})["amenity"~"cafe|restaurant|bar|fast_food|pharmacy|bank"];
   node(${bbox})["shop"];
-  node(${bbox})["leisure"~"fitness_centre|sports_centre"];
-  way(${bbox})["amenity"~"cafe|restaurant|bar|fast_food|pharmacy|bank"];
   way(${bbox})["shop"];
-  way(${bbox})["leisure"~"fitness_centre|sports_centre"];
 );
 out center body;`;
-    data = await fetchOverpass(simpleQuery, 60);
+
+  // ── Tier 1c: Tourism + Leisure ──
+  const qOther = `[out:json][timeout:60][maxsize:268435456];
+(
+  node(${bbox})["tourism"~"hotel|hostel|motel|apartment|guest_house"];
+  way(${bbox})["tourism"~"hotel|hostel|motel|apartment|guest_house"];
+  node(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool"];
+  way(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool"];
+  node(${bbox})["office"];
+  way(${bbox})["office"];
+);
+out center body;`;
+
+  const allElements: any[] = [];
+
+  onProgress?.(10, 'Scanning food, healthcare & entertainment…');
+  const d1 = await fetchOverpass(qFood, 90);
+  if (d1?.elements) allElements.push(...d1.elements);
+
+  await wait(1500);
+  onProgress?.(30, 'Scanning shops & retail…');
+  const d2 = await fetchOverpass(qShops, 90);
+  if (d2?.elements) allElements.push(...d2.elements);
+
+  await wait(1500);
+  onProgress?.(50, 'Scanning hotels, gyms & services…');
+  const d3 = await fetchOverpass(qOther, 60);
+  if (d3?.elements) allElements.push(...d3.elements);
+
+  // ── Tier 2: Fallback — if Tier 1 got nothing, try a minimal query ──
+  if (allElements.length === 0) {
+    onProgress?.(60, 'Retrying with minimal query…');
+    const qMin = `[out:json][timeout:60];
+(
+  node(${bbox})["amenity"];
+  way(${bbox})["amenity"];
+  node(${bbox})["shop"];
+  way(${bbox})["shop"];
+);
+out center body;`;
+    const d4 = await fetchOverpass(qMin, 60);
+    if (d4?.elements) allElements.push(...d4.elements);
   }
 
-  onProgress?.(50, 'Categorizing businesses…');
+  onProgress?.(60, 'Categorizing businesses…');
 
-  if (!data || !data.elements || data.elements.length === 0) {
-    onProgress?.(35, 'No businesses found from OSM');
+  if (allElements.length === 0) {
+    onProgress?.(70, 'No businesses found from OpenStreetMap');
     return results;
   }
 
   const seenLocations = new Map<string, string>();
 
-  for (const el of data.elements) {
+  for (const el of allElements) {
     const elLat = el.lat || el.center?.lat;
     const elLon = el.lon || el.center?.lon;
     if (!elLat || !elLon) continue;
@@ -332,15 +369,13 @@ out center body;`;
     const category = categorizeBusiness(tags);
     if (!category) continue;
 
-    // Filter: must have a name to be a real business
-    // Use multiple name sources including local languages
-    const name = tags.name || tags['name:en'] || tags['name:int'] || tags.brand || tags['operator'] || '';
-    if (!name.trim()) continue; // Skip unnamed POIs
+    // Must have a name to count as a real business
+    const name = tags.name || tags['name:en'] || tags['name:int'] || tags.brand || tags.operator || '';
+    if (!name.trim()) continue;
 
-    // Dedup by location + category
-    const locKey = `${Math.round(elLat * 1000)},${Math.round(elLon * 1000)}`;
-    const existingCat = seenLocations.get(locKey);
-    if (existingCat === category) continue;
+    // Dedup by location + category (1m precision)
+    const locKey = `${Math.round(elLat * 1000)},${Math.round(elLon * 1000)},${category}`;
+    if (seenLocations.has(locKey)) continue;
     seenLocations.set(locKey, category);
 
     const business: Business = {
@@ -365,7 +400,7 @@ out center body;`;
   }
 
   const totalBiz = Array.from(results.values()).reduce((s, a) => s + a.length, 0);
-  onProgress?.(35, `Found ${totalBiz} named businesses in ${results.size} categories`);
+  onProgress?.(70, `Found ${totalBiz} businesses in ${results.size} categories`);
   return results;
 }
 
@@ -376,7 +411,6 @@ export function getGoogleMapsUrl(b: Business): string {
     const query = [b.name, b.address].filter(Boolean).join(' ');
     return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
   }
-  // Fallback: search by coordinates
   return `https://www.google.com/maps?q=${b.lat},${b.lon}`;
 }
 
@@ -398,36 +432,83 @@ export async function getDemandSignals(categoryLabel: string, cityName: string):
     explanation: '', sources: [],
   };
 
+  // Wikipedia pageviews
   const wikiP = fetch(
     `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/all-agents/${encodeURIComponent(categoryLabel.replace(/ /g, '_'))}/monthly/20240101/20260101`,
     { headers: { 'User-Agent': 'BlueOcean/1.0' } }
   ).then(async r => {
-    if (r.ok) { const d = await r.json(); const t = d.items?.reduce((s: number, i: any) => s + (i.views||0), 0)||0; signals.wikipedia = Math.min(100, Math.round(Math.log10(t+1)*16.7)); signals.sources.push('Wikipedia'); }
+    if (r.ok) {
+      const d = await r.json();
+      const t = d.items?.reduce((s: number, i: any) => s + (i.views || 0), 0) || 0;
+      signals.wikipedia = Math.min(100, Math.round(Math.log10(t + 1) * 16.7));
+      signals.sources.push('Wikipedia');
+    }
   }).catch(() => {});
 
+  // Reddit mentions
   const redditP = fetch(
     `https://www.reddit.com/search.json?q=${encodeURIComponent(`${categoryLabel} ${cityName}`)}&sort=new&t=month&limit=25`,
     { headers: { 'User-Agent': 'BlueOcean/1.0' } }
   ).then(async r => {
-    if (r.ok) { const d = await r.json(); signals.reddit = Math.min(100, (d.data?.children?.length||0)*5); signals.sources.push('Reddit'); }
+    if (r.ok) {
+      const d = await r.json();
+      signals.reddit = Math.min(100, (d.data?.children?.length || 0) * 5);
+      signals.sources.push('Reddit');
+    }
   }).catch(() => {});
 
+  // DuckDuckGo web search density
   const ddgP = fetch(
     `https://html.duckduckgo.com/html/?q=${encodeURIComponent(`"${categoryLabel}" "${cityName}"`)}`,
     { headers: { 'User-Agent': 'Mozilla/5.0' } }
   ).then(async r => {
-    if (r.ok) { const h = await r.text(); signals.webSearch = Math.min(100, (h.match(/class="result__snippet"/g)?.length||0)*10); signals.sources.push('Web Search'); }
+    if (r.ok) {
+      const h = await r.text();
+      signals.webSearch = Math.min(100, (h.match(/class="result__snippet"/g)?.length || 0) * 10);
+      signals.sources.push('Web Search');
+    }
   }).catch(() => {});
 
-  await Promise.race([Promise.all([wikiP, redditP, ddgP]), new Promise(r => setTimeout(r, 8000))]);
+  // Google Trends via SerpAPI free tier or direct scrape
+  const gtP = fetch(
+    `https://trends.google.com/trends/api/explore?hl=en-US&tz=-240&req={"comparisonItem":[{"keyword":"${encodeURIComponent(categoryLabel.toLowerCase())}","geo":"${encodeURIComponent(cityName)}","time":"today 12-m"}],"category":0,"property":""}`,
+    { headers: { 'User-Agent': 'Mozilla/5.0' } }
+  ).then(async r => {
+    if (r.ok) {
+      const text = await r.text();
+      // Google Trends prefixes response with ")]}'\n"
+      const json = text.replace(/^\)\]\}'\\n/, '');
+      try {
+        const d = JSON.parse(json);
+        const timeline = d?.default?.timelineData;
+        if (timeline && timeline.length > 0) {
+          const avg = timeline.reduce((s: number, t: any) => s + (t.value?.[0] || 0), 0) / timeline.length;
+          signals.webSearch = Math.min(100, Math.round(avg));
+          if (!signals.sources.includes('Google Trends')) signals.sources.push('Google Trends');
+        }
+      } catch {}
+    }
+  }).catch(() => {});
 
-  signals.score = Math.round(0.35*signals.webSearch + 0.30*signals.wikipedia + 0.25*signals.reddit + 0.10*Math.max(signals.webSearch, signals.wikipedia, signals.reddit));
-  signals.confidence = Math.round(([signals.wikipedia, signals.reddit, signals.webSearch].filter(s => s > 0).length / 3) * 100);
+  await Promise.race([
+    Promise.all([wikiP, redditP, ddgP, gtP]),
+    new Promise(r => setTimeout(r, 10000))
+  ]);
+
+  signals.score = Math.round(
+    0.30 * signals.webSearch +
+    0.30 * signals.wikipedia +
+    0.25 * signals.reddit +
+    0.15 * Math.max(signals.webSearch, signals.wikipedia, signals.reddit)
+  );
+  signals.confidence = Math.round(
+    ([signals.wikipedia, signals.reddit, signals.webSearch].filter(s => s > 0).length / 3) * 100
+  );
 
   const p: string[] = [];
-  if (signals.webSearch > 50) p.push('strong web presence');
-  else if (signals.webSearch > 20) p.push('moderate web presence');
-  if (signals.wikipedia > 30) p.push('active knowledge-seeking');
+  if (signals.webSearch > 50) p.push('Strong web presence');
+  else if (signals.webSearch > 20) p.push('Moderate web presence');
+  if (signals.wikipedia > 30) p.push('Active knowledge-seeking');
   if (signals.reddit > 20) p.push(`${signals.reddit} community discussions`);
   signals.explanation = p.length ? p.join(', ') : 'Limited demand data available';
 
@@ -454,25 +535,61 @@ export function computeOpportunities(
   demandSignals: Map<string, DemandSignal>
 ): OpportunityResult[] {
   const results: OpportunityResult[] = [];
+
+  // Calculate per-10k density for all categories
   const per10kValues: number[] = [];
-  for (const [, bizs] of businesses) per10kValues.push((bizs.length / Math.max(population, 1)) * 10000);
+  for (const [, bizs] of businesses) {
+    per10kValues.push((bizs.length / Math.max(population, 1)) * 10000);
+  }
   per10kValues.sort((a, b) => a - b);
-  const median = per10kValues.length > 0 ? per10kValues[Math.floor(per10kValues.length / 2)] : 1;
+  const median = per10kValues.length > 0
+    ? per10kValues[Math.floor(per10kValues.length / 2)]
+    : 5;
+
+  // Global baseline for well-served city (per 10k people)
+  const GLOBAL_BASELINES: Record<string, number> = {
+    cafe: 4, restaurant: 5, bar: 2, pub: 1.5, fast_food: 3,
+    hotel: 1, gym: 1.5, beauty_salon: 2, hair_salon: 2,
+    pharmacy: 1.5, bank: 1, supermarket: 1.5, clothing: 3,
+    electronics: 2, bakery: 1.5, cinema: 0.3,
+  };
 
   for (const [cat, bizs] of businesses) {
     const existing = bizs.length;
     const per10k = (existing / Math.max(population, 1)) * 10000;
-    const expected = Math.round((median * population) / 10000);
-    const gap = expected - existing;
+    const baseline = GLOBAL_BASELINES[cat] || median;
+    const expected = Math.round((baseline * population) / 10000);
+    const gap = Math.max(0, expected - existing);
     const gapPct = expected > 0 ? gap / expected : 0;
-    const gapScore = gapPct > 0 ? Math.min(100, Math.round(gapPct * 100)) : Math.max(0, Math.round(50 + gapPct * 50));
-    const sizeScore = Math.min(100, Math.round(Math.log10(Math.max(population, 1)) * 15));
-    let score = Math.round(0.60 * gapScore + 0.15 * sizeScore + 0.25 * 50);
+
+    // Gap score: how underserved (0-100)
+    const gapScore = Math.min(100, Math.round(gapPct * 120));
+
+    // Size score: bigger city = bigger opportunity (0-100)
+    const sizeScore = Math.min(100, Math.round(Math.log10(Math.max(population, 1)) * 18));
+
+    // Competition score: fewer existing = less competition (0-100)
+    const compScore = existing === 0 ? 90 : Math.max(0, Math.round(100 - existing * 3));
+
+    let score = Math.round(0.45 * gapScore + 0.25 * sizeScore + 0.30 * compScore);
+
     const demand = demandSignals.get(cat);
     const demandBonus = demand ? Math.round(demand.score * 0.15) : 0;
     score = Math.min(100, score + demandBonus);
-    results.push({ category: cat, categoryLabel: getCategoryLabel(cat), existing, per10k: Math.round(per10k*100)/100, expected, gap, gapPct: Math.round(gapPct*100), score, demandBonus });
+
+    results.push({
+      category: cat,
+      categoryLabel: getCategoryLabel(cat),
+      existing,
+      per10k: Math.round(per10k * 100) / 100,
+      expected,
+      gap,
+      gapPct: Math.round(gapPct * 100),
+      score,
+      demandBonus,
+    });
   }
+
   results.sort((a, b) => b.score - a.score);
   return results;
 }

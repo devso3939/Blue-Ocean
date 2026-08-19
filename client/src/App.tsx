@@ -229,7 +229,7 @@ export default function App() {
 
     try {
       const biz = await queryBusinesses(
-        selectedCity.lat, selectedCity.lon, 10000, undefined,
+        selectedCity.lat, selectedCity.lon, 10000,
         (pct, msg) => { setProgress(pct); setLoadingStage(msg); }
       );
       setBusinesses(biz);
@@ -281,7 +281,7 @@ export default function App() {
       setProgress(5);
 
       const biz = await queryBusinesses(
-        selectedCity.lat, selectedCity.lon, 10000, undefined,
+        selectedCity.lat, selectedCity.lon, 10000,
         (pct, msg) => { setProgress(Math.max(pct, 5)); setLoadingStage(msg); }
       );
       setBusinesses(biz);

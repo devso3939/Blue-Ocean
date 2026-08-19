@@ -164,7 +164,7 @@ export default function CompareView() {
     setError('');
 
     try {
-      const biz = await queryBusinesses(city.lat, city.lon, 10000, undefined, (pct, msg) => {
+      const biz = await queryBusinesses(city.lat, city.lon, 10000, (pct, msg) => {
         setProgress(pct);
       });
       setProgress(70);

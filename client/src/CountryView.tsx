@@ -105,8 +105,6 @@ async function findTopCities(countryName: string, countryCode: string): Promise<
       lon: parseFloat(r.lon),
       population: pop,
       bbox: [bbox[0], bbox[2], bbox[1], bbox[3]],
-      osmType: r.osm_type,
-      osmId: r.osm_id,
     });
   }
 
@@ -188,7 +186,7 @@ export default function CountryView() {
         setProgress(10 + Math.round((i / cities.length) * 80));
 
         try {
-          const biz = await queryBusinesses(city.lat, city.lon, 8000, undefined);
+          const biz = await queryBusinesses(city.lat, city.lon, 8000);
           const totalBiz = Array.from(biz.values()).reduce((s, a) => s + a.length, 0);
           const opps = computeOpportunities(biz, city.population || 200000, new Map());
           results.push({ city, businesses: biz, opportunities: opps, totalBiz });
