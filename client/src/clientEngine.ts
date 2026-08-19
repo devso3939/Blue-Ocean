@@ -4,7 +4,7 @@
  * 100% client-side — runs in the browser, no backend needed.
  * Uses free public APIs:
  * - Nominatim (city resolution, boundaries)
- * - Overpass API (OpenStreetMap businesses) — ONE broad query
+ * - Overpass API (OpenStreetMap businesses) — ONE broad query with multilingual names
  * - Wikipedia REST API (demand signals)
  * - DuckDuckGo (search density)
  */
@@ -60,24 +60,10 @@ export interface Business {
   openingHours: string;
   brand: string;
   cuisine: string;
-  description: string;
-  stars: string;          // rating 1-5
-  wheelchair: string;     // yes/no/limited
-  outdoor_seating: string; // yes/no
-  takeaway: string;       // yes/no
-  delivery: string;       // yes/no
-  smoking: string;        // yes/no/no
-  payment: string;        // cards/cash
-  diet_vegetarian: string;
-  diet_vegan: string;
-  diet_halal: string;
-  internet_access: string;
   facebook: string;
   instagram: string;
-  twitter: string;
   wikidata: string;
   wikipedia: string;
-  image: string;
 }
 
 export const CATEGORY_QUERIES: Record<string, { label: string }> = {
@@ -149,65 +135,27 @@ export function getCategoryLabel(id: string): string {
   return CATEGORY_QUERIES[id]?.label || id.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
-// ─── Single Overpass Query (fetch ALL amenities at once) ────────────
+// ─── Single Overpass Query (broad + multilingual) ──────────────────
 
 function categorizeBusiness(tags: Record<string, string>): string | null {
-  if (tags.amenity === 'cafe') return 'cafe';
+  // Amenity-based
+  if (tags.amenity === 'cafe' || tags.cuisine?.includes('coffee') || tags.cuisine?.includes('espresso')) return 'cafe';
   if (tags.amenity === 'restaurant') return 'restaurant';
-  if (tags.amenity === 'bar') return 'bar';
+  if (tags.amenity === 'bar' || tags.amenity === 'biergarten') return 'bar';
   if (tags.amenity === 'pub') return 'pub';
-  if (tags.amenity === 'fast_food') return 'fast_food';
+  if (tags.amenity === 'fast_food' || tags.amenity === 'food_court') return 'fast_food';
   if (tags.amenity === 'ice_cream') return 'ice_cream';
-  if (tags.tourism === 'hotel') return 'hotel';
-  if (tags.tourism === 'hostel') return 'hostel';
-  if (tags.tourism === 'guest_house') return 'guest_house';
-  if (tags.tourism === 'camp_site') return 'camping';
-  if (tags.tourism === 'museum') return 'museum';
-  if (tags.leisure === 'fitness_centre') return 'gym';
-  if (tags.leisure === 'sports_centre') return 'gym';
-  if (tags.leisure === 'bowling_alley') return 'bowling';
-  if (tags.leisure === 'yoga') return 'yoga';
-  if (tags.shop === 'beauty') return 'beauty_salon';
-  if (tags.shop === 'hairdresser') return 'hair_salon';
-  if (tags.shop === 'nail_salon') return 'nail_salon';
-  if (tags.shop === 'tattoo') return 'tattoo';
-  if (tags.shop === 'supermarket') return 'supermarket';
-  if (tags.shop === 'grocery') return 'grocery';
-  if (tags.shop === 'convenience') return 'convenience';
-  if (tags.shop === 'clothes') return 'clothing';
-  if (tags.shop === 'electronics') return 'electronics';
-  if (tags.shop === 'furniture') return 'furniture';
-  if (tags.shop === 'doityourself') return 'hardware';
-  if (tags.shop === 'bakery') return 'bakery';
-  if (tags.shop === 'butcher') return 'butcher';
-  if (tags.shop === 'florist') return 'florist';
-  if (tags.shop === 'optician') return 'optician';
-  if (tags.shop === 'car_repair') return 'car_repair';
-  if (tags.shop === 'laundry') return 'laundry';
-  if (tags.shop === 'pet_grooming') return 'pet_groomer';
-  if (tags.shop === 'pet') return 'pet_shop';
-  if (tags.shop === 'jewelry') return 'jewelry';
-  if (tags.shop === 'shoes') return 'shoes';
-  if (tags.shop === 'sports') return 'sports';
-  if (tags.shop === 'books') return 'books';
-  if (tags.shop === 'mobile_phone') return 'mobile_phone';
-  if (tags.shop === 'department_store') return 'department_store';
-  if (tags.shop === 'wine') return 'wine';
-  if (tags.shop === 'art') return 'art';
-  if (tags.shop === 'bicycle') return 'bicycle';
-  if (tags.shop === 'stationery') return 'books';
-  if (tags.shop === 'computer') return 'electronics';
-  if (tags.amenity === 'pharmacy') return 'pharmacy';
+  if (tags.amenity === 'pharmacy' || tags.amenity === 'chemist') return 'pharmacy';
   if (tags.amenity === 'hospital') return 'hospital';
-  if (tags.amenity === 'clinic') return 'clinic';
+  if (tags.amenity === 'clinic' || tags.amenity === 'doctors') return 'clinic';
   if (tags.amenity === 'dentist') return 'dentist';
   if (tags.amenity === 'bank') return 'bank';
-  if (tags.amenity === 'school') return 'school';
-  if (tags.amenity === 'kindergarten') return 'kindergarten';
+  if (tags.amenity === 'school' || tags.amenity === 'college') return 'school';
+  if (tags.amenity === 'kindergarten' || tags.amenity === ' nursery') return 'kindergarten';
   if (tags.amenity === 'cinema') return 'cinema';
-  if (tags.amenity === 'theatre') return 'theater';
+  if (tags.amenity === 'theatre' || tags.amenity === 'arts_centre') return 'theater';
   if (tags.amenity === 'fuel') return 'fuel';
-  if (tags.amenity === 'veterinary') return 'veterinary';
+  if (tags.amenity === 'veterinary' || tags.amenity === 'animal_shelter') return 'veterinary';
   if (tags.amenity === 'community_centre') return 'community_center';
   if (tags.amenity === 'library') return 'library';
   if (tags.amenity === 'post_office') return 'post_office';
@@ -215,7 +163,56 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   if (tags.amenity === 'nightclub') return 'night_club';
   if (tags.amenity === 'casino') return 'night_club';
   if (tags.amenity === 'marketplace') return 'marketplace';
-  if (tags.office === 'coworking') return 'coworking';
+
+  // Tourism-based
+  if (tags.tourism === 'hotel' || tags.tourism === 'motel') return 'hotel';
+  if (tags.tourism === 'hostel') return 'hostel';
+  if (tags.tourism === 'guest_house' || tags.tourism === 'bed_and_breakfast') return 'guest_house';
+  if (tags.tourism === 'camp_site') return 'camping';
+  if (tags.tourism === 'museum') return 'museum';
+
+  // Leisure-based
+  if (tags.leisure === 'fitness_centre' || tags.leisure === 'sports_centre' || tags.leisure === 'pitch' || tags.sport) return 'gym';
+  if (tags.leisure === 'bowling_alley') return 'bowling';
+  if (tags.leisure === 'yoga') return 'yoga';
+
+  // Office-based
+  if (tags.office === 'coworking' || tags.office === 'company') return 'coworking';
+
+  // Shop-based (broader matching)
+  if (tags.shop === 'beauty' || tags.shop === 'cosmetics') return 'beauty_salon';
+  if (tags.shop === 'hairdresser' || tags.shop === 'wigs') return 'hair_salon';
+  if (tags.shop === 'nail_salon') return 'nail_salon';
+  if (tags.shop === 'tattoo' || tags.shop === 'piercing') return 'tattoo';
+  if (tags.shop === 'supermarket' || tags.shop === 'supermarket;greengrocer') return 'supermarket';
+  if (tags.shop === 'grocery' || tags.shop === 'greengrocer' || tags.shop === 'deli') return 'grocery';
+  if (tags.shop === 'convenience' || tags.shop === 'kiosk' || tags.shop === 'newsagent') return 'convenience';
+  if (tags.shop === 'clothes' || tags.shop === 'fashion' || tags.shop === 'shoes') return 'clothing';
+  if (tags.shop === 'electronics' || tags.shop === 'mobile_phone' || tags.shop === 'computer' || tags.shop === 'hifi') return 'electronics';
+  if (tags.shop === 'furniture' || tags.shop === 'interior_decoration') return 'furniture';
+  if (tags.shop === 'doityourself' || tags.shop === 'trade' || tags.shop === 'hardware') return 'hardware';
+  if (tags.shop === 'bakery' || tags.shop === 'pastry') return 'bakery';
+  if (tags.shop === 'butcher') return 'butcher';
+  if (tags.shop === 'florist') return 'florist';
+  if (tags.shop === 'optician' || tags.shop === 'eyewear') return 'optician';
+  if (tags.shop === 'car_repair' || tags.shop === 'car' || tags.shop === 'car_parts') return 'car_repair';
+  if (tags.shop === 'laundry' || tags.shop === 'dry_cleaning') return 'laundry';
+  if (tags.shop === 'pet_grooming' || tags.shop === 'pet') return 'pet_groomer';
+  if (tags.shop === 'jewelry' || tags.shop === 'jewellery' || tags.shop === 'watches') return 'jewelry';
+  if (tags.shop === 'shoes') return 'shoes';
+  if (tags.shop === 'sports' || tags.shop === 'outdoor') return 'sports';
+  if (tags.shop === 'books' || tags.shop === 'stationery') return 'books';
+  if (tags.shop === 'department_store') return 'department_store';
+  if (tags.shop === 'wine' || tags.shop === 'alcohol') return 'wine';
+  if (tags.shop === 'art') return 'art';
+  if (tags.shop === 'bicycle') return 'bicycle';
+
+  // Cuisine fallback — if it has cuisine but wasn't caught above
+  if (tags.cuisine) {
+    if (tags.amenity) return tags.amenity as any;
+    return 'restaurant';
+  }
+
   return null;
 }
 
@@ -231,8 +228,8 @@ const OVERPASS_MIRRORS = [
 ];
 
 /**
- * ONE broad Overpass query — fetches all amenity/shop/tourism/leisure nodes and ways.
- * Then we categorize client-side. Much faster than many small queries.
+ * ONE broad Overpass query with extended tag coverage.
+ * Gets all commercial POIs in a single request, categorize client-side.
  */
 export async function queryBusinesses(
   lat: number,
@@ -248,19 +245,21 @@ export async function queryBusinesses(
   const west = lon - radiusMeters / (111000 * cosLat);
   const east = lon + radiusMeters / (111000 * cosLat);
 
-  // ONE big query — get all commercial amenities + shops + tourism
+  // Broad query — catch ALL commercial POIs
   const query = `[out:json][timeout:60];
 (
   node(${south},${west},${north},${east})["amenity"];
   node(${south},${west},${north},${east})["shop"];
-  node(${south},${west},${north},${east})["tourism"~"hotel|hostel|guest_house|camp_site|museum"];
-  node(${south},${west},${north},${east})["leisure"~"fitness_centre|sports_centre|bowling_alley|yoga"];
+  node(${south},${west},${north},${east})["tourism"];
+  node(${south},${west},${north},${east})["leisure"];
   node(${south},${west},${north},${east})["office"];
+  node(${south},${west},${north},${east})["craft"];
   way(${south},${west},${north},${east})["amenity"];
   way(${south},${west},${north},${east})["shop"];
-  way(${south},${west},${north},${east})["tourism"~"hotel|hostel|guest_house|camp_site|museum"];
-  way(${south},${west},${north},${east})["leisure"~"fitness_centre|sports_centre|bowling_alley|yoga"];
+  way(${south},${west},${north},${east})["tourism"];
+  way(${south},${west},${north},${east})["leisure"];
   way(${south},${west},${north},${east})["office"];
+  way(${south},${west},${north},${east})["craft"];
 );
 out center body;`;
 
@@ -291,6 +290,9 @@ out center body;`;
 
   if (!data?.elements) return results;
 
+  // Dedup by location (within ~5m) to avoid duplicates from overlapping tags
+  const seenLocations = new Map<string, string>(); // "lat,lon" -> category
+
   for (const el of data.elements) {
     const elLat = el.lat || el.center?.lat;
     const elLon = el.lon || el.center?.lon;
@@ -300,9 +302,24 @@ out center body;`;
     const category = categorizeBusiness(tags);
     if (!category) continue;
 
+    // Dedup: if a node at nearly the same location already exists in the same category, skip
+    const locKey = `${Math.round(elLat * 1000)},${Math.round(elLon * 1000)}`;
+    const existingCat = seenLocations.get(locKey);
+    if (existingCat === category) continue; // exact same location + category = duplicate
+    seenLocations.set(locKey, category);
+
+    // Get the best name — try multiple name variants
+    const name = tags.name || tags['name:en'] || tags['name:int'] || tags['brand'] || '';
+
+    // Google Maps link — use name + city for actual business profile
+    const cityName = tags['addr:city'] || '';
+    const gmapsQuery = name
+      ? `${name} ${cityName || ''}`.trim()
+      : `${elLat},${elLon}`;
+
     const business: Business = {
       id: `${el.type}/${el.id}`,
-      name: tags.name || tags['name:en'] || tags['name:local'] || '',
+      name,
       lat: elLat,
       lon: elLon,
       category,
@@ -314,32 +331,31 @@ out center body;`;
       openingHours: tags.opening_hours || '',
       brand: tags.brand || '',
       cuisine: tags.cuisine || '',
-      description: tags.description || tags['description:en'] || '',
-      stars: tags.stars || tags.rating || '',
-      wheelchair: tags.wheelchair || '',
-      outdoor_seating: tags.outdoor_seating || '',
-      takeaway: tags.takeaway || '',
-      delivery: tags.delivery || '',
-      smoking: tags.smoking || '',
-      payment: tags.payment_cards || '',
-      diet_vegetarian: tags['diet:vegetarian'] || tags.vegetarian || '',
-      diet_vegan: tags['diet:vegan'] || tags.vegan || '',
-      diet_halal: tags['diet:halal'] || tags.halal || '',
-      internet_access: tags.internet_access || tags.wifi || '',
       facebook: tags['contact:facebook'] || tags.facebook || '',
       instagram: tags['contact:instagram'] || tags.instagram || '',
-      twitter: tags['contact:twitter'] || tags.twitter || '',
       wikidata: tags.wikidata || '',
       wikipedia: tags.wikipedia || '',
-      image: tags.image || tags['image:photo'] || tags['image:street_level'] || '',
     };
 
     if (!results.has(category)) results.set(category, []);
     results.get(category)!.push(business);
   }
 
-  onProgress?.(35, `Found ${Array.from(results.values()).reduce((s, a) => s + a.length, 0)} businesses in ${results.size} categories`);
+  const totalBiz = Array.from(results.values()).reduce((s, a) => s + a.length, 0);
+  onProgress?.(35, `Found ${totalBiz} businesses in ${results.size} categories`);
   return results;
+}
+
+// ─── Google Maps URL helper ────────────────────────────────────────
+
+export function getGoogleMapsUrl(b: Business): string {
+  // Search by business name for actual business profile (not random pin)
+  if (b.name) {
+    const query = `${b.name} ${b.address || ''}`.trim();
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+  }
+  // Fallback to coordinates only if no name
+  return `https://www.google.com/maps?q=${b.lat},${b.lon}`;
 }
 
 // ─── Demand Signals ────────────────────────────────────────────────

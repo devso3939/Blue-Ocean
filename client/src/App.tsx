@@ -5,6 +5,7 @@ import {
   getDemandSignals,
   computeOpportunities,
   getCategoryLabel,
+  getGoogleMapsUrl,
   type CityResult,
   type Business,
   type DemandSignal,
@@ -200,73 +201,36 @@ export default function App() {
         el.onmouseleave = () => { el.style.transform = 'scale(1)'; };
         el.title = b.name || b.categoryLabel;
 
-        const gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${b.lat},${b.lon}${b.name ? `+${encodeURIComponent(b.name)}` : ''}`;
-        const osmUrl = `https://www.openstreetmap.org/${b.id.replace('/', '/')}`;
-        
-        // Star rating display
-        const starsNum = parseFloat(b.stars);
-        const starHtml = starsNum ? `<span style="color:#fbbf24;font-size:13px;">${'★'.repeat(Math.round(starsNum))}${'☆'.repeat(5 - Math.round(starsNum))}</span> <span style="color:#94a3b8;font-size:11px;">${starsNum.toFixed(1)}</span>` : '';
-        
-        // Cuisine badges
-        const cuisineBadges = b.cuisine ? b.cuisine.split(';').slice(0, 4).map(c => 
-          `<span style="background:#1e293b;color:#cbd5e1;font-size:10px;padding:1px 6px;border-radius:99px;">${c.trim()}</span>`
-        ).join(' ') : '';
-        
-        // Amenity pills
-        const amenityItems = [];
-        if (b.wheelchair === 'yes' || b.wheelchair === 'limited') amenityItems.push(`♿ ${b.wheelchair === 'yes' ? 'Wheelchair accessible' : 'Limited access'}`);
-        if (b.outdoor_seating === 'yes') amenityItems.push('🪑 Outdoor seating');
-        if (b.takeaway === 'yes') amenityItems.push('🥡 Takeaway');
-        if (b.delivery === 'yes') amenityItems.push('🛵 Delivery');
-        if (b.smoking === 'no') amenityItems.push('🚭 No smoking');
-        if (b.internet_access === 'yes' || b.internet_access === 'free' || b.wifi === 'yes') amenityItems.push('📶 Free WiFi');
-        if (b.diet_vegetarian === 'yes') amenityItems.push('🥬 Vegetarian');
-        if (b.diet_vegan === 'yes') amenityItems.push('🌱 Vegan');
-        if (b.diet_halal === 'yes') amenityItems.push('🍖 Halal');
-        const amenityHtml = amenityItems.length > 0 ? 
-          `<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:6px;">${amenityItems.map(a => `<span style="background:#1e293b;color:#a1a1aa;font-size:10px;padding:2px 6px;border-radius:4px;">${a}</span>`).join('')}</div>` : '';
+        const gmapsUrl = getGoogleMapsUrl(b);
         
         // Social links
         const socialLinks = [];
-        if (b.facebook) socialLinks.push(`<a href="https://facebook.com/${b.facebook.replace('https://facebook.com/', '')}" target="_blank" rel="noopener" style="color:#60a5fa;font-size:11px;text-decoration:none;">Facebook</a>`);
-        if (b.instagram) socialLinks.push(`<a href="https://instagram.com/${b.instagram.replace('https://instagram.com/', '').replace('@', '')}" target="_blank" rel="noopener" style="color:#e879f9;font-size:11px;text-decoration:none;">Instagram</a>`);
-        if (b.twitter) socialLinks.push(`<a href="https://twitter.com/${b.twitter.replace('https://twitter.com/', '').replace('@', '')}" target="_blank" rel="noopener" style="color:#60a5fa;font-size:11px;text-decoration:none;">Twitter</a>`);
+        if (b.facebook) socialLinks.push(`<a href="https://facebook.com/${b.facebook.replace('https://facebook.com/', '').replace(/\/$/, '')}" target="_blank" rel="noopener" style="color:#60a5fa;font-size:11px;text-decoration:none;">Facebook</a>`);
+        if (b.instagram) socialLinks.push(`<a href="https://instagram.com/${b.instagram.replace('https://instagram.com/', '').replace('@', '').replace(/\/$/, '')}" target="_blank" rel="noopener" style="color:#e879f9;font-size:11px;text-decoration:none;">Instagram</a>`);
         const socialHtml = socialLinks.length > 0 ? 
           `<div style="display:flex;gap:8px;margin-top:6px;">${socialLinks.join('')}</div>` : '';
-        
-        // Photo
-        const photoHtml = b.image ? 
-          `<div style="margin:-14px -14px 10px;border-radius:10px 10px 0 0;overflow:hidden;height:140px;background:#1e293b;">
-            <img src="${b.image}" alt="" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none'" />
-          </div>` : '';
+
+        // Contact lines
+        const contactLines = [];
+        if (b.address) contactLines.push(`<div style="font-size:12px;color:#94a3b8;display:flex;align-items:flex-start;gap:6px;"><span style="flex-shrink:0;">📍</span><span>${b.address}</span></div>`);
+        if (b.phone) contactLines.push(`<div style="font-size:12px;color:#94a3b8;display:flex;align-items:center;gap:6px;"><span style="flex-shrink:0;">📞</span><a href="tel:${b.phone}" style="color:#93c5fd;text-decoration:none;">${b.phone}</a></div>`);
+        if (b.email) contactLines.push(`<div style="font-size:12px;color:#94a3b8;display:flex;align-items:center;gap:6px;"><span style="flex-shrink:0;">✉️</span><a href="mailto:${b.email}" style="color:#93c5fd;text-decoration:none;">${b.email}</a></div>`);
+        if (b.website) contactLines.push(`<div style="font-size:12px;display:flex;align-items:center;gap:6px;"><span style="flex-shrink:0;">🌐</span><a href="${b.website}" target="_blank" rel="noopener" style="color:#60a5fa;text-decoration:none;">${b.website.replace(/^https?:\/\//, '').slice(0, 40)}</a></div>`);
 
         const marker = new maplibregl.Marker({ element: el })
           .setLngLat([b.lon, b.lat])
-          .setPopup(new maplibregl.Popup({ className: 'dark-popup', maxWidth: '360px', offset: 12 }).setHTML(`
-            <div style="background:#0f1117;color:#e2e8f0;padding:${b.image ? '0 14px 14px' : '14px'};border-radius:10px;font-family:system-ui,-apple-system,sans-serif;min-width:240px;max-width:340px;">
-              ${photoHtml}
-              <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;${b.image ? 'padding-top:4px;' : ''}">
-                <div>
-                  <div style="font-weight:700;font-size:15px;color:#f1f5f9;line-height:1.3;">${b.name || b.categoryLabel}</div>
-                  ${starHtml ? `<div style="margin-top:2px;">${starHtml}</div>` : ''}
-                </div>
+          .setPopup(new maplibregl.Popup({ className: 'dark-popup', maxWidth: '340px', offset: 12 }).setHTML(`
+            <div style="background:#0f1117;color:#e2e8f0;padding:14px;border-radius:10px;font-family:system-ui,-apple-system,sans-serif;min-width:220px;max-width:320px;">
+              <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">
+                <div style="font-weight:700;font-size:15px;color:#f1f5f9;line-height:1.3;">${b.name || b.categoryLabel}</div>
                 <div style="display:inline-block;background:${color}22;color:${color};font-size:10px;padding:2px 8px;border-radius:99px;white-space:nowrap;flex-shrink:0;">${b.categoryLabel}</div>
               </div>
-              ${cuisineBadges ? `<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:6px;">${cuisineBadges}</div>` : ''}
-              ${b.description ? `<div style="font-size:11px;color:#94a3b8;margin-top:6px;line-height:1.4;">${b.description.slice(0, 150)}${b.description.length > 150 ? '…' : ''}</div>` : ''}
               <div style="margin-top:8px;display:flex;flex-direction:column;gap:4px;">
-                ${b.address ? `<div style="font-size:12px;color:#94a3b8;display:flex;align-items:flex-start;gap:6px;"><span style="flex-shrink:0;">📍</span><span>${b.address}</span></div>` : ''}
-                ${b.phone ? `<div style="font-size:12px;color:#94a3b8;display:flex;align-items:center;gap:6px;"><span style="flex-shrink:0;">📞</span><a href="tel:${b.phone}" style="color:#93c5fd;text-decoration:none;">${b.phone}</a></div>` : ''}
-                ${b.email ? `<div style="font-size:12px;color:#94a3b8;display:flex;align-items:center;gap:6px;"><span style="flex-shrink:0;">✉️</span><a href="mailto:${b.email}" style="color:#93c5fd;text-decoration:none;">${b.email}</a></div>` : ''}
-                ${b.website ? `<div style="font-size:12px;display:flex;align-items:center;gap:6px;"><span style="flex-shrink:0;">🌐</span><a href="${b.website}" target="_blank" rel="noopener" style="color:#60a5fa;text-decoration:none;">${b.website.replace(/^https?:\/\//, '').slice(0, 40)}</a></div>` : ''}
-                ${b.openingHours ? `<div style="font-size:11px;color:#64748b;display:flex;align-items:center;gap:6px;"><span style="flex-shrink:0;">🕐</span><span>${b.openingHours}</span></div>` : ''}
-                ${b.brand ? `<div style="font-size:11px;color:#64748b;display:flex;align-items:center;gap:6px;"><span style="flex-shrink:0;">🏷️</span><span>${b.brand}</span></div>` : ''}
+                ${contactLines.join('')}
               </div>
-              ${amenityHtml}
               ${socialHtml}
-              <div style="margin-top:10px;padding-top:8px;border-top:1px solid #1e293b;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
-                <a href="${gmapsUrl}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:5px;background:#1a73e8;color:white;padding:5px 10px;border-radius:6px;font-size:11px;font-weight:600;text-decoration:none;">📍 Google Maps</a>
-                <a href="${osmUrl}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:5px;background:#1e293b;color:#94a3b8;padding:5px 10px;border-radius:6px;font-size:11px;font-weight:500;text-decoration:none;">🗺️ OpenStreetMap</a>
+              <div style="margin-top:10px;padding-top:8px;border-top:1px solid #1e293b;">
+                <a href="${gmapsUrl}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:5px;background:#1a73e8;color:white;padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none;">📍 View on Google Maps</a>
               </div>
             </div>
           `))
@@ -429,38 +393,22 @@ export default function App() {
     const catLabel = getCategoryLabel(selectedOppCategory || '');
     const cityName = selectedCity?.name || 'city';
     
-    const headers = ['#', 'Business Name', 'Category', 'Cuisine', 'Address', 'Phone', 'Website', 'Email', 'Hours', 'Brand', 'Description', 'Rating', 'Outdoor Seating', 'Takeaway', 'Delivery', 'WiFi', 'Vegetarian', 'Vegan', 'Halal', 'Wheelchair', 'Facebook', 'Instagram', 'Twitter', 'Latitude', 'Longitude', 'Google Maps Link', 'OSM Link'];
+    const headers = ['#', 'Business Name', 'Category', 'Address', 'Phone', 'Email', 'Website', 'Facebook', 'Instagram', 'Latitude', 'Longitude', 'Google Maps Link'];
     const rows = filteredBiz.map((b, i) => {
-      const gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${b.lat},${b.lon}${b.name ? `+${encodeURIComponent(b.name)}` : ''}`;
-      const osmUrl = `https://www.openstreetmap.org/${b.id.replace('/', '/')}`;
+      const gmapsUrl = getGoogleMapsUrl(b);
       return [
         i + 1,
         b.name || 'Unnamed',
         b.categoryLabel,
-        b.cuisine,
         b.address,
         b.phone,
-        b.website,
         b.email,
-        b.openingHours,
-        b.brand,
-        b.description,
-        b.stars,
-        b.outdoor_seating,
-        b.takeaway,
-        b.delivery,
-        b.internet_access,
-        b.diet_vegetarian,
-        b.diet_vegan,
-        b.diet_halal,
-        b.wheelchair,
+        b.website,
         b.facebook,
         b.instagram,
-        b.twitter,
         b.lat,
         b.lon,
         gmapsUrl,
-        osmUrl,
       ];
     });
     
@@ -819,76 +767,37 @@ export default function App() {
                     <tr className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
                       <th className="px-4 py-2.5 font-medium w-10">#</th>
                       <th className="px-4 py-2.5 font-medium cursor-pointer hover:text-foreground transition-colors select-none" onClick={() => handleSort('name')}>Business{sortArrow('name')}</th>
-                      <th className="px-4 py-2.5 font-medium cursor-pointer hover:text-foreground transition-colors select-none" onClick={() => handleSort('cuisine')}>Cuisine{sortArrow('cuisine')}</th>
                       <th className="px-4 py-2.5 font-medium cursor-pointer hover:text-foreground transition-colors select-none" onClick={() => handleSort('address')}>Address{sortArrow('address')}</th>
                       <th className="px-4 py-2.5 font-medium cursor-pointer hover:text-foreground transition-colors select-none" onClick={() => handleSort('phone')}>Phone{sortArrow('phone')}</th>
+                      <th className="px-4 py-2.5 font-medium">Email</th>
                       <th className="px-4 py-2.5 font-medium cursor-pointer hover:text-foreground transition-colors select-none" onClick={() => handleSort('website')}>Website{sortArrow('website')}</th>
-                      <th className="px-4 py-2.5 font-medium cursor-pointer hover:text-foreground transition-colors select-none" onClick={() => handleSort('hours')}>Hours{sortArrow('hours')}</th>
-                      <th className="px-4 py-2.5 font-medium cursor-pointer hover:text-foreground transition-colors select-none" onClick={() => handleSort('stars')}>Rating{sortArrow('stars')}</th>
-                      <th className="px-4 py-2.5 font-medium">Amenities</th>
                       <th className="px-4 py-2.5 font-medium">Social</th>
-                      <th className="px-4 py-2.5 font-medium text-right">Actions</th>
+                      <th className="px-4 py-2.5 font-medium text-right">Google Maps</th>
                     </tr>
                   </thead>
                   <tbody>
                     {filteredBiz.map((b, i) => {
-                      const gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${b.lat},${b.lon}${b.name ? `+${encodeURIComponent(b.name)}` : ''}`;
+                      const gmapsUrl = getGoogleMapsUrl(b);
                       return (
                         <tr key={b.id} className="border-b border-border/50 last:border-0 hover:bg-muted/20 transition-colors">
                           <td className="px-4 py-3 text-xs text-muted-foreground">{i + 1}</td>
                           <td className="px-4 py-3">
                             <div className="font-medium text-sm">{b.name || <span className="text-muted-foreground italic">Unnamed</span>}</div>
-                            {b.brand && <div className="text-xs text-muted-foreground">🏷️ {b.brand}</div>}
-                            {b.stars ? (
-                              <div className="text-xs mt-0.5">
-                                <span className="text-amber-400">{'★'.repeat(Math.round(parseFloat(b.stars)))}{'☆'.repeat(5 - Math.round(parseFloat(b.stars)))}</span>
-                                <span className="text-muted-foreground ml-1">{parseFloat(b.stars).toFixed(1)}</span>
-                              </div>
-                            ) : null}
-                          </td>
-                          <td className="px-4 py-3 text-xs">
-                            {b.cuisine ? (
-                              <div className="flex flex-wrap gap-1">
-                                {b.cuisine.split(';').slice(0, 3).map(c => (
-                                  <span key={c} className="inline-block bg-muted/80 text-muted-foreground px-1.5 py-0.5 rounded text-[10px]">{c.trim()}</span>
-                                ))}
-                              </div>
-                            ) : <span className="text-muted-foreground">—</span>}
+                            {b.brand && <div className="text-xs text-muted-foreground">{b.brand}</div>}
                           </td>
                           <td className="px-4 py-3 text-xs text-muted-foreground max-w-[180px] truncate">{b.address || '—'}</td>
                           <td className="px-4 py-3 text-xs">
                             {b.phone ? <a href={`tel:${b.phone}`} className="text-blue-400 hover:underline">{b.phone}</a> : <span className="text-muted-foreground">—</span>}
                           </td>
+                          <td className="px-4 py-3 text-xs text-muted-foreground max-w-[150px] truncate">{b.email || '—'}</td>
                           <td className="px-4 py-3 text-xs">
                             {b.website ? <a href={b.website} target="_blank" rel="noopener" className="text-blue-400 hover:underline">🌐 Link</a> : <span className="text-muted-foreground">—</span>}
                           </td>
-                          <td className="px-4 py-3 text-xs text-muted-foreground max-w-[120px] truncate">{b.openingHours || '—'}</td>
-                          <td className="px-4 py-3 text-xs">
-                            {b.stars ? (
-                              <div className="flex items-center gap-1">
-                                <span className="text-amber-400 text-xs">{'★'.repeat(Math.round(parseFloat(b.stars)))}</span>
-                                <span className="text-xs text-muted-foreground">{parseFloat(b.stars).toFixed(1)}</span>
-                              </div>
-                            ) : <span className="text-muted-foreground">—</span>}
-                          </td>
-                          <td className="px-4 py-3 text-xs">
-                            <div className="flex flex-wrap gap-1">
-                              {b.outdoor_seating === 'yes' && <span className="inline-block bg-emerald-500/15 text-emerald-400 px-1.5 py-0.5 rounded text-[10px]">🪑 Outdoor</span>}
-                              {b.takeaway === 'yes' && <span className="inline-block bg-blue-500/15 text-blue-400 px-1.5 py-0.5 rounded text-[10px]">🥡 Takeaway</span>}
-                              {b.delivery === 'yes' && <span className="inline-block bg-violet-500/15 text-violet-400 px-1.5 py-0.5 rounded text-[10px]">🛵 Delivery</span>}
-                              {(b.internet_access === 'yes' || b.internet_access === 'free') && <span className="inline-block bg-cyan-500/15 text-cyan-400 px-1.5 py-0.5 rounded text-[10px]">📶 WiFi</span>}
-                              {b.diet_vegetarian === 'yes' && <span className="inline-block bg-lime-500/15 text-lime-400 px-1.5 py-0.5 rounded text-[10px]">🥬 Veg</span>}
-                              {b.diet_vegan === 'yes' && <span className="inline-block bg-green-500/15 text-green-400 px-1.5 py-0.5 rounded text-[10px]">🌱 Vegan</span>}
-                              {b.wheelchair === 'yes' && <span className="inline-block bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded text-[10px]">♿</span>}
-                              {(!b.outdoor_seating && !b.takeaway && !b.delivery && !b.internet_access && !b.diet_vegetarian && !b.diet_vegan && !b.wheelchair) && <span className="text-muted-foreground">—</span>}
-                            </div>
-                          </td>
                           <td className="px-4 py-3 text-xs">
                             <div className="flex flex-col gap-0.5">
-                              {b.facebook && <a href={`https://facebook.com/${b.facebook.replace('https://facebook.com/', '')}`} target="_blank" rel="noopener" className="text-blue-400 hover:underline text-[11px]">Facebook</a>}
-                              {b.instagram && <a href={`https://instagram.com/${b.instagram.replace('https://instagram.com/', '').replace('@', '')}`} target="_blank" rel="noopener" className="text-pink-400 hover:underline text-[11px]">Instagram</a>}
-                              {b.twitter && <a href={`https://twitter.com/${b.twitter.replace('https://twitter.com/', '').replace('@', '')}`} target="_blank" rel="noopener" className="text-sky-400 hover:underline text-[11px]">Twitter</a>}
-                              {(!b.facebook && !b.instagram && !b.twitter) && <span className="text-muted-foreground">—</span>}
+                              {b.facebook && <a href={`https://facebook.com/${b.facebook.replace('https://facebook.com/', '').replace(/\/$/, '')}`} target="_blank" rel="noopener" className="text-blue-400 hover:underline text-[11px]">Facebook</a>}
+                              {b.instagram && <a href={`https://instagram.com/${b.instagram.replace('https://instagram.com/', '').replace('@', '').replace(/\/$/, '')}`} target="_blank" rel="noopener" className="text-pink-400 hover:underline text-[11px]">Instagram</a>}
+                              {(!b.facebook && !b.instagram) && <span className="text-muted-foreground">—</span>}
                             </div>
                           </td>
                           <td className="px-4 py-3 text-right">
@@ -898,7 +807,7 @@ export default function App() {
                               rel="noopener"
                               className="inline-flex items-center gap-1 rounded-md bg-blue-600/20 px-2.5 py-1 text-xs font-medium text-blue-400 hover:bg-blue-600/30 transition-colors"
                             >
-                              📍 Maps
+                              📍 Google Maps
                             </a>
                           </td>
                         </tr>
