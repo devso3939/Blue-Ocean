@@ -505,6 +505,126 @@ out center body;`;
   const totalBiz = Array.from(results.values()).reduce((s, a) => s + a.length, 0);
   onProgress?.(70, `Found ${totalBiz} businesses — enriching data…`);
 
+
+// ─── DuckDuckGo Search Enrichment ──────────────────────────────
+// Searches DuckDuckGo for business contact info (website, phone, social)
+async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
+  const NEEDS_DATA = businesses.filter(b => !b.website && !b.phone);
+  if (NEEDS_DATA.length === 0) return;
+
+  const BATCH = 5;
+  const maxEnrich = Math.min(NEEDS_DATA.length, 60);
+  let found = 0;
+
+  for (let i = 0; i < maxEnrich; i += BATCH) {
+    const batch = NEEDS_DATA.slice(i, i + BATCH);
+    const promises = batch.map(async (b) => {
+      try {
+        const query = encodeURIComponent(`${b.name} ${b.categoryLabel || ''} contact phone website`);
+        const url = `https://html.duckduckgo.com/html/?q=${query}`;
+        const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`, {
+          headers: { 'User-Agent': 'Mozilla/5.0' }
+        });
+        if (!r.ok) return;
+        const html = await r.text();
+
+        // Extract phone numbers from search results
+        if (!b.phone) {
+          const phoneMatch = html.match(/(?:\+?\d[\d\s\-\.\(\)]{7,15})/);
+          if (phoneMatch) {
+            const phone = phoneMatch[0].trim();
+            if (phone.length >= 8 && phone.length <= 20) {
+              b.phone = phone;
+              found++;
+            }
+          }
+        }
+
+        // Extract website URL from search results
+        if (!b.website) {
+          // Look for links in search results that look like business websites
+          const linkMatches = html.matchAll(/href="([^"]+)"[^>]*class="result__a"[^>]*>([^<]+)/g);
+          for (const match of linkMatches) {
+            const href = match[1];
+            const text = match[2].toLowerCase();
+            // Skip Google, Facebook, Instagram, Yelp, TripAdvisor, Wikipedia results
+            if (href.match(/google\.|facebook\.com|instagram\.com|yelp\.com|tripadvisor|wikipedia|linkedin|twitter|x\.com|youtube|tiktok|pinterest/i)) continue;
+            // Skip DuckDuckGo redirect URLs - extract the actual URL
+            let actualUrl = href;
+            const uddgMatch = href.match(/uddg=([^&]+)/);
+            if (uddgMatch) actualUrl = decodeURIComponent(uddgMatch[1]);
+            // Must be an HTTP URL
+            if (actualUrl.startsWith('http')) {
+              b.website = actualUrl;
+              found++;
+              break;
+            }
+          }
+        }
+
+        // Extract Facebook/Instagram from search snippets
+        const snippetMatch = html.match(/class="result__snippet"[^>]*>([^<]+)/g);
+        if (snippetMatch) {
+          for (const s of snippetMatch) {
+            const text = s.replace(/class="result__snippet"[^>]*>/, '');
+            if (!b.facebook) {
+              const fbMatch = text.match(/facebook\.com\/[^\s<"]+/i);
+              if (fbMatch) b.facebook = 'https://' + fbMatch[0];
+            }
+            if (!b.instagram) {
+              const igMatch = text.match(/instagram\.com\/[^\s<"]+/i);
+              if (igMatch) b.instagram = 'https://' + igMatch[0];
+            }
+          }
+        }
+      } catch {}
+    });
+    await Promise.all(promises);
+    // DuckDuckGo rate limit: be gentle
+    if (i + BATCH < maxEnrich) await wait(2000);
+    onProgress?.(85, `Web enrichment… ${Math.min(i + BATCH, maxEnrich)}/${maxEnrich} (${found} found)`);
+  }
+}
+
+// ─── Website Meta Tag Scraper ──────────────────────────────────
+// Fetches a business website and extracts social/contact links from meta tags
+async function enrichFromWebsite(b: Business): Promise<void> {
+  if (!b.website) return;
+  try {
+    const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(b.website)}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!r.ok) return;
+    const html = await r.text();
+    const head = html.substring(0, 5000); // Only scan the head section
+
+    // Extract phone from tel: links or contact pages
+    if (!b.phone) {
+      const telMatch = head.match(/href="tel:([^"]+)"/);
+      if (telMatch) b.phone = telMatch[1];
+    }
+
+    // Extract email from mailto: links
+    if (!b.email) {
+      const emailMatch = head.match(/href="mailto:([^"]+)"/);
+      if (emailMatch) b.email = emailMatch[1];
+    }
+
+    // Extract Facebook from meta tags or links
+    if (!b.facebook) {
+      const fbMatch = head.match(/(?:facebook\.com|fb\.com)\/([^"\s&]+)/i);
+      if (fbMatch) b.facebook = `https://facebook.com/${fbMatch[1].replace(/\/$/, '')}`;
+    }
+
+    // Extract Instagram from meta tags or links
+    if (!b.instagram) {
+      const igMatch = head.match(/instagram\.com\/([^"\s&]+)/i);
+      if (igMatch) b.instagram = `https://instagram.com/${igMatch[1].replace(/\/$/, '')}`;
+    }
+  } catch {}
+}
+
   // ── Enrichment: reverse-geocode ALL businesses for contact data ──
   const allBizList: Business[] = [];
   for (const bizs of results.values()) {
@@ -546,7 +666,27 @@ out center body;`;
     }
   }
 
-  onProgress?.(80, `Found ${totalBiz} businesses in ${results.size} categories`);
+  onProgress?.(80, `Found ${totalBiz} businesses — searching web for contact data…`);
+
+  // ── Enrichment Layer 2: DuckDuckGo search for missing websites/phones ──
+  await enrichFromWeb(allBizList, onProgress);
+
+  // ── Enrichment Layer 3: Scrape found websites for social/contact links ──
+  onProgress?.(90, `Scraping websites for social links…`);
+  const hasWebsite = allBizList.filter(b => b.website && (!b.facebook || !b.instagram));
+  const webBatch = 5;
+  for (let i = 0; i < Math.min(hasWebsite.length, 40); i += webBatch) {
+    const batch = hasWebsite.slice(i, i + webBatch);
+    await Promise.all(batch.map(b => enrichFromWebsite(b)));
+    if (i + webBatch < hasWebsite.length) await wait(1500);
+  }
+
+  // Count how much data we found
+  const withPhone = allBizList.filter(b => b.phone).length;
+  const withWeb = allBizList.filter(b => b.website).length;
+  const withSocial = allBizList.filter(b => b.facebook || b.instagram).length;
+  onProgress?.(95, `Data enrichment complete: ${withPhone} phones, ${withWeb} websites, ${withSocial} social profiles`);
+
   return results;
 }
 
