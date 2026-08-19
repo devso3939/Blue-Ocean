@@ -512,13 +512,13 @@ async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct:
   const NEEDS = businesses.filter(b => !b.phone && !b.website);
   if (NEEDS.length === 0) return;
   const BATCH = 3;
-  const max = Math.min(NEEDS.length, 40);
+  const max = Math.min(NEEDS.length, 50);
   let found = 0;
   for (let i = 0; i < max; i += BATCH) {
     const batch = NEEDS.slice(i, i + BATCH);
     await Promise.all(batch.map(async (b) => {
       try {
-        const q = encodeURIComponent(b.name + ' ' + (b.address || '') + ' Tbilisi');
+        const q = encodeURIComponent(b.name + ' ' + (b.address || ''));
         const r = await fetch('https://corsproxy.io/?' + encodeURIComponent('https://www.google.com/maps/search/' + q), {
           headers: { 'User-Agent': 'Mozilla/5.0' },
           signal: AbortSignal.timeout(10000),
@@ -562,14 +562,15 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   if (NEEDS_DATA.length === 0) return;
 
   const BATCH = 5;
-  const maxEnrich = Math.min(NEEDS_DATA.length, 60);
+  const maxEnrich = Math.min(NEEDS_DATA.length, 80);
   let found = 0;
 
   for (let i = 0; i < maxEnrich; i += BATCH) {
     const batch = NEEDS_DATA.slice(i, i + BATCH);
     const promises = batch.map(async (b) => {
       try {
-        const query = encodeURIComponent(`${b.name} ${b.categoryLabel || ''} contact phone website`);
+        const cityPart = b.address ? b.address.split(',').pop()?.trim() || '' : '';
+        const query = encodeURIComponent(`${b.name} ${cityPart} ${b.categoryLabel || ""} phone website contact`);
         const url = `https://html.duckduckgo.com/html/?q=${query}`;
         const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`, {
           headers: { 'User-Agent': 'Mozilla/5.0' }
