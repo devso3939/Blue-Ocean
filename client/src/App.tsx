@@ -11,6 +11,7 @@ import {
   type OpportunityResult,
 } from './clientEngine';
 import CompareView from './CompareView';
+import CountryView from './CountryView';
 
 function fmtNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return '—';
@@ -83,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
 };
 
 export default function App() {
-  const [compareMode, setCompareMode] = useState(false);
+  const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
   const [selectedCountry, setSelectedCountry] = useState('');
   const [cityQuery, setCityQuery] = useState('');
   const [cityResults, setCityResults] = useState<CityResult[]>([]);
@@ -481,7 +482,7 @@ export default function App() {
     URL.revokeObjectURL(url);
   }, [filteredBiz, selectedOppCategory, selectedCity]);
 
-  if (compareMode) {
+  if (viewMode === 'compare') {
     return (
       <div className="min-h-screen bg-background">
         <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md">
@@ -495,15 +496,42 @@ export default function App() {
             <div className="flex items-center gap-3">
               <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>
               <button
-                onClick={() => setCompareMode(false)}
+                onClick={() => setViewMode('analysis')}
                 className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-border text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all"
               >
-                ← Back to Analysis
+                ← Back
               </button>
             </div>
           </div>
         </header>
         <CompareView />
+      </div>
+    );
+  }
+
+  if (viewMode === 'country') {
+    return (
+      <div className="min-h-screen bg-background">
+        <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md">
+          <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4">
+            <div className="flex items-center gap-2">
+              <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 text-white">
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+              </div>
+              <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Country Finder</span></span>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>
+              <button
+                onClick={() => setViewMode('analysis')}
+                className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-border text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all"
+              >
+                ← Back
+              </button>
+            </div>
+          </div>
+        </header>
+        <CountryView />
       </div>
     );
   }
@@ -521,12 +549,28 @@ export default function App() {
           </div>
           <div className="flex items-center gap-3">
             <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>
-            <button
-              onClick={() => setCompareMode(!compareMode)}
-              className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${compareMode ? 'bg-primary text-primary-foreground' : 'border border-border text-muted-foreground hover:text-foreground hover:border-primary/50'}`}
-            >
-              {compareMode ? '← Back to Analysis' : '🏙️ Compare Cities'}
-            </button>
+            <div className="flex gap-1.5">
+              {viewMode !== 'analysis' && (
+                <button
+                  onClick={() => setViewMode('analysis')}
+                  className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-border text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all"
+                >
+                  ← Back
+                </button>
+              )}
+              <button
+                onClick={() => setViewMode(viewMode === 'compare' ? 'analysis' : 'compare')}
+                className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${viewMode === 'compare' ? 'bg-primary text-primary-foreground' : 'border border-border text-muted-foreground hover:text-foreground hover:border-primary/50'}`}
+              >
+                🏙️ Compare
+              </button>
+              <button
+                onClick={() => setViewMode(viewMode === 'country' ? 'analysis' : 'country')}
+                className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${viewMode === 'country' ? 'bg-emerald-600 text-white' : 'border border-border text-muted-foreground hover:text-foreground hover:border-emerald-500/50'}`}
+              >
+                🌍 Country
+              </button>
+            </div>
           </div>
         </div>
       </header>
