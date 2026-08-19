@@ -123,62 +123,38 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [cityQuery, selectedCountry]);
 
-  // Initialize map (lazy, only when results shown)
+  // Initialize map when results section becomes visible
   useEffect(() => {
-    if (!mapRef.current || mapInstanceRef.current) return;
-    import('maplibre-gl').then((maplibregl) => {
-      if (!mapRef.current) return;
-      const map = new maplibregl.Map({
-        container: mapRef.current,
-        style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
-        center: [0, 20],
-        zoom: 2,
-      });
-      map.addControl(new maplibregl.NavigationControl());
-      map.on('load', () => { mapReadyRef.current = true; });
-      mapInstanceRef.current = map;
-    });
-  }, []);
-
-  // Update markers — key fix: resize map + wait for load
-  useEffect(() => {
-    if (!selectedCity) return;
-
-    // Ensure map is initialized
-    if (!mapInstanceRef.current && mapRef.current) {
-      import('maplibre-gl').then((maplibregl) => {
-        if (!mapRef.current || mapInstanceRef.current) return;
-        const map = new maplibregl.Map({
-          container: mapRef.current,
-          style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
-          center: [selectedCity.lon, selectedCity.lat],
-          zoom: 12,
-        });
-        map.addControl(new maplibregl.NavigationControl());
-        mapInstanceRef.current = map;
-        map.on('load', () => addMarkers(map, businesses));
-      });
+    if (!selectedCity || opportunities.length === 0) return;
+    if (!mapRef.current) return;
+    if (mapInstanceRef.current) {
+      // Map already exists — just fly to city and add markers
+      const map = mapInstanceRef.current;
+      map.flyTo({ center: [selectedCity.lon, selectedCity.lat], zoom: 12, duration: 1500 });
+      // Resize after DOM update
+      requestAnimationFrame(() => { map.resize(); addMarkers(map, businesses); });
+      setTimeout(() => map.resize(), 1000);
       return;
     }
 
-    const map = mapInstanceRef.current;
-    if (!map) return;
-
-    // Fly to city
-    map.flyTo({ center: [selectedCity.lon, selectedCity.lat], zoom: 12 });
-
-    // Resize to fix blank map when container becomes visible
-    setTimeout(() => map.resize(), 200);
-    setTimeout(() => map.resize(), 800);
-
-    // Add markers
-    const addMarkersFn = () => addMarkers(map, businesses);
-    if (mapReadyRef.current) {
-      addMarkersFn();
-    } else {
-      map.on('load', addMarkersFn);
-    }
-  }, [businesses, selectedCity]);
+    // Create map
+    import('maplibre-gl').then((maplibregl) => {
+      if (!mapRef.current || mapInstanceRef.current) return;
+      const map = new maplibregl.Map({
+        container: mapRef.current,
+        style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+        center: [selectedCity.lon, selectedCity.lat],
+        zoom: 12,
+      });
+      map.addControl(new maplibregl.NavigationControl());
+      map.on('load', () => {
+        mapReadyRef.current = true;
+        map.resize();
+        addMarkers(map, businesses);
+      });
+      mapInstanceRef.current = map;
+    });
+  }, [selectedCity, businesses, opportunities.length]);
 
   function addMarkers(map: any, biz: Map<string, Business[]>) {
     // Clear old markers
