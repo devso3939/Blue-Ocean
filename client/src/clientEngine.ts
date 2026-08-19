@@ -237,6 +237,7 @@ const OVERPASS_MIRRORS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
   'https://lz4.overpass-api.de/api/interpreter',
+  'https://overpass.openstreetmap.ru/api/interpreter',
 ];
 
 async function fetchOverpass(query: string, timeoutSec = 60): Promise<any> {
@@ -281,7 +282,7 @@ export async function queryBusinesses(
   // Single combined query with longer timeout — avoids multiple-request rate limiting
   const bbox = `${south},${west},${north},${east}`;
   
-  const query = `[out:json][timeout:90];
+  const query = `[out:json][timeout:90][maxsize:536870912];
 (
   node(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream|pharmacy|bank|hospital|clinic|dentist|cinema|nightclub|car_rental|veterinary|library|post_office|school"];
   way(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream|pharmacy|bank|hospital|clinic|dentist|cinema|nightclub|car_rental|veterinary|library|post_office|school"];
