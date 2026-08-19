@@ -84,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.1.1';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -187,12 +187,12 @@ export default function App() {
         const color = CAT_COLORS[b.category] || '#94a3b8';
         const emoji = CAT_EMOJI[b.category] || '📍';
 
-        // Create an emoji pin element — anchored to bottom-center
+        // Create an emoji pin element — colored circle with emoji
         const el = document.createElement('div');
-        el.style.cssText = `position:absolute;width:28px;height:28px;font-size:22px;line-height:28px;text-align:center;cursor:pointer;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.7));transition:transform 0.15s;transform-origin:bottom center;pointer-events:auto;z-index:10;`;
+        el.style.cssText = `width:32px;height:32px;border-radius:50%;background:${color};display:flex;align-items:center;justify-content:center;font-size:18px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.5);border:2px solid rgba(255,255,255,0.8);transition:transform 0.15s,box-shadow 0.15s;transform-origin:bottom center;`;
         el.textContent = emoji;
-        el.onmouseenter = () => { el.style.transform = 'scale(1.3) translateY(-4px)'; };
-        el.onmouseleave = () => { el.style.transform = 'scale(1) translateY(0)'; };
+        el.onmouseenter = () => { el.style.transform = 'scale(1.25) translateY(-3px)'; el.style.boxShadow = '0 4px 16px rgba(0,0,0,0.7)'; };
+        el.onmouseleave = () => { el.style.transform = 'scale(1) translateY(0)'; el.style.boxShadow = '0 2px 8px rgba(0,0,0,0.5)'; };
         el.title = `${b.name} — ${b.categoryLabel}`;
 
         const gmapsUrl = getGoogleMapsUrl(b);
