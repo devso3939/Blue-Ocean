@@ -5,7 +5,6 @@ import {
   getDemandSignals,
   computeOpportunities,
   getCategoryLabel,
-  CATEGORY_QUERIES,
   type CityResult,
   type Business,
   type DemandSignal,
@@ -72,6 +71,16 @@ const POPULAR_CATEGORIES = [
   { id: 'spa', label: '🧖 Spa' }, { id: 'yoga', label: '🧘 Yoga Studio' },
 ];
 
+const CAT_COLORS: Record<string, string> = {
+  cafe: '#f59e0b', restaurant: '#ef4444', bar: '#8b5cf6', pub: '#a855f7',
+  hotel: '#3b82f6', gym: '#10b981', beauty_salon: '#ec4899', hair_salon: '#f472b6',
+  pharmacy: '#06b6d4', supermarket: '#22c55e', bank: '#6366f1', clothing: '#a855f7',
+  electronics: '#64748b', bakery: '#fbbf24', fast_food: '#f97316', school: '#3b82f6',
+  cinema: '#e879f9', car_repair: '#f97316', pet_groomer: '#fb923c', coworking: '#38bdf8',
+  spa: '#c084fc', yoga: '#34d399',
+  bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
+};
+
 export default function App() {
   const [selectedCountry, setSelectedCountry] = useState('');
   const [cityQuery, setCityQuery] = useState('');
@@ -93,13 +102,11 @@ export default function App() {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
   const markersRef = useRef<any[]>([]);
+  const mapReadyRef = useRef(false);
 
-  // Search cities when typing
+  // Search cities
   useEffect(() => {
-    if (!cityQuery.trim() || cityQuery.length < 2) {
-      setCityResults([]);
-      return;
-    }
+    if (!cityQuery.trim() || cityQuery.length < 2) { setCityResults([]); return; }
     const timer = setTimeout(async () => {
       setCitySearching(true);
       try {
@@ -112,64 +119,110 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [cityQuery, selectedCountry]);
 
-  // Initialize map
+  // Initialize map (lazy, only when results shown)
   useEffect(() => {
     if (!mapRef.current || mapInstanceRef.current) return;
     import('maplibre-gl').then((maplibregl) => {
+      if (!mapRef.current) return;
       const map = new maplibregl.Map({
-        container: mapRef.current!,
+        container: mapRef.current,
         style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
-        center: [41.7, 41.7],
-        zoom: 12,
+        center: [0, 20],
+        zoom: 2,
       });
       map.addControl(new maplibregl.NavigationControl());
+      map.on('load', () => { mapReadyRef.current = true; });
       mapInstanceRef.current = map;
     });
   }, []);
 
-  // Update markers
+  // Update markers — key fix: resize map + wait for load
   useEffect(() => {
-    if (!mapInstanceRef.current || !selectedCity) return;
+    if (!selectedCity) return;
+
+    // Ensure map is initialized
+    if (!mapInstanceRef.current && mapRef.current) {
+      import('maplibre-gl').then((maplibregl) => {
+        if (!mapRef.current || mapInstanceRef.current) return;
+        const map = new maplibregl.Map({
+          container: mapRef.current,
+          style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+          center: [selectedCity.lon, selectedCity.lat],
+          zoom: 12,
+        });
+        map.addControl(new maplibregl.NavigationControl());
+        mapInstanceRef.current = map;
+        map.on('load', () => addMarkers(map, businesses));
+      });
+      return;
+    }
+
     const map = mapInstanceRef.current;
+    if (!map) return;
+
+    // Fly to city
     map.flyTo({ center: [selectedCity.lon, selectedCity.lat], zoom: 12 });
 
+    // Resize to fix blank map when container becomes visible
+    setTimeout(() => map.resize(), 200);
+    setTimeout(() => map.resize(), 800);
+
+    // Add markers
+    const addMarkersFn = () => addMarkers(map, businesses);
+    if (mapReadyRef.current) {
+      addMarkersFn();
+    } else {
+      map.on('load', addMarkersFn);
+    }
+  }, [businesses, selectedCity]);
+
+  function addMarkers(map: any, biz: Map<string, Business[]>) {
+    // Clear old markers
     markersRef.current.forEach(m => m.remove());
     markersRef.current = [];
 
     const allBiz: Business[] = [];
-    businesses.forEach(bizs => allBiz.push(...bizs));
+    biz.forEach(bizs => allBiz.push(...bizs));
     if (allBiz.length === 0) return;
 
     import('maplibre-gl').then((maplibregl) => {
-      const catColors: Record<string, string> = {
-        cafe: '#f59e0b', restaurant: '#ef4444', bar: '#8b5cf6', pub: '#a855f7',
-        hotel: '#3b82f6', gym: '#10b981', beauty_salon: '#ec4899', hair_salon: '#f472b6',
-        pharmacy: '#06b6d4', supermarket: '#22c55e', bank: '#6366f1', clothing: '#a855f7',
-        electronics: '#64748b', bakery: '#fbbf24', fast_food: '#f97316', school: '#3b82f6',
-      };
-      allBiz.forEach(biz => {
-        const color = catColors[biz.category] || '#94a3b8';
+      // Limit markers for performance (max 500)
+      const markers = allBiz.length > 500 ? allBiz.slice(0, 500) : allBiz;
+
+      markers.forEach(b => {
+        const color = CAT_COLORS[b.category] || '#94a3b8';
         const el = document.createElement('div');
-        el.style.cssText = `width:8px;height:8px;border-radius:50%;background:${color};border:1.5px solid rgba(255,255,255,0.8);box-shadow:0 1px 3px rgba(0,0,0,0.5);cursor:pointer;`;
-        el.title = biz.name || biz.categoryLabel;
+        el.style.cssText = `width:10px;height:10px;border-radius:50%;background:${color};border:2px solid rgba(255,255,255,0.9);box-shadow:0 2px 6px rgba(0,0,0,0.6);cursor:pointer;transition:transform 0.15s;`;
+        el.onmouseenter = () => { el.style.transform = 'scale(1.8)'; };
+        el.onmouseleave = () => { el.style.transform = 'scale(1)'; };
+        el.title = b.name || b.categoryLabel;
+
+        const gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${b.lat},${b.lon}${b.name ? `+${encodeURIComponent(b.name)}` : ''}`;
+
         const marker = new maplibregl.Marker({ element: el })
-          .setLngLat([biz.lon, biz.lat])
-          .setPopup(new maplibregl.Popup({ className: 'dark-popup', maxWidth: '300px' }).setHTML(`
-            <div style="background:#101218;color:#e2e8f0;padding:12px;border-radius:8px;font-family:system-ui;">
-              <div style="font-weight:600;font-size:14px;margin-bottom:2px;">${biz.name || biz.categoryLabel}</div>
-              <div style="font-size:11px;color:#94a3b8;margin-bottom:6px;">${biz.categoryLabel}</div>
-              ${biz.address ? `<div style="font-size:11px;color:#94a3b8;margin-bottom:2px;">📍 ${biz.address}</div>` : ''}
-              ${biz.phone ? `<div style="font-size:11px;color:#94a3b8;margin-bottom:2px;">📞 ${biz.phone}</div>` : ''}
-              ${biz.email ? `<div style="font-size:11px;color:#94a3b8;margin-bottom:2px;">✉️ ${biz.email}</div>` : ''}
-              ${biz.website ? `<div style="font-size:11px;margin-bottom:2px;"><a href="${biz.website}" target="_blank" style="color:#60a5fa;">🌐 Website</a></div>` : ''}
-              <div style="margin-top:6px;"><a href="https://www.google.com/maps?q=${biz.lat},${biz.lon}" target="_blank" style="font-size:11px;color:#34d399;">📍 Open in Google Maps</a></div>
+          .setLngLat([b.lon, b.lat])
+          .setPopup(new maplibregl.Popup({ className: 'dark-popup', maxWidth: '320px', offset: 12 }).setHTML(`
+            <div style="background:#0f1117;color:#e2e8f0;padding:14px;border-radius:10px;font-family:system-ui,-apple-system,sans-serif;min-width:220px;">
+              <div style="font-weight:700;font-size:15px;margin-bottom:4px;color:#f1f5f9;">${b.name || b.categoryLabel}</div>
+              <div style="display:inline-block;background:${color}22;color:${color};font-size:11px;padding:2px 8px;border-radius:99px;margin-bottom:8px;">${b.categoryLabel}</div>
+              ${b.address ? `<div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">📍 ${b.address}</div>` : ''}
+              ${b.phone ? `<div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">📞 <a href="tel:${b.phone}" style="color:#93c5fd;">${b.phone}</a></div>` : ''}
+              ${b.email ? `<div style="font-size:12px;color:#94a3b8;margin-bottom:4px;">✉️ ${b.email}</div>` : ''}
+              ${b.website ? `<div style="font-size:12px;margin-bottom:4px;"><a href="${b.website}" target="_blank" rel="noopener" style="color:#60a5fa;">🌐 Visit website</a></div>` : ''}
+              ${b.openingHours ? `<div style="font-size:11px;color:#64748b;margin-bottom:4px;">🕐 ${b.openingHours}</div>` : ''}
+              ${b.brand ? `<div style="font-size:11px;color:#64748b;margin-bottom:4px;">🏷️ ${b.brand}</div>` : ''}
+              <div style="margin-top:8px;padding-top:8px;border-top:1px solid #1e293b;">
+                <a href="${gmapsUrl}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:6px;background:#1a73e8;color:white;padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none;">
+                  📍 Open in Google Maps
+                </a>
+              </div>
             </div>
           `))
           .addTo(map);
         markersRef.current.push(marker);
       });
     });
-  }, [businesses, selectedCity]);
+  }
 
   // Discover all opportunities
   const runAnalysis = useCallback(async () => {
@@ -183,7 +236,6 @@ export default function App() {
     setShowAllOpps(false);
 
     try {
-      // Step 1: ONE broad Overpass query gets everything
       const biz = await queryBusinesses(
         selectedCity.lat, selectedCity.lon, 10000, undefined,
         (pct, msg) => { setProgress(pct); setLoadingStage(msg); }
@@ -197,7 +249,6 @@ export default function App() {
         return;
       }
 
-      // Step 2: Demand signals for top categories (limit to 6, parallel)
       setLoadingStage('Analyzing demand signals…');
       const topCats = Array.from(biz.entries())
         .sort((a, b) => b[1].length - a[1].length)
@@ -212,7 +263,6 @@ export default function App() {
       setDemandSignals(signals);
       setProgress(80);
 
-      // Step 3: Score
       setLoadingStage('Computing opportunity scores…');
       const opps = computeOpportunities(biz, selectedCity.population || 500000, signals);
       setOpportunities(opps);
@@ -225,7 +275,7 @@ export default function App() {
     }
   }, [selectedCity]);
 
-  // Analyze single industry — reuse same broad query, then filter
+  // Analyze single industry
   const startAnalyze = useCallback(async () => {
     if (!selectedCity || !selectedCategory) return;
     setLoading(true);
@@ -235,7 +285,6 @@ export default function App() {
     setDemandSignals(new Map());
 
     try {
-      // Step 1: ONE broad query (same as discover, fast)
       setLoadingStage(`Scanning ${getCategoryLabel(selectedCategory)}…`);
       setProgress(5);
 
@@ -252,7 +301,6 @@ export default function App() {
         return;
       }
 
-      // Step 2: Demand signals for selected category
       setLoadingStage('Analyzing demand signals…');
       setProgress(55);
       const sig = await getDemandSignals(getCategoryLabel(selectedCategory), selectedCity.name);
@@ -261,7 +309,6 @@ export default function App() {
       setDemandSignals(signals);
       setProgress(80);
 
-      // Step 3: Score
       setLoadingStage('Computing opportunity scores…');
       const opps = computeOpportunities(biz, selectedCity.population || 500000, signals);
       setOpportunities(opps);
@@ -279,6 +326,14 @@ export default function App() {
   const displayOpps = showAllOpps ? opportunities : opportunities.slice(0, 25);
   const selectedCatInfo = selectedOppCategory ? demandSignals.get(selectedOppCategory) : null;
   const selectedOpp = selectedOppCategory ? opportunities.find(o => o.category === selectedOppCategory) : null;
+
+  // Businesses for the selected category
+  const categoryBusinesses = selectedOppCategory ? (businesses.get(selectedOppCategory) || []) : [];
+  const [bizSearch, setBizSearch] = useState('');
+  const filteredBiz = categoryBusinesses.filter(b =>
+    !bizSearch || b.name.toLowerCase().includes(bizSearch.toLowerCase()) ||
+    b.address.toLowerCase().includes(bizSearch.toLowerCase())
+  );
 
   return (
     <div className="min-h-screen bg-background">
@@ -430,23 +485,35 @@ export default function App() {
       {/* Results */}
       {opportunities.length > 0 && selectedCity && (
         <div className="mx-auto max-w-7xl space-y-6 px-4 pb-12">
+          {/* Summary */}
           <div className="rounded-xl border border-border bg-card p-5">
             <div className="flex flex-wrap items-center gap-4">
               <h2 className="text-lg font-bold">Opportunities in {selectedCity.name}</h2>
               <div className="flex gap-3 text-xs text-muted-foreground">
                 <span>📊 {fmtNum(allBizCount)} businesses</span>
                 {selectedCity.population && <span>👥 pop. {fmtCompact(selectedCity.population)}</span>}
-                <span>📈 {opportunities.length} categories analyzed</span>
+                <span>📈 {opportunities.length} categories</span>
               </div>
             </div>
           </div>
 
           {/* Map */}
           <div className="rounded-xl border border-border bg-card overflow-hidden">
-            <div className="px-5 py-3 border-b border-border">
-              <h3 className="text-sm font-semibold">Competition Map · {fmtNum(allBizCount)} businesses detected</h3>
+            <div className="px-5 py-3 border-b border-border flex items-center justify-between">
+              <h3 className="text-sm font-semibold">
+                {selectedOppCategory
+                  ? `${getCategoryLabel(selectedOppCategory)} Map · ${categoryBusinesses.length} locations`
+                  : `Competition Map · ${fmtNum(allBizCount)} businesses`}
+              </h3>
+              <div className="flex gap-2 flex-wrap">
+                {selectedOppCategory && (
+                  <span className="text-xs px-2 py-0.5 rounded-full" style={{background: (CAT_COLORS[selectedOppCategory] || '#94a3b8') + '22', color: CAT_COLORS[selectedOppCategory] || '#94a3b8'}}>
+                    {getCategoryLabel(selectedOppCategory)}
+                  </span>
+                )}
+              </div>
             </div>
-            <div ref={mapRef} className="h-[450px] w-full" />
+            <div ref={mapRef} className="h-[500px] w-full" />
           </div>
 
           {/* Selected category detail */}
@@ -484,21 +551,87 @@ export default function App() {
                 </div>
                 <div className="rounded-lg bg-muted/50 p-3">
                   <div className="text-xs text-muted-foreground">Web Presence</div>
-                  <div className="text-2xl font-bold">{selectedCatInfo.webSearch}</div>
-                  <div className="text-xs text-muted-foreground">/ 100</div>
+                  <div className="text-2xl font-bold">{selectedCatInfo.webSearch}<span className="text-xs text-muted-foreground">/100</span></div>
                 </div>
                 <div className="rounded-lg bg-muted/50 p-3">
                   <div className="text-xs text-muted-foreground">Wikipedia Interest</div>
-                  <div className="text-2xl font-bold">{selectedCatInfo.wikipedia}</div>
-                  <div className="text-xs text-muted-foreground">/ 100</div>
+                  <div className="text-2xl font-bold">{selectedCatInfo.wikipedia}<span className="text-xs text-muted-foreground">/100</span></div>
                 </div>
                 <div className="rounded-lg bg-muted/50 p-3">
                   <div className="text-xs text-muted-foreground">Reddit Mentions</div>
-                  <div className="text-2xl font-bold">{selectedCatInfo.reddit}</div>
-                  <div className="text-xs text-muted-foreground">/ 100</div>
+                  <div className="text-2xl font-bold">{selectedCatInfo.reddit}<span className="text-xs text-muted-foreground">/100</span></div>
                 </div>
               </div>
               <p className="mt-3 text-xs text-muted-foreground">{selectedCatInfo.explanation} · Sources: {selectedCatInfo.sources.join(', ') || 'Calculated'} · Demand adds up to 15% to the score.</p>
+            </div>
+          )}
+
+          {/* Business List — only in single-category mode */}
+          {selectedOppCategory && categoryBusinesses.length > 0 && (
+            <div className="rounded-xl border border-border bg-card overflow-hidden">
+              <div className="px-5 py-3 border-b border-border flex items-center justify-between gap-4">
+                <h3 className="text-sm font-semibold">
+                  {getCategoryLabel(selectedOppCategory)} Businesses · {categoryBusinesses.length} found
+                </h3>
+                <input
+                  value={bizSearch}
+                  onChange={e => setBizSearch(e.target.value)}
+                  placeholder="Search businesses…"
+                  className="h-8 w-48 rounded-lg border border-border bg-background px-3 text-xs outline-none focus:ring-2 focus:ring-ring"
+                />
+              </div>
+              <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="sticky top-0 bg-card z-10">
+                    <tr className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
+                      <th className="px-4 py-2.5 font-medium">#</th>
+                      <th className="px-4 py-2.5 font-medium">Business Name</th>
+                      <th className="px-4 py-2.5 font-medium">Address</th>
+                      <th className="px-4 py-2.5 font-medium">Phone</th>
+                      <th className="px-4 py-2.5 font-medium">Website</th>
+                      <th className="px-4 py-2.5 font-medium">Email</th>
+                      <th className="px-4 py-2.5 font-medium">Hours</th>
+                      <th className="px-4 py-2.5 font-medium text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredBiz.map((b, i) => {
+                      const gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${b.lat},${b.lon}${b.name ? `+${encodeURIComponent(b.name)}` : ''}`;
+                      return (
+                        <tr key={b.id} className="border-b border-border/50 last:border-0 hover:bg-muted/20 transition-colors">
+                          <td className="px-4 py-3 text-xs text-muted-foreground">{i + 1}</td>
+                          <td className="px-4 py-3">
+                            <div className="font-medium text-sm">{b.name || <span className="text-muted-foreground italic">Unnamed</span>}</div>
+                            {b.brand && <div className="text-xs text-muted-foreground">🏷️ {b.brand}</div>}
+                          </td>
+                          <td className="px-4 py-3 text-xs text-muted-foreground max-w-[200px] truncate">{b.address || '—'}</td>
+                          <td className="px-4 py-3 text-xs">
+                            {b.phone ? <a href={`tel:${b.phone}`} className="text-blue-400 hover:underline">{b.phone}</a> : <span className="text-muted-foreground">—</span>}
+                          </td>
+                          <td className="px-4 py-3 text-xs">
+                            {b.website ? <a href={b.website} target="_blank" rel="noopener" className="text-blue-400 hover:underline">🌐 Link</a> : <span className="text-muted-foreground">—</span>}
+                          </td>
+                          <td className="px-4 py-3 text-xs text-muted-foreground max-w-[150px] truncate">{b.email || '—'}</td>
+                          <td className="px-4 py-3 text-xs text-muted-foreground max-w-[120px] truncate">{b.openingHours || '—'}</td>
+                          <td className="px-4 py-3 text-right">
+                            <a
+                              href={gmapsUrl}
+                              target="_blank"
+                              rel="noopener"
+                              className="inline-flex items-center gap-1 rounded-md bg-blue-600/20 px-2.5 py-1 text-xs font-medium text-blue-400 hover:bg-blue-600/30 transition-colors"
+                            >
+                              📍 Google Maps
+                            </a>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {filteredBiz.length === 0 && bizSearch && (
+                <div className="py-8 text-center text-sm text-muted-foreground">No businesses match "{bizSearch}"</div>
+              )}
             </div>
           )}
 
@@ -532,6 +665,7 @@ export default function App() {
                   {displayOpps.map((opp, i) => {
                     const demand = demandSignals.get(opp.category);
                     const isSelected = selectedOppCategory === opp.category;
+                    const color = CAT_COLORS[opp.category] || '#94a3b8';
                     return (
                       <tr
                         key={opp.category}
@@ -539,7 +673,10 @@ export default function App() {
                         className={`border-b border-border/50 last:border-0 cursor-pointer transition-colors ${isSelected ? 'bg-primary/10' : 'hover:bg-muted/30'}`}
                       >
                         <td className="px-5 py-3 text-xs text-muted-foreground">{i + 1}</td>
-                        <td className="px-4 py-3 font-medium">{opp.categoryLabel}</td>
+                        <td className="px-4 py-3 font-medium flex items-center gap-2">
+                          <span className="w-2.5 h-2.5 rounded-full inline-block flex-shrink-0" style={{background: color}} />
+                          {opp.categoryLabel}
+                        </td>
                         <td className="px-4 py-3 text-right tabular-nums">{fmtNum(opp.existing)}</td>
                         <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">{opp.per10k}</td>
                         <td className="px-4 py-3 text-right tabular-nums">
@@ -568,6 +705,7 @@ export default function App() {
             )}
           </div>
 
+          {/* Methodology */}
           <div className="rounded-xl border border-border bg-card p-5 text-xs leading-relaxed text-muted-foreground">
             <p className="font-medium text-foreground mb-1">How the scoring works</p>
             <p>
