@@ -68,10 +68,10 @@ const COUNTRY_CODES: Record<string, string> = {
 // ─── Find Top Cities in Country ────────────────────────────────────
 
 async function findTopCities(countryName: string, countryCode: string): Promise<CityResult[]> {
-  const cc = COUNTRY_CODES[countryName] || countryCode;
+  const cc = (COUNTRY_CODES[countryName] || countryCode).toLowerCase();
   
-  // Search for cities in this country sorted by importance
-  const url = `https://nominatim.openstreetmap.org/search?q=city+in+${encodeURIComponent(countryName)}&format=json&addressdetails=1&limit=10&extratags=1&featuretype=city`;
+  // Use Nominatim with countrycodes filter — much more reliable than text search
+  const url = `https://nominatim.openstreetmap.org/search?q=city&format=json&addressdetails=1&limit=20&extratags=1&countrycodes=${cc}`;
   const res = await fetch(url, { headers: { 'Accept': 'language,en' } });
   const data = await res.json();
 
@@ -82,8 +82,8 @@ async function findTopCities(countryName: string, countryCode: string): Promise<
     const resultCountry = addr.country || '';
     const resultCC = addr.country_code?.toUpperCase() || '';
     
-    // Match by country code or name
-    if (resultCC !== cc && !resultCountry.toLowerCase().includes(countryName.toLowerCase())) continue;
+    // Country already filtered by countrycodes param, but double-check
+    if (resultCC && resultCC.toLowerCase() !== cc) continue;
     
     const pop = r.extratags?.population ? parseInt(r.extratags.population) : null;
     const bbox = r.boundingbox.map(Number);
