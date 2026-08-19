@@ -234,6 +234,57 @@ const OVERPASS_MIRRORS = [
 
 const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
 
+// Map category IDs to OSM tag filters for focused queries
+const CAT_OSM_FILTER: Record<string, string> = {
+  cafe: '["amenity"="cafe"]',
+  restaurant: '["amenity"="restaurant"]',
+  bar: '["amenity"~"bar|biergarten"]',
+  pub: '["amenity"="pub"]',
+  fast_food: '["amenity"~"fast_food|food_court"]',
+  ice_cream: '["amenity"="ice_cream"]',
+  hotel: '["tourism"~"hotel|hostel|motel|apartment|guest_house"]',
+  gym: '["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool"]',
+  beauty_salon: '["shop"~"beauty|cosmetics|nail_salon"]',
+  hair_salon: '["shop"~"hairdresser|wigs"]',
+  pharmacy: '["amenity"~"pharmacy|chemist"]',
+  hospital: '["amenity"="hospital"]',
+  clinic: '["amenity"~"clinic|doctors"]',
+  dentist: '["amenity"="dentist"]',
+  supermarket: '["shop"~"supermarket|greengrocer|deli"]',
+  grocery: '["shop"~"grocery|health_food"]',
+  clothing: '["shop"~"clothes|fashion|boutique|shoes"]',
+  electronics: '["shop"~"electronics|mobile_phone|computer|hifi"]',
+  furniture: '["shop"~"furniture|interior_decoration"]',
+  hardware: '["shop"~"doityourself|trade|hardware"]',
+  bank: '["amenity"="bank"]',
+  school: '["amenity"~"school|college|university"]',
+  cinema: '["amenity"="cinema"]',
+  bakery: '["shop"~"bakery|pastry"]',
+  car_repair: '["shop"~"car_repair|car_parts"]',
+  laundry: '["shop"~"laundry|dry_cleaning"]',
+  pet_groomer: '["shop"~"pet_grooming|pet"]',
+  coworking: '["office"="coworking"]',
+  nightclub: '["amenity"="nightclub"]',
+  car_rental: '["amenity"="car_rental"]',
+  veterinary: '["amenity"="veterinary"]',
+  florist: '["shop"="florist"]',
+  optician: '["shop"~"optician|eyewear"]',
+  butcher: '["shop"="butcher"]',
+  marketplace: '["amenity"="marketplace"]',
+  fuel: '["amenity"="fuel"]',
+  department_store: '["shop"="department_store"]',
+  jewelry: '["shop"~"jewelry|jewellery|watches"]',
+  sports: '["shop"~"sports|outdoor"]',
+  art: '["shop"="art"]',
+  bicycle: '["shop"="bicycle"]',
+  convenience: '["shop"~"convenience|kiosk|newsagent"]',
+  spa: '["shop"="beauty"]',
+  yoga: '["leisure"="fitness_centre"]',
+  bookstore: '["shop"~"books|stationery"]',
+  library: '["amenity"="library"]',
+  post_office: '["amenity"="post_office"]',
+};
+
 async function fetchOverpass(query: string, timeoutSec = 60): Promise<any> {
   for (let mi = 0; mi < OVERPASS_MIRRORS.length; mi++) {
     const mirror = OVERPASS_MIRRORS[mi];
@@ -271,6 +322,27 @@ async function fetchOverpass(query: string, timeoutSec = 60): Promise<any> {
     // Wait between mirrors
     if (mi < OVERPASS_MIRRORS.length - 1) await wait(2000);
   }
+  // ── Last resort: CORS proxy ──
+  try {
+    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(OVERPASS_MIRRORS[0])}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 75000);
+    const res = await fetch(proxyUrl, {
+      method: 'POST',
+      body: `data=${encodeURIComponent(query)}`,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (res.ok) {
+      const text = await res.text();
+      if (text.trim().startsWith('{')) {
+        const data = JSON.parse(text);
+        if (data.elements !== undefined) return data;
+      }
+    }
+  } catch {}
+
   return null;
 }
 
@@ -278,7 +350,8 @@ export async function queryBusinesses(
   lat: number,
   lon: number,
   radiusMeters: number = 10000,
-  onProgress?: (pct: number, msg: string) => void
+  onProgress?: (pct: number, msg: string) => void,
+  categoryFilter?: string
 ): Promise<Map<string, Business[]>> {
   const results = new Map<string, Business[]>();
   const south = lat - radiusMeters / 111000;
@@ -322,24 +395,23 @@ out center body;`;
 
   const allElements: any[] = [];
 
-  onProgress?.(10, 'Scanning food, healthcare & entertainment…');
-  const d1 = await fetchOverpass(qFood, 90);
-  if (d1?.elements) allElements.push(...d1.elements);
+  // ── FOCUSED MODE: Single category query (much faster) ──
+  if (categoryFilter && CAT_OSM_FILTER[categoryFilter]) {
+    const filter = CAT_OSM_FILTER[categoryFilter];
+    const qFocused = `[out:json][timeout:90][maxsize:536870912];
+(
+  node(${bbox})${filter};
+  way(${bbox})${filter};
+);
+out center body;`;
+    onProgress?.(10, `Scanning for ${getCategoryLabel(categoryFilter)}…`);
+    const d = await fetchOverpass(qFocused, 90);
+    if (d?.elements) allElements.push(...d.elements);
 
-  await wait(1500);
-  onProgress?.(30, 'Scanning shops & retail…');
-  const d2 = await fetchOverpass(qShops, 90);
-  if (d2?.elements) allElements.push(...d2.elements);
-
-  await wait(1500);
-  onProgress?.(50, 'Scanning hotels, gyms & services…');
-  const d3 = await fetchOverpass(qOther, 60);
-  if (d3?.elements) allElements.push(...d3.elements);
-
-  // ── Tier 2: Fallback — if Tier 1 got nothing, try a minimal query ──
-  if (allElements.length === 0) {
-    onProgress?.(60, 'Retrying with minimal query…');
-    const qMin = `[out:json][timeout:60];
+    // Fallback: try broader query
+    if (allElements.length === 0) {
+      onProgress?.(50, 'Retrying with broader query…');
+      const qBroad = `[out:json][timeout:60][maxsize:268435456];
 (
   node(${bbox})["amenity"];
   way(${bbox})["amenity"];
@@ -347,8 +419,39 @@ out center body;`;
   way(${bbox})["shop"];
 );
 out center body;`;
-    const d4 = await fetchOverpass(qMin, 60);
-    if (d4?.elements) allElements.push(...d4.elements);
+      const d2 = await fetchOverpass(qBroad, 60);
+      if (d2?.elements) allElements.push(...d2.elements);
+    }
+  } else {
+    // ── FULL MODE: All categories (for Discover Opportunities) ──
+    onProgress?.(10, 'Scanning food, healthcare & entertainment…');
+    const d1 = await fetchOverpass(qFood, 90);
+    if (d1?.elements) allElements.push(...d1.elements);
+
+    await wait(1500);
+    onProgress?.(30, 'Scanning shops & retail…');
+    const d2 = await fetchOverpass(qShops, 90);
+    if (d2?.elements) allElements.push(...d2.elements);
+
+    await wait(1500);
+    onProgress?.(50, 'Scanning hotels, gyms & services…');
+    const d3 = await fetchOverpass(qOther, 60);
+    if (d3?.elements) allElements.push(...d3.elements);
+
+    // ── Tier 2: Fallback ──
+    if (allElements.length === 0) {
+      onProgress?.(60, 'Retrying with minimal query…');
+      const qMin = `[out:json][timeout:60];
+(
+  node(${bbox})["amenity"];
+  way(${bbox})["amenity"];
+  node(${bbox})["shop"];
+  way(${bbox})["shop"];
+);
+out center body;`;
+      const d4 = await fetchOverpass(qMin, 60);
+      if (d4?.elements) allElements.push(...d4.elements);
+    }
   }
 
   onProgress?.(60, 'Categorizing businesses…');

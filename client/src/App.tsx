@@ -293,7 +293,8 @@ export default function App() {
 
       const biz = await queryBusinesses(
         selectedCity.lat, selectedCity.lon, 10000,
-        (pct, msg) => { setProgress(Math.max(pct, 5)); setLoadingStage(msg); }
+        (pct, msg) => { setProgress(Math.max(pct, 5)); setLoadingStage(msg); },
+        selectedCategory
       );
       setBusinesses(biz);
       setProgress(45);
