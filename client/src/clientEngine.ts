@@ -4,7 +4,7 @@
  * 100% client-side — runs in the browser, no backend needed.
  * Uses free public APIs:
  * - Nominatim (city resolution, boundaries)
- * - Overpass API (OpenStreetMap businesses) — ONE broad query with multilingual names
+ * - Overpass API (OpenStreetMap businesses) with fallback
  * - Wikipedia REST API (demand signals)
  * - DuckDuckGo (search density)
  */
@@ -26,7 +26,9 @@ export interface CityResult {
 export async function resolveCity(query: string): Promise<CityResult[]> {
   const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&addressdetails=1&limit=5&extratags=1`;
   const res = await fetch(url, { headers: { 'Accept': 'language,en' } });
+  if (!res.ok) throw new Error(`Nominatim returned ${res.status}`);
   const data = await res.json();
+  if (!data.length) throw new Error(`No results found for "${query}"`);
   return data.map((r: any) => {
     const bbox = r.boundingbox.map(Number);
     const pop = r.extratags?.population ? parseInt(r.extratags.population) : null;
@@ -62,8 +64,6 @@ export interface Business {
   cuisine: string;
   facebook: string;
   instagram: string;
-  wikidata: string;
-  wikipedia: string;
 }
 
 export const CATEGORY_QUERIES: Record<string, { label: string }> = {
@@ -135,85 +135,130 @@ export function getCategoryLabel(id: string): string {
   return CATEGORY_QUERIES[id]?.label || id.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
-// ─── Single Overpass Query (broad + multilingual) ──────────────────
+// ─── Improved Categorization ───────────────────────────────────────
 
 function categorizeBusiness(tags: Record<string, string>): string | null {
+  const a = tags.amenity;
+  const s = tags.shop;
+  const t = tags.tourism;
+  const l = tags.leisure;
+  const o = tags.office;
+  const c = tags.cuisine || '';
+
   // Amenity-based
-  if (tags.amenity === 'cafe' || tags.cuisine?.includes('coffee') || tags.cuisine?.includes('espresso')) return 'cafe';
-  if (tags.amenity === 'restaurant') return 'restaurant';
-  if (tags.amenity === 'bar' || tags.amenity === 'biergarten') return 'bar';
-  if (tags.amenity === 'pub') return 'pub';
-  if (tags.amenity === 'fast_food' || tags.amenity === 'food_court') return 'fast_food';
-  if (tags.amenity === 'ice_cream') return 'ice_cream';
-  if (tags.amenity === 'pharmacy' || tags.amenity === 'chemist') return 'pharmacy';
-  if (tags.amenity === 'hospital') return 'hospital';
-  if (tags.amenity === 'clinic' || tags.amenity === 'doctors') return 'clinic';
-  if (tags.amenity === 'dentist') return 'dentist';
-  if (tags.amenity === 'bank') return 'bank';
-  if (tags.amenity === 'school' || tags.amenity === 'college') return 'school';
-  if (tags.amenity === 'kindergarten' || tags.amenity === ' nursery') return 'kindergarten';
-  if (tags.amenity === 'cinema') return 'cinema';
-  if (tags.amenity === 'theatre' || tags.amenity === 'arts_centre') return 'theater';
-  if (tags.amenity === 'fuel') return 'fuel';
-  if (tags.amenity === 'veterinary' || tags.amenity === 'animal_shelter') return 'veterinary';
-  if (tags.amenity === 'community_centre') return 'community_center';
-  if (tags.amenity === 'library') return 'library';
-  if (tags.amenity === 'post_office') return 'post_office';
-  if (tags.amenity === 'car_rental') return 'car_rental';
-  if (tags.amenity === 'nightclub') return 'night_club';
-  if (tags.amenity === 'casino') return 'night_club';
-  if (tags.amenity === 'marketplace') return 'marketplace';
+  if (a === 'cafe' || c.includes('coffee') || c.includes('espresso') || c.includes('cappuccino')) return 'cafe';
+  if (a === 'restaurant' || (a && c && a !== 'cafe' && a !== 'bar' && a !== 'fast_food')) return 'restaurant';
+  if (a === 'bar' || a === 'biergarten') return 'bar';
+  if (a === 'pub') return 'pub';
+  if (a === 'fast_food' || a === 'food_court') return 'fast_food';
+  if (a === 'ice_cream') return 'ice_cream';
+  if (a === 'pharmacy' || a === 'chemist') return 'pharmacy';
+  if (a === 'hospital') return 'hospital';
+  if (a === 'clinic' || a === 'doctors') return 'clinic';
+  if (a === 'dentist') return 'dentist';
+  if (a === 'bank') return 'bank';
+  if (a === 'school' || a === 'college' || a === 'university') return 'school';
+  if (a === 'kindergarten') return 'kindergarten';
+  if (a === 'cinema') return 'cinema';
+  if (a === 'theatre' || a === 'arts_centre') return 'theater';
+  if (a === 'fuel') return 'fuel';
+  if (a === 'veterinary' || a === 'animal_shelter') return 'veterinary';
+  if (a === 'community_centre') return 'community_center';
+  if (a === 'library') return 'library';
+  if (a === 'post_office') return 'post_office';
+  if (a === 'car_rental') return 'car_rental';
+  if (a === 'nightclub') return 'night_club';
+  if (a === 'casino') return 'night_club';
+  if (a === 'marketplace') return 'marketplace';
+  if (a === 'shelter') return null; // not a business
 
-  // Tourism-based
-  if (tags.tourism === 'hotel' || tags.tourism === 'motel') return 'hotel';
-  if (tags.tourism === 'hostel') return 'hostel';
-  if (tags.tourism === 'guest_house' || tags.tourism === 'bed_and_breakfast') return 'guest_house';
-  if (tags.tourism === 'camp_site') return 'camping';
-  if (tags.tourism === 'museum') return 'museum';
+  // Tourism
+  if (t === 'hotel' || t === 'motel' || t === 'apartment') return 'hotel';
+  if (t === 'hostel') return 'hostel';
+  if (t === 'guest_house' || t === 'bed_and_breakfast') return 'guest_house';
+  if (t === 'camp_site') return 'camping';
+  if (t === 'museum') return 'museum';
 
-  // Leisure-based
-  if (tags.leisure === 'fitness_centre' || tags.leisure === 'sports_centre' || tags.leisure === 'pitch' || tags.sport) return 'gym';
-  if (tags.leisure === 'bowling_alley') return 'bowling';
-  if (tags.leisure === 'yoga') return 'yoga';
+  // Leisure
+  if (l === 'fitness_centre' || l === 'sports_centre' || l === 'pitch' || l === 'stadium' || tags.sport) return 'gym';
+  if (l === 'bowling_alley') return 'bowling';
+  if (l === 'yoga') return 'yoga';
+  if (l === 'dance') return 'yoga';
 
-  // Office-based
-  if (tags.office === 'coworking' || tags.office === 'company') return 'coworking';
+  // Office
+  if (o === 'coworking' || o === 'company') return 'coworking';
 
-  // Shop-based (broader matching)
-  if (tags.shop === 'beauty' || tags.shop === 'cosmetics') return 'beauty_salon';
-  if (tags.shop === 'hairdresser' || tags.shop === 'wigs') return 'hair_salon';
-  if (tags.shop === 'nail_salon') return 'nail_salon';
-  if (tags.shop === 'tattoo' || tags.shop === 'piercing') return 'tattoo';
-  if (tags.shop === 'supermarket' || tags.shop === 'supermarket;greengrocer') return 'supermarket';
-  if (tags.shop === 'grocery' || tags.shop === 'greengrocer' || tags.shop === 'deli') return 'grocery';
-  if (tags.shop === 'convenience' || tags.shop === 'kiosk' || tags.shop === 'newsagent') return 'convenience';
-  if (tags.shop === 'clothes' || tags.shop === 'fashion' || tags.shop === 'shoes') return 'clothing';
-  if (tags.shop === 'electronics' || tags.shop === 'mobile_phone' || tags.shop === 'computer' || tags.shop === 'hifi') return 'electronics';
-  if (tags.shop === 'furniture' || tags.shop === 'interior_decoration') return 'furniture';
-  if (tags.shop === 'doityourself' || tags.shop === 'trade' || tags.shop === 'hardware') return 'hardware';
-  if (tags.shop === 'bakery' || tags.shop === 'pastry') return 'bakery';
-  if (tags.shop === 'butcher') return 'butcher';
-  if (tags.shop === 'florist') return 'florist';
-  if (tags.shop === 'optician' || tags.shop === 'eyewear') return 'optician';
-  if (tags.shop === 'car_repair' || tags.shop === 'car' || tags.shop === 'car_parts') return 'car_repair';
-  if (tags.shop === 'laundry' || tags.shop === 'dry_cleaning') return 'laundry';
-  if (tags.shop === 'pet_grooming' || tags.shop === 'pet') return 'pet_groomer';
-  if (tags.shop === 'jewelry' || tags.shop === 'jewellery' || tags.shop === 'watches') return 'jewelry';
-  if (tags.shop === 'shoes') return 'shoes';
-  if (tags.shop === 'sports' || tags.shop === 'outdoor') return 'sports';
-  if (tags.shop === 'books' || tags.shop === 'stationery') return 'books';
-  if (tags.shop === 'department_store') return 'department_store';
-  if (tags.shop === 'wine' || tags.shop === 'alcohol') return 'wine';
-  if (tags.shop === 'art') return 'art';
-  if (tags.shop === 'bicycle') return 'bicycle';
+  // Shop — broad matching
+  if (s === 'beauty' || s === 'cosmetics') return 'beauty_salon';
+  if (s === 'hairdresser' || s === 'wigs') return 'hair_salon';
+  if (s === 'nail_salon') return 'nail_salon';
+  if (s === 'tattoo' || s === 'piercing') return 'tattoo';
+  if (s === 'supermarket' || s === 'greengrocer' || s === 'deli') return 'supermarket';
+  if (s === 'grocery' || s === 'health_food') return 'grocery';
+  if (s === 'convenience' || s === 'kiosk' || s === 'newsagent') return 'convenience';
+  if (s === 'clothes' || s === 'fashion' || s === 'boutique') return 'clothing';
+  if (s === 'shoes' || s === 'shoe') return 'shoes';
+  if (s === 'electronics' || s === 'mobile_phone' || s === 'computer' || s === 'hifi') return 'electronics';
+  if (s === 'furniture' || s === 'interior_decoration' || s === 'houseware') return 'furniture';
+  if (s === 'doityourself' || s === 'trade' || s === 'hardware') return 'hardware';
+  if (s === 'bakery' || s === 'pastry') return 'bakery';
+  if (s === 'butcher') return 'butcher';
+  if (s === 'florist') return 'florist';
+  if (s === 'optician' || s === 'eyewear') return 'optician';
+  if (s === 'car_repair' || s === 'car' || s === 'car_parts') return 'car_repair';
+  if (s === 'laundry' || s === 'dry_cleaning') return 'laundry';
+  if (s === 'pet_grooming' || s === 'pet') return 'pet_groomer';
+  if (s === 'jewelry' || s === 'jewellery' || s === 'watches') return 'jewelry';
+  if (s === 'sports' || s === 'outdoor') return 'sports';
+  if (s === 'books' || s === 'stationery') return 'books';
+  if (s === 'department_store') return 'department_store';
+  if (s === 'wine' || s === 'alcohol') return 'wine';
+  if (s === 'art') return 'art';
+  if (s === 'bicycle') return 'bicycle';
+  if (s === 'fuel') return 'fuel';
 
-  // Cuisine fallback — if it has cuisine but wasn't caught above
-  if (tags.cuisine) {
-    if (tags.amenity) return tags.amenity as any;
-    return 'restaurant';
+  // Generic amenity fallback
+  if (a) {
+    const map: Record<string, string> = {
+      restaurant: 'restaurant', cafe: 'cafe', bar: 'bar', fast_food: 'fast_food',
+      pharmacy: 'pharmacy', hospital: 'hospital', bank: 'bank', school: 'school',
+    };
+    return map[a] || null;
   }
 
   return null;
+}
+
+// ─── Improved Parsing ──────────────────────────────────────────────
+
+function extractPhone(tags: Record<string, string>): string {
+  return tags.phone || tags['contact:phone'] || tags['contact:mobile'] || 
+         tags['phone:mobile'] || tags['phone:international'] || '';
+}
+
+function extractEmail(tags: Record<string, string>): string {
+  return tags.email || tags['contact:email'] || tags['email:office'] || '';
+}
+
+function extractWebsite(tags: Record<string, string>): string {
+  return tags.website || tags['contact:website'] || tags['url'] || '';
+}
+
+function extractFacebook(tags: Record<string, string>): string {
+  const raw = tags['contact:facebook'] || tags.facebook || '';
+  if (!raw) return '';
+  // Clean up the URL
+  if (raw.startsWith('http')) return raw;
+  if (raw.startsWith('www.')) return `https://${raw}`;
+  return `https://facebook.com/${raw.replace(/^\/+/, '')}`;
+}
+
+function extractInstagram(tags: Record<string, string>): string {
+  const raw = tags['contact:instagram'] || tags.instagram || '';
+  if (!raw) return '';
+  if (raw.startsWith('http')) return raw;
+  const handle = raw.replace(/^@+/, '');
+  return `https://instagram.com/${handle}`;
 }
 
 function formatAddress(tags: Record<string, string>): string {
@@ -221,15 +266,49 @@ function formatAddress(tags: Record<string, string>): string {
   return parts.join(', ') || tags.address || '';
 }
 
+// ─── Overpass API with Fallback ────────────────────────────────────
+
 const OVERPASS_MIRRORS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
   'https://lz4.overpass-api.de/api/interpreter',
+  'https://overpass.openstreetmap.ru/api/interpreter',
 ];
 
+async function fetchOverpass(query: string): Promise<any> {
+  for (const mirror of OVERPASS_MIRRORS) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 50000);
+      const res = await fetch(mirror, {
+        method: 'POST',
+        body: `data=${encodeURIComponent(query)}`,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      
+      if (!res.ok) continue; // Try next mirror
+      
+      const text = await res.text();
+      // Check if response is actually JSON (not an error page)
+      if (!text.trim().startsWith('{')) continue;
+      
+      const data = JSON.parse(text);
+      // Check for Overpass error in the response
+      if (data.remark?.includes('error') || data.elements === undefined) continue;
+      
+      return data;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 /**
- * ONE broad Overpass query with extended tag coverage.
- * Gets all commercial POIs in a single request, categorize client-side.
+ * Query businesses via Overpass API.
+ * If the main broad query fails, falls back to a simpler query.
  */
 export async function queryBusinesses(
   lat: number,
@@ -245,53 +324,48 @@ export async function queryBusinesses(
   const west = lon - radiusMeters / (111000 * cosLat);
   const east = lon + radiusMeters / (111000 * cosLat);
 
-  // Broad query — catch ALL commercial POIs
-  const query = `[out:json][timeout:60];
+  onProgress?.(5, 'Downloading businesses from OpenStreetMap…');
+
+  // Try broad query first
+  const broadQuery = `[out:json][timeout:60];
 (
   node(${south},${west},${north},${east})["amenity"];
   node(${south},${west},${north},${east})["shop"];
-  node(${south},${west},${north},${east})["tourism"];
-  node(${south},${west},${north},${east})["leisure"];
+  node(${south},${west},${north},${east})["tourism"~"hotel|hostel|guest_house|camp_site|museum"];
+  node(${south},${west},${north},${east})["leisure"~"fitness_centre|sports_centre|bowling_alley|yoga"];
   node(${south},${west},${north},${east})["office"];
-  node(${south},${west},${north},${east})["craft"];
   way(${south},${west},${north},${east})["amenity"];
   way(${south},${west},${north},${east})["shop"];
-  way(${south},${west},${north},${east})["tourism"];
-  way(${south},${west},${north},${east})["leisure"];
+  way(${south},${west},${north},${east})["tourism"~"hotel|hostel|guest_house|camp_site|museum"];
+  way(${south},${west},${north},${east})["leisure"~"fitness_centre|sports_centre|bowling_alley|yoga"];
   way(${south},${west},${north},${east})["office"];
-  way(${south},${west},${north},${east})["craft"];
 );
 out center body;`;
 
-  onProgress?.(5, 'Downloading businesses from OpenStreetMap…');
+  let data = await fetchOverpass(broadQuery);
 
-  let data: any = null;
-  for (const mirror of OVERPASS_MIRRORS) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 55000);
-      const res = await fetch(mirror, {
-        method: 'POST',
-        body: `data=${encodeURIComponent(query)}`,
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-      if (res.ok) {
-        data = await res.json();
-        break;
-      }
-    } catch {
-      continue;
-    }
+  // Fallback: simpler query if broad fails
+  if (!data?.elements?.length) {
+    onProgress?.(10, 'Trying alternative data source…');
+    const simpleQuery = `[out:json][timeout:45];
+(
+  node(${south},${west},${north},${east})["amenity"~"cafe|restaurant|bar|fast_food|pharmacy|bank|hotel|gym|cinema|school|hospital|dentist|beauty|hairdresser|supermarket|bakery|clothes|shoes|electronics|car_repair|laundry|pet"];
+  node(${south},${west},${north},${east})["shop"];
+  way(${south},${west},${north},${east})["amenity"~"cafe|restaurant|bar|fast_food|pharmacy|bank|hotel|gym|cinema|school|hospital|dentist|beauty|hairdresser|supermarket|bakery|clothes|shoes|electronics|car_repair|laundry|pet"];
+  way(${south},${west},${north},${east})["shop"];
+);
+out center body;`;
+    data = await fetchOverpass(simpleQuery);
   }
 
   onProgress?.(30, 'Categorizing businesses…');
 
-  if (!data?.elements) return results;
+  if (!data?.elements?.length) {
+    onProgress?.(35, 'No businesses found in this area');
+    return results;
+  }
 
-  // Dedup by location (within ~5m) to avoid duplicates from overlapping tags
-  const seenLocations = new Map<string, string>(); // "lat,lon" -> category
+  const seenLocations = new Map<string, string>();
 
   for (const el of data.elements) {
     const elLat = el.lat || el.center?.lat;
@@ -302,20 +376,12 @@ out center body;`;
     const category = categorizeBusiness(tags);
     if (!category) continue;
 
-    // Dedup: if a node at nearly the same location already exists in the same category, skip
     const locKey = `${Math.round(elLat * 1000)},${Math.round(elLon * 1000)}`;
     const existingCat = seenLocations.get(locKey);
-    if (existingCat === category) continue; // exact same location + category = duplicate
+    if (existingCat === category) continue;
     seenLocations.set(locKey, category);
 
-    // Get the best name — try multiple name variants
-    const name = tags.name || tags['name:en'] || tags['name:int'] || tags['brand'] || '';
-
-    // Google Maps link — use name + city for actual business profile
-    const cityName = tags['addr:city'] || '';
-    const gmapsQuery = name
-      ? `${name} ${cityName || ''}`.trim()
-      : `${elLat},${elLon}`;
+    const name = tags.name || tags['name:en'] || tags['name:int'] || tags.brand || '';
 
     const business: Business = {
       id: `${el.type}/${el.id}`,
@@ -325,16 +391,14 @@ out center body;`;
       category,
       categoryLabel: getCategoryLabel(category),
       address: formatAddress(tags),
-      phone: tags.phone || tags['contact:phone'] || '',
-      website: tags.website || tags['contact:website'] || '',
-      email: tags.email || tags['contact:email'] || '',
+      phone: extractPhone(tags),
+      website: extractWebsite(tags),
+      email: extractEmail(tags),
       openingHours: tags.opening_hours || '',
       brand: tags.brand || '',
       cuisine: tags.cuisine || '',
-      facebook: tags['contact:facebook'] || tags.facebook || '',
-      instagram: tags['contact:instagram'] || tags.instagram || '',
-      wikidata: tags.wikidata || '',
-      wikipedia: tags.wikipedia || '',
+      facebook: extractFacebook(tags),
+      instagram: extractInstagram(tags),
     };
 
     if (!results.has(category)) results.set(category, []);
@@ -346,15 +410,13 @@ out center body;`;
   return results;
 }
 
-// ─── Google Maps URL helper ────────────────────────────────────────
+// ─── Google Maps URL ───────────────────────────────────────────────
 
 export function getGoogleMapsUrl(b: Business): string {
-  // Search by business name for actual business profile (not random pin)
   if (b.name) {
-    const query = `${b.name} ${b.address || ''}`.trim();
-    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+    const parts = [b.name, b.address].filter(Boolean);
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(parts.join(' '))}`;
   }
-  // Fallback to coordinates only if no name
   return `https://www.google.com/maps?q=${b.lat},${b.lon}`;
 }
 
@@ -463,7 +525,7 @@ export function computeOpportunities(
     per10kValues.push((bizs.length / Math.max(population, 1)) * 10000);
   }
   per10kValues.sort((a, b) => a - b);
-  const median = per10kValues[Math.floor(per10kValues.length / 2)] || 1;
+  const median = per10kValues.length > 0 ? per10kValues[Math.floor(per10kValues.length / 2)] : 1;
 
   for (const [cat, bizs] of businesses) {
     const existing = bizs.length;

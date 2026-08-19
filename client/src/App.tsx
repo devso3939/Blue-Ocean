@@ -364,8 +364,6 @@ export default function App() {
         case 'address': av = a.address.toLowerCase(); bv = b.address.toLowerCase(); break;
         case 'phone': av = a.phone; bv = b.phone; break;
         case 'website': av = a.website; bv = b.website; break;
-        case 'hours': av = a.openingHours; bv = b.openingHours; break;
-        case 'stars': av = parseFloat(a.stars) || 0; bv = parseFloat(b.stars) || 0; break;
         default: av = a.name.toLowerCase(); bv = b.name.toLowerCase();
       }
       if (av < bv) return sortDir === 'asc' ? -1 : 1;
@@ -818,6 +816,13 @@ export default function App() {
               </div>
               {filteredBiz.length === 0 && bizSearch && (
                 <div className="py-8 text-center text-sm text-muted-foreground">No businesses match "{bizSearch}"</div>
+              )}
+              {filteredBiz.length === 0 && !bizSearch && categoryBusinesses.length === 0 && (
+                <div className="py-8 text-center text-sm text-muted-foreground">
+                  <div className="text-2xl mb-2">🔍</div>
+                  No {getCategoryLabel(selectedOppCategory || '')} businesses found in {selectedCity?.name || 'this city'}.<br/>
+                  <span className="text-xs">This could be a Blue Ocean opportunity!</span>
+                </div>
               )}
             </div>
           )}
