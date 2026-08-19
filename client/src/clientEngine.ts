@@ -4,7 +4,7 @@
  * 100% client-side — runs in the browser, no backend needed.
  * Uses free public APIs:
  * - Nominatim (city resolution, boundaries)
- * - Overpass API (OpenStreetMap businesses)
+ * - Overpass API (OpenStreetMap businesses) — ONE broad query
  * - Wikipedia REST API (demand signals)
  * - DuckDuckGo (search density)
  */
@@ -27,7 +27,6 @@ export async function resolveCity(query: string): Promise<CityResult[]> {
   const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&addressdetails=1&limit=5&extratags=1`;
   const res = await fetch(url, { headers: { 'Accept': 'language,en' } });
   const data = await res.json();
-  
   return data.map((r: any) => {
     const bbox = r.boundingbox.map(Number);
     const pop = r.extratags?.population ? parseInt(r.extratags.population) : null;
@@ -45,7 +44,7 @@ export async function resolveCity(query: string): Promise<CityResult[]> {
   });
 }
 
-// ─── Business Querying via Overpass API ─────────────────────────────
+// ─── Business Data ─────────────────────────────────────────────────
 
 export interface Business {
   id: string;
@@ -63,68 +62,67 @@ export interface Business {
   cuisine: string;
 }
 
-// Overpass category mapping — each category maps to a single OSM tag query
-export const CATEGORY_QUERIES: Record<string, { query: string; label: string }> = {
-  cafe: { query: '["amenity"="cafe"]', label: 'Cafe' },
-  restaurant: { query: '["amenity"="restaurant"]', label: 'Restaurant' },
-  bar: { query: '["amenity"="bar"]', label: 'Bar' },
-  pub: { query: '["amenity"="pub"]', label: 'Pub' },
-  fast_food: { query: '["amenity"="fast_food"]', label: 'Fast Food' },
-  hotel: { query: '["tourism"="hotel"]', label: 'Hotel' },
-  gym: { query: '["leisure"="fitness_centre"]', label: 'Gym / Fitness' },
-  beauty_salon: { query: '["shop"="beauty"]', label: 'Beauty Salon' },
-  hair_salon: { query: '["shop"="hairdresser"]', label: 'Hair Salon' },
-  pharmacy: { query: '["amenity"="pharmacy"]', label: 'Pharmacy' },
-  hospital: { query: '["amenity"="hospital"]', label: 'Hospital' },
-  clinic: { query: '["amenity"="clinic"]', label: 'Clinic' },
-  dentist: { query: '["amenity"="dentist"]', label: 'Dentist' },
-  supermarket: { query: '["shop"="supermarket"]', label: 'Supermarket' },
-  grocery: { query: '["shop"="grocery"]', label: 'Grocery Store' },
-  clothing: { query: '["shop"="clothes"]', label: 'Clothing Store' },
-  electronics: { query: '["shop"="electronics"]', label: 'Electronics Store' },
-  furniture: { query: '["shop"="furniture"]', label: 'Furniture Store' },
-  hardware: { query: '["shop"="doityourself"]', label: 'Hardware Store' },
-  bank: { query: '["amenity"="bank"]', label: 'Bank' },
-  school: { query: '["amenity"="school"]', label: 'School' },
-  kindergarten: { query: '["amenity"="kindergarten"]', label: 'Kindergarten' },
-  cinema: { query: '["amenity"="cinema"]', label: 'Cinema' },
-  theater: { query: '["amenity"="theatre"]', label: 'Theater' },
-  museum: { query: '["tourism"="museum"]', label: 'Museum' },
-  fuel: { query: '["amenity"="fuel"]', label: 'Gas Station' },
-  bakery: { query: '["shop"="bakery"]', label: 'Bakery' },
-  car_repair: { query: '["shop"="car_repair"]', label: 'Car Repair' },
-  laundry: { query: '["shop"="laundry"]', label: 'Laundry' },
-  pet_groomer: { query: '["shop"="pet_grooming"]', label: 'Pet Groomer' },
-  pet_shop: { query: '["shop"="pet"]', label: 'Pet Shop' },
-  coworking: { query: '["office"="coworking"]', label: 'Coworking Space' },
-  library: { query: '["amenity"="library"]', label: 'Library' },
-  post_office: { query: '["amenity"="post_office"]', label: 'Post Office' },
-  yoga: { query: '["leisure"="yoga"]', label: 'Yoga Studio' },
-  tattoo: { query: '["shop"="tattoo"]', label: 'Tattoo Parlor' },
-  nail_salon: { query: '["shop"="nail_salon"]', label: 'Nail Salon' },
-  spa: { query: '["amenity"="spa"]', label: 'Spa' },
-  hostel: { query: '["tourism"="hostel"]', label: 'Hostel' },
-  guest_house: { query: '["tourism"="guest_house"]', label: 'Guest House' },
-  camping: { query: '["tourism"="camp_site"]', label: 'Campsite' },
-  car_rental: { query: '["amenity"="car_rental"]', label: 'Car Rental' },
-  jewelry: { query: '["shop"="jewelry"]', label: 'Jewelry Store' },
-  shoes: { query: '["shop"="shoes"]', label: 'Shoe Store' },
-  sports: { query: '["shop"="sports"]', label: 'Sports Store' },
-  books: { query: '["shop"="books"]', label: 'Bookstore' },
-  mobile_phone: { query: '["shop"="mobile_phone"]', label: 'Mobile Phone Store' },
-  convenience: { query: '["shop"="convenience"]', label: 'Convenience Store' },
-  department_store: { query: '["shop"="department_store"]', label: 'Department Store' },
-  ice_cream: { query: '["amenity"="ice_cream"]', label: 'Ice Cream Shop' },
-  art: { query: '["shop"="art"]', label: 'Art Gallery' },
-  bicycle: { query: '["shop"="bicycle"]', label: 'Bicycle Shop' },
-  bowling: { query: '["leisure"="bowling_alley"]', label: 'Bowling Alley' },
-  night_club: { query: '["amenity"="nightclub"]', label: 'Nightclub' },
-  veterinary: { query: '["amenity"="veterinary"]', label: 'Veterinary' },
-  community_center: { query: '["amenity"="community_centre"]', label: 'Community Center' },
-  optician: { query: '["shop"="optician"]', label: 'Optician' },
-  butcher: { query: '["shop"="butcher"]', label: 'Butcher' },
-  florist: { query: '["shop"="florist"]', label: 'Florist' },
-  marketplace: { query: '["amenity"="marketplace"]', label: 'Marketplace' },
+export const CATEGORY_QUERIES: Record<string, { label: string }> = {
+  cafe: { label: 'Cafe' },
+  restaurant: { label: 'Restaurant' },
+  bar: { label: 'Bar' },
+  pub: { label: 'Pub' },
+  fast_food: { label: 'Fast Food' },
+  hotel: { label: 'Hotel' },
+  gym: { label: 'Gym / Fitness' },
+  beauty_salon: { label: 'Beauty Salon' },
+  hair_salon: { label: 'Hair Salon' },
+  pharmacy: { label: 'Pharmacy' },
+  hospital: { label: 'Hospital' },
+  clinic: { label: 'Clinic' },
+  dentist: { label: 'Dentist' },
+  supermarket: { label: 'Supermarket' },
+  grocery: { label: 'Grocery Store' },
+  clothing: { label: 'Clothing Store' },
+  electronics: { label: 'Electronics Store' },
+  furniture: { label: 'Furniture Store' },
+  hardware: { label: 'Hardware Store' },
+  bank: { label: 'Bank' },
+  school: { label: 'School' },
+  kindergarten: { label: 'Kindergarten' },
+  cinema: { label: 'Cinema' },
+  theater: { label: 'Theater' },
+  museum: { label: 'Museum' },
+  fuel: { label: 'Gas Station' },
+  bakery: { label: 'Bakery' },
+  car_repair: { label: 'Car Repair' },
+  laundry: { label: 'Laundry' },
+  pet_groomer: { label: 'Pet Groomer' },
+  pet_shop: { label: 'Pet Shop' },
+  coworking: { label: 'Coworking Space' },
+  library: { label: 'Library' },
+  post_office: { label: 'Post Office' },
+  yoga: { label: 'Yoga Studio' },
+  tattoo: { label: 'Tattoo Parlor' },
+  nail_salon: { label: 'Nail Salon' },
+  spa: { label: 'Spa' },
+  hostel: { label: 'Hostel' },
+  guest_house: { label: 'Guest House' },
+  camping: { label: 'Campsite' },
+  car_rental: { label: 'Car Rental' },
+  jewelry: { label: 'Jewelry Store' },
+  shoes: { label: 'Shoe Store' },
+  sports: { label: 'Sports Store' },
+  books: { label: 'Bookstore' },
+  mobile_phone: { label: 'Mobile Phone Store' },
+  convenience: { label: 'Convenience Store' },
+  department_store: { label: 'Department Store' },
+  ice_cream: { label: 'Ice Cream Shop' },
+  art: { label: 'Art Gallery' },
+  bicycle: { label: 'Bicycle Shop' },
+  bowling: { label: 'Bowling Alley' },
+  night_club: { label: 'Nightclub' },
+  veterinary: { label: 'Veterinary' },
+  community_center: { label: 'Community Center' },
+  optician: { label: 'Optician' },
+  butcher: { label: 'Butcher' },
+  florist: { label: 'Florist' },
+  marketplace: { label: 'Marketplace' },
 };
 
 const ALL_CATEGORIES = Object.keys(CATEGORY_QUERIES);
@@ -133,78 +131,15 @@ export function getCategoryLabel(id: string): string {
   return CATEGORY_QUERIES[id]?.label || id.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
-// Batch categories into groups to avoid Overpass timeout
-const BATCH_SIZE = 8;
-
-function buildOverpassQuery(
-  lat: number,
-  lon: number,
-  radiusMeters: number,
-  categoryIds: string[]
-): string {
-  const south = lat - radiusMeters / 111000;
-  const north = lat + radiusMeters / 111000;
-  const cosLat = Math.cos((lat * Math.PI) / 180);
-  const west = lon - radiusMeters / (111000 * cosLat);
-  const east = lon + radiusMeters / (111000 * cosLat);
-
-  const tagLines = categoryIds
-    .map(id => CATEGORY_QUERIES[id]?.query)
-    .filter(Boolean);
-
-  if (tagLines.length === 0) return '';
-
-  // Build union of node + way queries for each tag
-  const nodeQueries = tagLines.map(q => `    node(${south},${west},${north},${east})${q};`).join('\n');
-  const wayQueries = tagLines.map(q => `    way(${south},${west},${north},${east})${q};`).join('\n');
-
-  return `
-[out:json][timeout:45];
-(
-${nodeQueries}
-${wayQueries}
-);
-out center body;
-`;
-}
-
-const OVERPASS_MIRRORS = [
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-  'https://lz4.overpass-api.de/api/interpreter',
-];
-
-async function fetchOverpass(query: string): Promise<any> {
-  for (const mirror of OVERPASS_MIRRORS) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 40000);
-      const res = await fetch(mirror, {
-        method: 'POST',
-        body: `data=${encodeURIComponent(query)}`,
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-      if (res.ok) {
-        return await res.json();
-      }
-    } catch {
-      continue;
-    }
-  }
-  return null;
-}
+// ─── Single Overpass Query (fetch ALL amenities at once) ────────────
 
 function categorizeBusiness(tags: Record<string, string>): string | null {
-  // Order matters — more specific first
   if (tags.amenity === 'cafe') return 'cafe';
   if (tags.amenity === 'restaurant') return 'restaurant';
   if (tags.amenity === 'bar') return 'bar';
   if (tags.amenity === 'pub') return 'pub';
   if (tags.amenity === 'fast_food') return 'fast_food';
   if (tags.amenity === 'ice_cream') return 'ice_cream';
-  if (tags.amenity === 'food_court') return 'fast_food';
   if (tags.tourism === 'hotel') return 'hotel';
   if (tags.tourism === 'hostel') return 'hostel';
   if (tags.tourism === 'guest_house') return 'guest_house';
@@ -271,8 +206,71 @@ function formatAddress(tags: Record<string, string>): string {
   return parts.join(', ') || tags.address || '';
 }
 
-function parseElements(data: any): Map<string, Business[]> {
+const OVERPASS_MIRRORS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://lz4.overpass-api.de/api/interpreter',
+];
+
+/**
+ * ONE broad Overpass query — fetches all amenity/shop/tourism/leisure nodes and ways.
+ * Then we categorize client-side. Much faster than many small queries.
+ */
+export async function queryBusinesses(
+  lat: number,
+  lon: number,
+  radiusMeters: number = 10000,
+  _categoryIds?: string[],
+  onProgress?: (pct: number, msg: string) => void
+): Promise<Map<string, Business[]>> {
   const results = new Map<string, Business[]>();
+  const south = lat - radiusMeters / 111000;
+  const north = lat + radiusMeters / 111000;
+  const cosLat = Math.cos((lat * Math.PI) / 180);
+  const west = lon - radiusMeters / (111000 * cosLat);
+  const east = lon + radiusMeters / (111000 * cosLat);
+
+  // ONE big query — get all commercial amenities + shops + tourism
+  const query = `[out:json][timeout:60];
+(
+  node(${south},${west},${north},${east})["amenity"];
+  node(${south},${west},${north},${east})["shop"];
+  node(${south},${west},${north},${east})["tourism"~"hotel|hostel|guest_house|camp_site|museum"];
+  node(${south},${west},${north},${east})["leisure"~"fitness_centre|sports_centre|bowling_alley|yoga"];
+  node(${south},${west},${north},${east})["office"];
+  way(${south},${west},${north},${east})["amenity"];
+  way(${south},${west},${north},${east})["shop"];
+  way(${south},${west},${north},${east})["tourism"~"hotel|hostel|guest_house|camp_site|museum"];
+  way(${south},${west},${north},${east})["leisure"~"fitness_centre|sports_centre|bowling_alley|yoga"];
+  way(${south},${west},${north},${east})["office"];
+);
+out center body;`;
+
+  onProgress?.(5, 'Downloading businesses from OpenStreetMap…');
+
+  let data: any = null;
+  for (const mirror of OVERPASS_MIRRORS) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 55000);
+      const res = await fetch(mirror, {
+        method: 'POST',
+        body: `data=${encodeURIComponent(query)}`,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (res.ok) {
+        data = await res.json();
+        break;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  onProgress?.(30, 'Categorizing businesses…');
+
   if (!data?.elements) return results;
 
   for (const el of data.elements) {
@@ -304,58 +302,7 @@ function parseElements(data: any): Map<string, Business[]> {
     results.get(category)!.push(business);
   }
 
-  return results;
-}
-
-// Merge two business maps
-function mergeBusinessMaps(target: Map<string, Business[]>, source: Map<string, Business[]>) {
-  for (const [cat, bizs] of source) {
-    if (!target.has(cat)) target.set(cat, []);
-    target.get(cat)!.push(...bizs);
-  }
-}
-
-/**
- * Query businesses for specific categories only.
- * If categoryIds is empty, queries ALL categories in batches.
- * Reports progress via onProgress callback.
- */
-export async function queryBusinesses(
-  lat: number,
-  lon: number,
-  radiusMeters: number = 10000,
-  categoryIds?: string[],
-  onProgress?: (pct: number, msg: string) => void
-): Promise<Map<string, Business[]>> {
-  const cats = categoryIds && categoryIds.length > 0 ? categoryIds : ALL_CATEGORIES;
-  const results = new Map<string, Business[]>();
-
-  // Split into batches
-  const batches: string[][] = [];
-  for (let i = 0; i < cats.length; i += BATCH_SIZE) {
-    batches.push(cats.slice(i, i + BATCH_SIZE));
-  }
-
-  for (let i = 0; i < batches.length; i++) {
-    const batch = batches[i];
-    const pct = Math.round(((i) / batches.length) * 35); // 0-35% for business download
-    onProgress?.(pct, `Scanning ${batch.map(id => getCategoryLabel(id)).join(', ')}…`);
-
-    const query = buildOverpassQuery(lat, lon, radiusMeters, batch);
-    if (!query) continue;
-
-    const data = await fetchOverpass(query);
-    if (data) {
-      const batchResults = parseElements(data);
-      mergeBusinessMaps(results, batchResults);
-    }
-
-    // Small delay between batches to be polite to Overpass
-    if (i < batches.length - 1) {
-      await new Promise(r => setTimeout(r, 500));
-    }
-  }
-
+  onProgress?.(35, `Found ${Array.from(results.values()).reduce((s, a) => s + a.length, 0)} businesses in ${results.size} categories`);
   return results;
 }
 
@@ -377,7 +324,6 @@ export async function getDemandSignals(categoryLabel: string, cityName: string):
     explanation: '', sources: [],
   };
 
-  // Wikipedia pageviews — fire in parallel
   const wikiPromise = fetch(
     `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/all-agents/${encodeURIComponent(categoryLabel.replace(/ /g, '_'))}/monthly/20240101/20260101`,
     { headers: { 'User-Agent': 'BlueOcean/1.0 (demand research)' } }
@@ -390,7 +336,6 @@ export async function getDemandSignals(categoryLabel: string, cityName: string):
     }
   }).catch(() => {});
 
-  // Reddit mentions
   const redditPromise = fetch(
     `https://www.reddit.com/search.json?q=${encodeURIComponent(`${categoryLabel} ${cityName}`)}&sort=new&t=month&limit=25`,
     { headers: { 'User-Agent': 'BlueOcean/1.0 (demand research)' } }
@@ -403,7 +348,6 @@ export async function getDemandSignals(categoryLabel: string, cityName: string):
     }
   }).catch(() => {});
 
-  // Web search density (DuckDuckGo)
   const ddgPromise = fetch(
     `https://html.duckduckgo.com/html/?q=${encodeURIComponent(`"${categoryLabel}" "${cityName}"`)}`,
     { headers: { 'User-Agent': 'Mozilla/5.0' } }
@@ -416,13 +360,11 @@ export async function getDemandSignals(categoryLabel: string, cityName: string):
     }
   }).catch(() => {});
 
-  // Wait for all 3 in parallel (max 8s total)
   await Promise.race([
     Promise.all([wikiPromise, redditPromise, ddgPromise]),
     new Promise(r => setTimeout(r, 8000)),
   ]);
 
-  // Composite score
   signals.score = Math.round(
     0.35 * signals.webSearch +
     0.30 * signals.wikipedia +
@@ -464,7 +406,6 @@ export function computeOpportunities(
 ): OpportunityResult[] {
   const results: OpportunityResult[] = [];
 
-  // Calculate median per-10k across all categories
   const per10kValues: number[] = [];
   for (const [, bizs] of businesses) {
     per10kValues.push((bizs.length / Math.max(population, 1)) * 10000);

@@ -183,33 +183,34 @@ export default function App() {
     setShowAllOpps(false);
 
     try {
-      // Step 1: Query all businesses in batches
+      // Step 1: ONE broad Overpass query gets everything
       const biz = await queryBusinesses(
         selectedCity.lat, selectedCity.lon, 10000, undefined,
         (pct, msg) => { setProgress(pct); setLoadingStage(msg); }
       );
       setBusinesses(biz);
-      setProgress(35);
+      setProgress(40);
 
-      // Step 2: Demand signals for top categories only (limit to 8)
+      if (biz.size === 0) {
+        setError('No businesses found. The city may not have OpenStreetMap data yet.');
+        setLoading(false);
+        return;
+      }
+
+      // Step 2: Demand signals for top categories (limit to 6, parallel)
       setLoadingStage('Analyzing demand signals…');
       const topCats = Array.from(biz.entries())
         .sort((a, b) => b[1].length - a[1].length)
-        .slice(0, 8)
+        .slice(0, 6)
         .map(([cat]) => cat);
 
       const signals = new Map<string, DemandSignal>();
-      // Fire demand signals in parallel (3 at a time)
-      for (let i = 0; i < topCats.length; i += 3) {
-        const batch = topCats.slice(i, i + 3);
-        const results = await Promise.all(
-          batch.map(cat => getDemandSignals(getCategoryLabel(cat), selectedCity!.name))
-        );
-        batch.forEach((cat, j) => signals.set(cat, results[j]));
-        setProgress(35 + Math.round(((i + batch.length) / topCats.length) * 50));
-      }
+      const demResults = await Promise.all(
+        topCats.map(cat => getDemandSignals(getCategoryLabel(cat), selectedCity!.name))
+      );
+      topCats.forEach((cat, i) => signals.set(cat, demResults[i]));
       setDemandSignals(signals);
-      setProgress(85);
+      setProgress(80);
 
       // Step 3: Score
       setLoadingStage('Computing opportunity scores…');
@@ -224,7 +225,7 @@ export default function App() {
     }
   }, [selectedCity]);
 
-  // Analyze single industry
+  // Analyze single industry — reuse same broad query, then filter
   const startAnalyze = useCallback(async () => {
     if (!selectedCity || !selectedCategory) return;
     setLoading(true);
@@ -234,25 +235,31 @@ export default function App() {
     setDemandSignals(new Map());
 
     try {
-      // Step 1: Query ONLY the selected category (fast!)
+      // Step 1: ONE broad query (same as discover, fast)
       setLoadingStage(`Scanning ${getCategoryLabel(selectedCategory)}…`);
       setProgress(5);
 
       const biz = await queryBusinesses(
-        selectedCity.lat, selectedCity.lon, 10000, [selectedCategory],
+        selectedCity.lat, selectedCity.lon, 10000, undefined,
         (pct, msg) => { setProgress(Math.max(pct, 5)); setLoadingStage(msg); }
       );
       setBusinesses(biz);
-      setProgress(50);
+      setProgress(45);
 
-      // Step 2: Demand signals
+      if (biz.size === 0) {
+        setError('No businesses found. The city may not have OpenStreetMap data yet.');
+        setLoading(false);
+        return;
+      }
+
+      // Step 2: Demand signals for selected category
       setLoadingStage('Analyzing demand signals…');
-      setProgress(60);
+      setProgress(55);
       const sig = await getDemandSignals(getCategoryLabel(selectedCategory), selectedCity.name);
       const signals = new Map<string, DemandSignal>();
       signals.set(selectedCategory, sig);
       setDemandSignals(signals);
-      setProgress(85);
+      setProgress(80);
 
       // Step 3: Score
       setLoadingStage('Computing opportunity scores…');
