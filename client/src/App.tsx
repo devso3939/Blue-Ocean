@@ -335,6 +335,49 @@ export default function App() {
     b.address.toLowerCase().includes(bizSearch.toLowerCase())
   );
 
+  // CSV download function
+  const downloadCSV = useCallback(() => {
+    if (filteredBiz.length === 0) return;
+    const catLabel = getCategoryLabel(selectedOppCategory || '');
+    const cityName = selectedCity?.name || 'city';
+    
+    const headers = ['#', 'Business Name', 'Category', 'Address', 'Phone', 'Website', 'Email', 'Hours', 'Brand', 'Latitude', 'Longitude', 'Google Maps Link'];
+    const rows = filteredBiz.map((b, i) => {
+      const gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${b.lat},${b.lon}${b.name ? `+${encodeURIComponent(b.name)}` : ''}`;
+      return [
+        i + 1,
+        b.name || 'Unnamed',
+        b.categoryLabel,
+        b.address,
+        b.phone,
+        b.website,
+        b.email,
+        b.openingHours,
+        b.brand,
+        b.lat,
+        b.lon,
+        gmapsUrl,
+      ];
+    });
+    
+    const escapeCSV = (val: any) => {
+      const str = String(val ?? '');
+      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return '"' + str.replace(/"/g, '""') + '"';
+      }
+      return str;
+    };
+    
+    const csv = [headers.map(escapeCSV).join(','), ...rows.map(r => r.map(escapeCSV).join(','))].join('\n');
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `blueocean-${cityName.toLowerCase().replace(/\s+/g, '-')}-${catLabel.toLowerCase().replace(/\s+/g, '-')}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [filteredBiz, selectedOppCategory, selectedCity]);
+
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
@@ -573,12 +616,20 @@ export default function App() {
                 <h3 className="text-sm font-semibold">
                   {getCategoryLabel(selectedOppCategory)} Businesses · {categoryBusinesses.length} found
                 </h3>
-                <input
-                  value={bizSearch}
-                  onChange={e => setBizSearch(e.target.value)}
-                  placeholder="Search businesses…"
-                  className="h-8 w-48 rounded-lg border border-border bg-background px-3 text-xs outline-none focus:ring-2 focus:ring-ring"
-                />
+                <div className="flex items-center gap-2">
+                  <input
+                    value={bizSearch}
+                    onChange={e => setBizSearch(e.target.value)}
+                    placeholder="Search businesses…"
+                    className="h-8 w-48 rounded-lg border border-border bg-background px-3 text-xs outline-none focus:ring-2 focus:ring-ring"
+                  />
+                  <button
+                    onClick={downloadCSV}
+                    className="h-8 inline-flex items-center gap-1.5 rounded-lg bg-emerald-600/20 px-3 text-xs font-medium text-emerald-400 hover:bg-emerald-600/30 transition-colors whitespace-nowrap"
+                  >
+                    ⬇️ Export CSV
+                  </button>
+                </div>
               </div>
               <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
                 <table className="w-full text-left text-sm">
