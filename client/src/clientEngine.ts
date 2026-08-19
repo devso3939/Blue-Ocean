@@ -21,7 +21,8 @@ export interface CityResult {
 }
 
 export async function resolveCity(query: string): Promise<CityResult[]> {
-  const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&addressdetails=1&limit=5&extratags=1`;
+  const nominatimUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&addressdetails=1&limit=5&extratags=1`;
+  const url = `https://corsproxy.io/?${encodeURIComponent(nominatimUrl)}`;
   const res = await fetch(url, { headers: { 'Accept': 'language,en' } });
   if (!res.ok) throw new Error(`Nominatim returned ${res.status}`);
   const data = await res.json();
@@ -555,6 +556,60 @@ async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct:
   }
 }
 
+
+// ─── Brave Search Enrichment ───────────────────────────────────
+const BRAVE_API_KEY = 'BSAded3tnZfvadieW5pz0tiLrlh2lvn';
+async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
+  const NEEDS = businesses.filter(b => !b.phone && !b.website);
+  if (NEEDS.length === 0 || !BRAVE_API_KEY) return;
+  const BATCH = 3;
+  const max = Math.min(NEEDS.length, 30); // Brave free tier: 2000 req/mo
+  let found = 0;
+  for (let i = 0; i < max; i += BATCH) {
+    const batch = NEEDS.slice(i, i + BATCH);
+    await Promise.all(batch.map(async (b) => {
+      try {
+        const q = encodeURIComponent(b.name + ' ' + (b.address || '') + ' ' + (b.categoryLabel || ''));
+        const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=3`, {
+          headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (!r.ok) return;
+        const data = await r.json();
+        const results = data.web?.results || [];
+        for (const res of results) {
+          const desc = (res.description || '') + ' ' + (res.title || '');
+          // Extract phone
+          if (!b.phone) {
+            const m = desc.match(/\+?\d[\d\s\-\.\(\)]{7,18}/);
+            if (m && m[0].length >= 8) { b.phone = m[0].trim(); found++; }
+          }
+          // Extract website from result URL
+          if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com')) {
+            b.website = res.url; found++;
+          }
+          // Extract email
+          if (!b.email) {
+            const m = desc.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+            if (m && !m[0].includes('example.com')) { b.email = m[0]; found++; }
+          }
+          // Extract social
+          if (!b.facebook) {
+            const m = desc.match(/facebook\.com\/([a-zA-Z0-9._]+)/);
+            if (m) { b.facebook = 'https://facebook.com/' + m[1]; found++; }
+          }
+          if (!b.instagram) {
+            const m = desc.match(/instagram\.com\/([a-zA-Z0-9._]+)/);
+            if (m) { b.instagram = 'https://instagram.com/' + m[1]; found++; }
+          }
+        }
+      } catch {}
+    }));
+    if (i + BATCH < max) await wait(1500);
+    onProgress?.(88, `Brave search… ${Math.min(i + BATCH, max)}/${max} (${found} found)`);
+  }
+}
+
 // ─── DuckDuckGo Search Enrichment ──────────────────────────────
 // Searches DuckDuckGo for business contact info (website, phone, social)
 async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
@@ -688,10 +743,10 @@ async function enrichFromWebsite(b: Business): Promise<void> {
       const batch = allBizList.slice(i, i + BATCH);
       const promises = batch.map(async (b) => {
         try {
-          const r = await fetch(
-            `https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=json&zoom=18&addressdetails=1&extratags=1`,
-            { headers: { 'User-Agent': 'BlueOcean/2.0' } }
-          );
+          const nominatimRevUrl = `https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=json&zoom=18&addressdetails=1&extratags=1`;
+          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(nominatimRevUrl)}`, {
+            headers: { 'Accept': 'application/json' }
+          });
           if (r.ok) {
             const d = await r.json();
             // Fill address if missing
@@ -741,6 +796,92 @@ async function enrichFromWebsite(b: Business): Promise<void> {
 
   return results;
 }
+
+
+// ─── AI-Powered Opportunity Analysis ───────────────────────────
+// Uses Hugging Face free inference API for market analysis
+export async function getAIAnalysis(
+  cityName: string,
+  countryName: string,
+  topOpps: Array<{ category: string; label: string; existing: number; gap: number; score: number }>,
+  population: number
+): Promise<string> {
+  try {
+    // Build a prompt from the data
+    const oppText = topOpps.slice(0, 8).map(o =>
+      `${o.label}: ${o.existing} existing, gap of ${o.gap}, score ${o.score}/100`
+    ).join('\n');
+
+    const prompt = `Analyze business opportunities in ${cityName}, ${countryName} (pop. ${population.toLocaleString()}). Market data:\n${oppText}\n\nProvide 3-5 concise insights about the best investment opportunities, underserved markets, and competitive advantages. Be specific and actionable. Format as bullet points.`;
+
+    // Use Hugging Face free inference API
+    const r = await fetch('https://api-inference.huggingface.co/models/facebook/bart-large-cnn', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        inputs: prompt,
+        parameters: { max_length: 300, min_length: 50, do_sample: false },
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!r.ok) {
+      // Fallback: generate analysis from data directly
+      return generateLocalAnalysis(cityName, countryName, topOpps, population);
+    }
+
+    const data = await r.json();
+    if (data[0]?.summary_text) {
+      return data[0].summary_text;
+    }
+    return generateLocalAnalysis(cityName, countryName, topOpps, population);
+  } catch {
+    return generateLocalAnalysis(cityName, countryName, topOpps, population);
+  }
+}
+
+// Local analysis fallback (no API needed)
+function generateLocalAnalysis(
+  cityName: string,
+  countryName: string,
+  topOpps: Array<{ category: string; label: string; existing: number; gap: number; score: number }>,
+  population: number
+): string {
+  const insights: string[] = [];
+
+  // Find biggest gap
+  const biggestGap = topOpps.reduce((best, o) => o.gap > best.gap ? o : best, topOpps[0]);
+  if (biggestGap) {
+    insights.push(`🔍 **Biggest opportunity**: ${biggestGap.label} — only ${biggestGap.existing} exist but ${biggestGap.gap + biggestGap.existing} are expected for a city of ${population.toLocaleString()}. Gap score: ${biggestGap.score}/100.`);
+  }
+
+  // Find underserved categories
+  const underserved = topOpps.filter(o => o.score >= 60);
+  if (underserved.length > 0) {
+    insights.push(`📊 **${underserved.length} underserved categories** (score ≥60): ${underserved.map(o => o.label).join(', ')}.`);
+  }
+
+  // Market density
+  const totalExisting = topOpps.reduce((s, o) => s + o.existing, 0);
+  const per10k = ((totalExisting / Math.max(population, 1)) * 10000).toFixed(1);
+  insights.push(`📈 Market density: ${totalExisting} businesses across ${topOpps.length} categories = ${per10k} per 10k residents.`);
+
+  // Competition level
+  const lowComp = topOpps.filter(o => o.existing < 5);
+  if (lowComp.length > 0) {
+    insights.push(`🏆 **Low competition** (<5 businesses): ${lowComp.map(o => o.label).join(', ')}. First-mover advantage available.`);
+  }
+
+  // Population insight
+  if (population > 500000) {
+    insights.push(`👥 Large population (${(population/1000000).toFixed(1)}M) supports specialized niches — consider premium/quality positioning.`);
+  } else if (population < 100000) {
+    insights.push(`🏘️ Smaller market (${population.toLocaleString()}) — focus on essential services with proven demand.`);
+  }
+
+  return insights.join('\n\n');
+}
+
 
 // ─── Google Maps URL ───────────────────────────────────────────────
 

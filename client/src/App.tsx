@@ -5,7 +5,7 @@ import {
   getDemandSignals,
   computeOpportunities,
   getCategoryLabel,
-  getGoogleMapsUrl,
+  getGoogleMapsUrl, getAIAnalysis,
   type CityResult,
   type Business,
   type DemandSignal,
@@ -84,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '2.7.0';
+const APP_VERSION = '2.8.0';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -104,6 +104,7 @@ export default function App() {
   const [demandSignals, setDemandSignals] = useState<Map<string, DemandSignal>>(new Map());
   const [selectedOppCategory, setSelectedOppCategory] = useState<string | null>(null);
   const [showAllOpps, setShowAllOpps] = useState(false);
+  const [aiInsights, setAiInsights] = useState('');
 
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
@@ -295,6 +296,17 @@ export default function App() {
       setLoadingStage('Computing opportunity scores…');
       const opps = computeOpportunities(biz, selectedCity.population || 500000, signals);
       setOpportunities(opps);
+      setProgress(90);
+
+      setLoadingStage('AI analyzing opportunities…');
+      try {
+        const topOpps = opps.slice(0, 8).map(o => ({
+          category: o.category, label: o.categoryLabel,
+          existing: o.existing, gap: o.gap, score: o.score,
+        }));
+        const aiResult = await getAIAnalysis(selectedCity.name, selectedCity.country, topOpps, selectedCity.population || 500000);
+        setAiInsights(aiResult);
+      } catch {}
       setProgress(100);
     } catch (e: any) {
       setError(e.message || 'Analysis failed');
@@ -505,7 +517,7 @@ export default function App() {
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 text-white">
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
             </div>
-            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v2.7.0</span></span>
+            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v2.8.0</span></span>
           </div>
           <div className="flex items-center gap-3">
             <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>
@@ -697,6 +709,18 @@ export default function App() {
               </div>
             </div>
           </div>
+
+          {/* AI Insights */}
+          {aiInsights && (
+            <div className="rounded-xl border border-emerald-500/30 bg-gradient-to-br from-emerald-500/10 to-transparent p-5">
+              <h3 className="text-sm font-bold mb-2">🤖 AI Market Analysis</h3>
+              <div className="text-xs text-muted-foreground leading-relaxed whitespace-pre-line">
+                {aiInsights.split('\n').map((line, i) => (
+                  <p key={i} className="mb-2" dangerouslySetInnerHTML={{ __html: line.replace(/\*\*(.*?)\*\*/g, '<strong class="text-foreground">$1</strong>') }} />
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Map */}
           <div className="rounded-xl border border-border bg-card overflow-hidden">
