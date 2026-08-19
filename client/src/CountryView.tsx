@@ -232,11 +232,7 @@ export default function CountryView() {
   }, [selectedCountry]);
 
   // Aggregate comparison data across all cities
-  const comparisonData: Array<{category: string; label: string; rows: Array<{cityName: string; existing: number; per10k: number; score: number; population: number; totalBiz: number}>; bestOpportunity: string; leastSaturated: string}> = (() => {
-    if (cityData.length === 0) return [];
-    
-    // For each key category, find the stats across all cities
-    return KEY_CATEGORIES.map(cat => {
+  const comparisonData = cityData.length === 0 ? [] : KEY_CATEGORIES.map(cat => {
       const rows = cityData.map(cd => {
         const opp = cd.opportunities.find(o => o.category === cat);
         return {
@@ -261,8 +257,7 @@ export default function CountryView() {
         bestOpportunity: bestOpp.cityName,
         leastSaturated: leastSat.cityName,
       };
-    });
-  }, [cityData]);
+  });
 
   // Top city rankings by total businesses
   const cityRankings = [...cityData].sort((a, b) => b.totalBiz - a.totalBiz);
