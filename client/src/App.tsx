@@ -84,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '2.4.0';
+const APP_VERSION = '2.5.0';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -212,8 +212,8 @@ export default function App() {
         type: 'geojson',
         data: geojson,
         cluster: true,
-        clusterMaxZoom: 17,
-        clusterRadius: 45,
+        clusterMaxZoom: 14,
+        clusterRadius: 40,
       });
 
       // 1) Cluster circles
@@ -239,7 +239,7 @@ export default function App() {
         layout: {
           'text-field': '{point_count_abbreviated}',
           'text-font': ['Noto Sans Bold'],
-          'text-size': 14,
+          'text-size': 13,
         },
         paint: { 'text-color': '#ffffff' },
       });
@@ -258,7 +258,7 @@ export default function App() {
             'pharmacy', '#06b6d4', 'supermarket', '#22c55e',
             'bank', '#6366f1', 'clothing', '#a855f7', 'bakery', '#fbbf24',
             'electronics', '#64748b', '#94a3b8'],
-          'circle-radius': 12,
+          'circle-radius': 10,
           'circle-stroke-width': 2,
           'circle-stroke-color': 'rgba(255,255,255,0.85)',
         },
@@ -272,7 +272,7 @@ export default function App() {
         filter: ['!', ['has', 'point_count']],
         layout: {
           'text-field': ['get', 'emoji'],
-          'text-size': 14,
+          'text-size': 13,
           'text-allow-overlap': true,
         },
       });
@@ -584,7 +584,7 @@ export default function App() {
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 text-white">
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
             </div>
-            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v2.4.0</span></span>
+            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v2.5.0</span></span>
           </div>
           <div className="flex items-center gap-3">
             <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>
@@ -793,7 +793,7 @@ export default function App() {
                 )}
               </div>
             </div>
-            <div ref={mapRef} className="h-[500px] w-full" />
+            <div ref={mapRef} className="h-[500px] w-full map-container" />
           </div>
 
           {/* Selected category detail */}

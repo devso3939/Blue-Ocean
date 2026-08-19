@@ -506,6 +506,55 @@ out center body;`;
   onProgress?.(70, `Found ${totalBiz} businesses — enriching data…`);
 
 
+
+// ─── Google Maps Place Search Enrichment ────────────────────────
+async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
+  const NEEDS = businesses.filter(b => !b.phone && !b.website);
+  if (NEEDS.length === 0) return;
+  const BATCH = 3;
+  const max = Math.min(NEEDS.length, 40);
+  let found = 0;
+  for (let i = 0; i < max; i += BATCH) {
+    const batch = NEEDS.slice(i, i + BATCH);
+    await Promise.all(batch.map(async (b) => {
+      try {
+        const q = encodeURIComponent(b.name + ' ' + (b.address || '') + ' Tbilisi');
+        const r = await fetch('https://corsproxy.io/?' + encodeURIComponent('https://www.google.com/maps/search/' + q), {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!r.ok) return;
+        const html = await r.text();
+        if (!b.phone) {
+          const m = html.match(/\+\d[\d\s\-\.\(\)]{7,18}/);
+          if (m && m[0].length >= 8) { b.phone = m[0].trim(); found++; }
+        }
+        if (!b.website) {
+          const m = html.match(/(?:www\.|https?:\/\/)([^"\s<>]+\.(com|ge|net|org|io|co)[^"\s<>]*)/i);
+          if (m && !m[0].includes('google.com') && !m[0].includes('gstatic')) {
+            let u = m[0]; if (!u.startsWith('http')) u = 'https://' + u;
+            b.website = u; found++;
+          }
+        }
+        if (!b.email) {
+          const m = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+          if (m && !m[0].includes('example.com') && !m[0].includes('google.com')) { b.email = m[0]; found++; }
+        }
+        if (!b.facebook) {
+          const m = html.match(/facebook\.com\/([a-zA-Z0-9._]+)/);
+          if (m) { b.facebook = 'https://facebook.com/' + m[1]; found++; }
+        }
+        if (!b.instagram) {
+          const m = html.match(/instagram\.com\/([a-zA-Z0-9._]+)/);
+          if (m) { b.instagram = 'https://instagram.com/' + m[1]; found++; }
+        }
+      } catch {}
+    }));
+    if (i + BATCH < max) await wait(3000);
+    onProgress?.(92, 'Google enrichment... ' + Math.min(i + BATCH, max) + '/' + max + ' (' + found + ' found)');
+  }
+}
+
 // ─── DuckDuckGo Search Enrichment ──────────────────────────────
 // Searches DuckDuckGo for business contact info (website, phone, social)
 async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
@@ -672,6 +721,8 @@ async function enrichFromWebsite(b: Business): Promise<void> {
   await enrichFromWeb(allBizList, onProgress);
 
   // ── Enrichment Layer 3: Scrape found websites for social/contact links ──
+  await enrichFromGooglePlaces(allBizList, onProgress);
+
   onProgress?.(90, `Scraping websites for social links…`);
   const hasWebsite = allBizList.filter(b => b.website && (!b.facebook || !b.instagram));
   const webBatch = 5;
