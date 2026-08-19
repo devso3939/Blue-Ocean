@@ -247,7 +247,7 @@ export default function App() {
       setProgress(40);
 
       if (biz.size === 0) {
-        setError('No businesses found. The city may not have OpenStreetMap data yet.');
+        setError('No businesses found — OpenStreetMap servers may be busy. Click Retry to try again.');
         setLoading(false);
         return;
       }
@@ -299,7 +299,7 @@ export default function App() {
       setProgress(45);
 
       if (biz.size === 0) {
-        setError('No businesses found. The city may not have OpenStreetMap data yet.');
+        setError('No businesses found — OpenStreetMap servers may be busy. Click Retry to try again.');
         setLoading(false);
         return;
       }
@@ -613,7 +613,15 @@ export default function App() {
           )}
 
           {error && (
-            <div className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-400">{error}</div>
+            <div className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-400 flex items-center justify-between gap-3">
+              <span>{error}</span>
+              <button
+                onClick={() => selectedCategory ? startAnalyze() : runAnalysis()}
+                className="shrink-0 rounded-lg bg-rose-500/20 px-3 py-1.5 text-xs font-semibold text-rose-300 hover:bg-rose-500/30 transition-colors"
+              >
+                🔄 Retry
+              </button>
+            </div>
           )}
         </div>
 

@@ -234,7 +234,7 @@ const OVERPASS_MIRRORS = [
 
 const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-async function fetchOverpass(query: string, timeoutSec = 60): Promise<any> {
+async function fetchOverpass(query: string, timeoutSec = 60): Promise<{ data: any; mirror: string } | null> {
   for (let mi = 0; mi < OVERPASS_MIRRORS.length; mi++) {
     const mirror = OVERPASS_MIRRORS[mi];
     // Try up to 2 attempts per mirror for main mirrors
@@ -242,11 +242,14 @@ async function fetchOverpass(query: string, timeoutSec = 60): Promise<any> {
     for (let attempt = 0; attempt < attempts; attempt++) {
       try {
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), (timeoutSec + 15) * 1000);
+        const timer = setTimeout(() => controller.abort(), (timeoutSec + 20) * 1000);
         const res = await fetch(mirror, {
           method: 'POST',
           body: `data=${encodeURIComponent(query)}`,
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'BlueOcean/2.0 (https://devso3939.github.io/Blue-Ocean/)',
+          },
           signal: controller.signal,
         });
         clearTimeout(timer);
@@ -255,14 +258,17 @@ async function fetchOverpass(query: string, timeoutSec = 60): Promise<any> {
           continue;
         }
         const text = await res.text();
-        if (!text.trim().startsWith('{')) {
-          // Got XML error or empty — rate limited
+        const trimmed = text.trim();
+        // Accept JSON response (may have BOM or leading whitespace)
+        if (!trimmed.startsWith('{') && !trimmed.startsWith(String.fromCharCode(0xFEFF) + '{')) {
+          // Got XML error, rate-limit page, or empty — retry
           if (attempt < attempts - 1) await wait(5000);
           continue;
         }
-        const data = JSON.parse(text);
+        const jsonStr = trimmed.replace(/^\uFEFF/, '');
+        const data = JSON.parse(jsonStr);
         if (data.elements === undefined) continue;
-        return data;
+        return { data, mirror };
       } catch (e) {
         if (attempt < attempts - 1) await wait(2000);
         continue;
@@ -289,7 +295,7 @@ export async function queryBusinesses(
   const bbox = `${south},${west},${north},${east}`;
 
   // ── Tier 1: Single focused query for food/drink/healthcare ──
-  const qFood = `[out:json][timeout:90][maxsize:536870912];
+  const qFood = `[out:json][timeout:90][maxsize:268435456];
 (
   node(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream"];
   way(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream"];
@@ -301,7 +307,7 @@ export async function queryBusinesses(
 out center body;`;
 
   // ── Tier 1b: Shops ──
-  const qShops = `[out:json][timeout:90][maxsize:536870912];
+  const qShops = `[out:json][timeout:90][maxsize:268435456];
 (
   node(${bbox})["shop"];
   way(${bbox})["shop"];
@@ -323,20 +329,20 @@ out center body;`;
   const allElements: any[] = [];
 
   onProgress?.(10, 'Scanning food, healthcare & entertainment…');
-  const d1 = await fetchOverpass(qFood, 90);
-  if (d1?.elements) allElements.push(...d1.elements);
+  const r1 = await fetchOverpass(qFood, 90);
+  if (r1?.data.elements) allElements.push(...r1.data.elements);
 
   await wait(1500);
   onProgress?.(30, 'Scanning shops & retail…');
-  const d2 = await fetchOverpass(qShops, 90);
-  if (d2?.elements) allElements.push(...d2.elements);
+  const r2 = await fetchOverpass(qShops, 90);
+  if (r2?.data.elements) allElements.push(...r2.data.elements);
 
   await wait(1500);
   onProgress?.(50, 'Scanning hotels, gyms & services…');
-  const d3 = await fetchOverpass(qOther, 60);
-  if (d3?.elements) allElements.push(...d3.elements);
+  const r3 = await fetchOverpass(qOther, 60);
+  if (r3?.data.elements) allElements.push(...r3.data.elements);
 
-  // ── Tier 2: Fallback — if Tier 1 got nothing, try a minimal query ──
+  // ── Tier 2: Fallback — if Tier 1 got nothing, try a minimal combined query ──
   if (allElements.length === 0) {
     onProgress?.(60, 'Retrying with minimal query…');
     const qMin = `[out:json][timeout:60];
@@ -347,14 +353,16 @@ out center body;`;
   way(${bbox})["shop"];
 );
 out center body;`;
-    const d4 = await fetchOverpass(qMin, 60);
-    if (d4?.elements) allElements.push(...d4.elements);
+    const r4 = await fetchOverpass(qMin, 60);
+    if (r4?.data.elements) allElements.push(...r4.data.elements);
   }
 
   onProgress?.(60, 'Categorizing businesses…');
 
   if (allElements.length === 0) {
-    onProgress?.(70, 'No businesses found from OpenStreetMap');
+    const mirrors = [r1, r2, r3].map((r, i) => r ? '✓' : '✗').join('');
+    console.warn(`[BlueOcean] All Overpass queries returned empty (mirrors: ${mirrors})`);
+    onProgress?.(70, 'No businesses found — OpenStreetMap servers may be busy. Try again in a minute.');
     return results;
   }
 
