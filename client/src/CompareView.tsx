@@ -152,6 +152,7 @@ export default function CompareView() {
   const [cityB, setCityB] = useState<CityData | null>(null);
   const [scanning, setScanning] = useState<'a' | 'b' | null>(null);
   const [progress, setProgress] = useState(0);
+  const [loadingStage, setLoadingStage] = useState('');
   const [error, setError] = useState('');
   const mapRef = useRef<HTMLDivElement>(null);
   const mapRefB = useRef<HTMLDivElement>(null);
@@ -166,6 +167,7 @@ export default function CompareView() {
     try {
       const biz = await queryBusinesses(city.lat, city.lon, 10000, (pct, msg) => {
         setProgress(pct);
+        setLoadingStage(msg);
       });
       setProgress(70);
 
@@ -180,12 +182,23 @@ export default function CompareView() {
       setError(e.message || 'Scan failed');
     } finally {
       setScanning(null);
+      setLoadingStage('');
     }
   }, []);
 
   // Initialize maps when cities are set
   useEffect(() => {
-    if (cityA && mapRef.current && !mapARef.current) {
+    if (cityA && mapRef.current) {
+      if (mapARef.current) {
+        const map = mapARef.current;
+        map.flyTo({ center: [cityA.city.lon, cityA.city.lat], zoom: 12, duration: 1500 });
+        requestAnimationFrame(() => { map.resize(); });
+        setTimeout(() => {
+          map.resize();
+          import('maplibre-gl').then((maplibregl) => addCompareMarkers(map, cityA.businesses, maplibregl));
+        }, 500);
+        return;
+      }
       import('maplibre-gl').then((maplibregl) => {
         if (!mapRef.current) return;
         const map = new maplibregl.Map({
@@ -196,13 +209,23 @@ export default function CompareView() {
         });
         map.addControl(new maplibregl.NavigationControl());
         mapARef.current = map;
-        map.on('load', () => addCompareMarkers(map, cityA.businesses, maplibregl));
+        map.on('load', () => { map.resize(); addCompareMarkers(map, cityA.businesses, maplibregl); });
       });
     }
   }, [cityA]);
 
   useEffect(() => {
-    if (cityB && mapRefB.current && !mapBRef.current) {
+    if (cityB && mapRefB.current) {
+      if (mapBRef.current) {
+        const map = mapBRef.current;
+        map.flyTo({ center: [cityB.city.lon, cityB.city.lat], zoom: 12, duration: 1500 });
+        requestAnimationFrame(() => { map.resize(); });
+        setTimeout(() => {
+          map.resize();
+          import('maplibre-gl').then((maplibregl) => addCompareMarkers(map, cityB.businesses, maplibregl));
+        }, 500);
+        return;
+      }
       import('maplibre-gl').then((maplibregl) => {
         if (!mapRefB.current) return;
         const map = new maplibregl.Map({
@@ -213,7 +236,7 @@ export default function CompareView() {
         });
         map.addControl(new maplibregl.NavigationControl());
         mapBRef.current = map;
-        map.on('load', () => addCompareMarkers(map, cityB.businesses, maplibregl));
+        map.on('load', () => { map.resize(); addCompareMarkers(map, cityB.businesses, maplibregl); });
       });
     }
   }, [cityB]);
@@ -221,6 +244,7 @@ export default function CompareView() {
   function addCompareMarkers(map: any, businesses: Map<string, Business[]>, maplibregl: any) {
     const allBiz: Business[] = [];
     businesses.forEach(bizs => allBiz.push(...bizs));
+    if (allBiz.length === 0) return;
     const markers = allBiz.length > 300 ? allBiz.slice(0, 300) : allBiz;
 
     markers.forEach(b => {
@@ -298,7 +322,7 @@ export default function CompareView() {
       {scanning && (
         <div className="rounded-xl border border-border bg-card p-4">
           <div className="mb-1 flex justify-between text-xs text-muted-foreground">
-            <span>Scanning {scanning === 'a' ? cityA?.city.name : cityB?.city.name}…</span>
+            <span>{loadingStage || `Scanning ${scanning === 'a' ? cityA?.city.name : cityB?.city.name}…`}</span>
             <span>{progress}%</span>
           </div>
           <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
@@ -308,7 +332,15 @@ export default function CompareView() {
       )}
 
       {error && (
-        <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-400">{error}</div>
+        <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-400 flex items-center justify-between gap-3">
+          <span>{error}</span>
+          <button
+            onClick={() => setError('')}
+            className="shrink-0 rounded-lg bg-rose-500/20 px-3 py-1.5 text-xs font-semibold text-rose-300 hover:bg-rose-500/30 transition-colors"
+          >
+            Dismiss
+          </button>
+        </div>
       )}
 
       {/* Results */}

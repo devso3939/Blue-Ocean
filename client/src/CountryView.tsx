@@ -186,7 +186,10 @@ export default function CountryView() {
         setProgress(10 + Math.round((i / cities.length) * 80));
 
         try {
-          const biz = await queryBusinesses(city.lat, city.lon, 8000);
+          const biz = await queryBusinesses(city.lat, city.lon, 8000, (pct, msg) => {
+            setProgress(10 + Math.round(((i + pct / 100) / cities.length) * 80));
+            setStage(`Scanning ${city.name} (${i + 1}/${cities.length}): ${msg}`);
+          });
           const totalBiz = Array.from(biz.values()).reduce((s, a) => s + a.length, 0);
           const opps = computeOpportunities(biz, city.population || 200000, new Map());
           results.push({ city, businesses: biz, opportunities: opps, totalBiz });
@@ -302,7 +305,7 @@ export default function CountryView() {
         {scanning && (
           <div className="mt-4">
             <div className="mb-1 flex justify-between text-xs text-muted-foreground">
-              <span>{stage}</span>
+              <span className="truncate max-w-xs">{stage}</span>
               <span>{progress}%</span>
             </div>
             <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
@@ -312,7 +315,15 @@ export default function CountryView() {
         )}
 
         {error && (
-          <div className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-400">{error}</div>
+          <div className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-400 flex items-center justify-between gap-3">
+            <span>{error}</span>
+            <button
+              onClick={() => runCountryScan()}
+              className="shrink-0 rounded-lg bg-rose-500/20 px-3 py-1.5 text-xs font-semibold text-rose-300 hover:bg-rose-500/30 transition-colors"
+            >
+              🔄 Retry
+            </button>
+          </div>
         )}
       </div>
 

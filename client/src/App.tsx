@@ -635,10 +635,18 @@ export default function App() {
           ].map(ex => (
             <button
               key={ex.label}
-              onClick={() => {
-                setSelectedCountry(COUNTRIES.find(c => ex.city.endsWith(c.name))?.name || '');
-                setCityQuery(ex.city);
+              onClick={async () => {
+                const countryName = COUNTRIES.find(c => ex.city.endsWith(c.name))?.name || '';
+                setSelectedCountry(countryName);
                 setSelectedCategory(ex.cat);
+                setCityQuery(ex.city);
+                try {
+                  const results = await resolveCity(ex.city);
+                  if (results.length > 0) {
+                    setSelectedCity(results[0]);
+                    setCityResults([]);
+                  }
+                } catch {}
               }}
               className="rounded-full border border-border px-3 py-1 text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
             >
@@ -788,8 +796,8 @@ export default function App() {
                           </td>
                           <td className="px-4 py-3 text-xs">
                             <div className="flex flex-col gap-0.5">
-                              {b.facebook && <a href={`https://facebook.com/${b.facebook.replace('https://facebook.com/', '').replace(/\/$/, '')}`} target="_blank" rel="noopener" className="text-blue-400 hover:underline text-[11px]">Facebook</a>}
-                              {b.instagram && <a href={`https://instagram.com/${b.instagram.replace('https://instagram.com/', '').replace('@', '').replace(/\/$/, '')}`} target="_blank" rel="noopener" className="text-pink-400 hover:underline text-[11px]">Instagram</a>}
+                              {b.facebook && <a href={b.facebook} target="_blank" rel="noopener" className="text-blue-400 hover:underline text-[11px]">Facebook</a>}
+                              {b.instagram && <a href={b.instagram} target="_blank" rel="noopener" className="text-pink-400 hover:underline text-[11px]">Instagram</a>}
                               {(!b.facebook && !b.instagram) && <span className="text-muted-foreground">—</span>}
                             </div>
                           </td>
