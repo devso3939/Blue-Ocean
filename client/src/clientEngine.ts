@@ -278,55 +278,85 @@ export async function queryBusinesses(
 
   onProgress?.(5, 'Downloading businesses from OpenStreetMap…');
 
-  // Simple focused query - one tag type per call to avoid Overpass timeouts
-  // Split into 2 smaller queries for reliability
+  // Split queries to avoid Overpass timeouts — amenity only for business types
+  const bbox = `${south},${west},${north},${east}`;
+  const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+  // Q1: Food & drink amenities (small query)
   const q1 = `[out:json][timeout:45];
 (
-  node(${south},${west},${north},${east})["amenity"];
-  way(${south},${west},${north},${east})["amenity"];
+  node(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream"];
+  way(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream"];
 );
 out center body;`;
-  
+
+  // Q2: Healthcare & finance amenities
   const q2 = `[out:json][timeout:45];
 (
-  node(${south},${west},${north},${east})["shop"];
-  way(${south},${west},${north},${east})["shop"];
+  node(${bbox})["amenity"~"pharmacy|bank|hospital|clinic|dentist|veterinary"];
+  way(${bbox})["amenity"~"pharmacy|bank|hospital|clinic|dentist|veterinary"];
 );
 out center body;`;
 
+  // Q3: Other amenities (cinema, nightclub, car, library, school, etc.)
   const q3 = `[out:json][timeout:45];
 (
-  node(${south},${west},${north},${east})["tourism"];
-  way(${south},${west},${north},${east})["tourism"];
+  node(${bbox})["amenity"~"cinema|nightclub|car_rental|library|post_office|school"];
+  way(${bbox})["amenity"~"cinema|nightclub|car_rental|library|post_office|school"];
 );
 out center body;`;
 
+  // Q4: Shops
   const q4 = `[out:json][timeout:45];
 (
-  node(${south},${west},${north},${east})["leisure"];
-  way(${south},${west},${north},${east})["leisure"];
+  node(${bbox})["shop"];
+  way(${bbox})["shop"];
 );
 out center body;`;
 
-  onProgress?.(10, 'Querying amenities…');
+  // Q5: Tourism (hotels, hostels)
+  const q5 = `[out:json][timeout:45];
+(
+  node(${bbox})["tourism"];
+  way(${bbox})["tourism"];
+);
+out center body;`;
+
+  // Q6: Leisure (gyms, fitness, sports)
+  const q6 = `[out:json][timeout:45];
+(
+  node(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall"];
+  way(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall"];
+);
+out center body;`;
+
+  onProgress?.(10, 'Querying food & drink businesses…');
   const d1 = await fetchOverpass(q1);
-  onProgress?.(15, 'Querying shops…');
+  await wait(1500); // avoid rate limiting
+  onProgress?.(15, 'Querying healthcare & finance…');
   const d2 = await fetchOverpass(q2);
-  onProgress?.(20, 'Querying tourism…');
+  await wait(1500);
+  onProgress?.(20, 'Querying entertainment & services…');
   const d3 = await fetchOverpass(q3);
-  onProgress?.(25, 'Querying leisure & fitness…');
+  await wait(1500);
+  onProgress?.(25, 'Querying shops & retail…');
   const d4 = await fetchOverpass(q4);
+  await wait(1500);
+  onProgress?.(30, 'Querying hotels & tourism…');
+  const d5 = await fetchOverpass(q5);
+  await wait(1500);
+  onProgress?.(35, 'Querying gyms & fitness centers…');
+  const d6 = await fetchOverpass(q6);
 
   // Merge all results
   const allElements: any[] = [];
-  if (d1?.elements) allElements.push(...d1.elements);
-  if (d2?.elements) allElements.push(...d2.elements);
-  if (d3?.elements) allElements.push(...d3.elements);
-  if (d4?.elements) allElements.push(...d4.elements);
+  for (const d of [d1, d2, d3, d4, d5, d6]) {
+    if (d?.elements) allElements.push(...d.elements);
+  }
   
   const data = allElements.length > 0 ? { elements: allElements } : null;
 
-  onProgress?.(30, 'Categorizing businesses…');
+  onProgress?.(50, 'Categorizing businesses…');
 
   if (!data || !data.elements || data.elements.length === 0) {
     onProgress?.(35, 'No businesses found from OSM');
