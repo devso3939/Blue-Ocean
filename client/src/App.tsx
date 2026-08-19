@@ -379,10 +379,46 @@ export default function App() {
   // Businesses for the selected category
   const categoryBusinesses = selectedOppCategory ? (businesses.get(selectedOppCategory) || []) : [];
   const [bizSearch, setBizSearch] = useState('');
-  const filteredBiz = categoryBusinesses.filter(b =>
-    !bizSearch || b.name.toLowerCase().includes(bizSearch.toLowerCase()) ||
-    b.address.toLowerCase().includes(bizSearch.toLowerCase())
-  );
+  const [sortCol, setSortCol] = useState<string>('name');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+
+  const filteredBiz = categoryBusinesses
+    .filter(b =>
+      !bizSearch || b.name.toLowerCase().includes(bizSearch.toLowerCase()) ||
+      b.address.toLowerCase().includes(bizSearch.toLowerCase()) ||
+      b.cuisine.toLowerCase().includes(bizSearch.toLowerCase()) ||
+      b.brand.toLowerCase().includes(bizSearch.toLowerCase())
+    )
+    .sort((a, b) => {
+      let av: any, bv: any;
+      switch (sortCol) {
+        case 'name': av = a.name.toLowerCase(); bv = b.name.toLowerCase(); break;
+        case 'cuisine': av = a.cuisine.toLowerCase(); bv = b.cuisine.toLowerCase(); break;
+        case 'address': av = a.address.toLowerCase(); bv = b.address.toLowerCase(); break;
+        case 'phone': av = a.phone; bv = b.phone; break;
+        case 'website': av = a.website; bv = b.website; break;
+        case 'hours': av = a.openingHours; bv = b.openingHours; break;
+        case 'stars': av = parseFloat(a.stars) || 0; bv = parseFloat(b.stars) || 0; break;
+        default: av = a.name.toLowerCase(); bv = b.name.toLowerCase();
+      }
+      if (av < bv) return sortDir === 'asc' ? -1 : 1;
+      if (av > bv) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+
+  const handleSort = (col: string) => {
+    if (sortCol === col) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortCol(col);
+      setSortDir('asc');
+    }
+  };
+
+  const sortArrow = (col: string) => {
+    if (sortCol !== col) return <span className="ml-1 text-muted-foreground/40">↕</span>;
+    return <span className="ml-1 text-primary">{sortDir === 'asc' ? '↑' : '↓'}</span>;
+  };
 
   // CSV download function
   const downloadCSV = useCallback(() => {
@@ -700,13 +736,14 @@ export default function App() {
                 <table className="w-full text-left text-sm">
                   <thead className="sticky top-0 bg-card z-10">
                     <tr className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
-                      <th className="px-4 py-2.5 font-medium">#</th>
-                      <th className="px-4 py-2.5 font-medium">Business</th>
-                      <th className="px-4 py-2.5 font-medium">Cuisine / Type</th>
-                      <th className="px-4 py-2.5 font-medium">Address</th>
-                      <th className="px-4 py-2.5 font-medium">Phone</th>
-                      <th className="px-4 py-2.5 font-medium">Website</th>
-                      <th className="px-4 py-2.5 font-medium">Hours</th>
+                      <th className="px-4 py-2.5 font-medium w-10">#</th>
+                      <th className="px-4 py-2.5 font-medium cursor-pointer hover:text-foreground transition-colors select-none" onClick={() => handleSort('name')}>Business{sortArrow('name')}</th>
+                      <th className="px-4 py-2.5 font-medium cursor-pointer hover:text-foreground transition-colors select-none" onClick={() => handleSort('cuisine')}>Cuisine{sortArrow('cuisine')}</th>
+                      <th className="px-4 py-2.5 font-medium cursor-pointer hover:text-foreground transition-colors select-none" onClick={() => handleSort('address')}>Address{sortArrow('address')}</th>
+                      <th className="px-4 py-2.5 font-medium cursor-pointer hover:text-foreground transition-colors select-none" onClick={() => handleSort('phone')}>Phone{sortArrow('phone')}</th>
+                      <th className="px-4 py-2.5 font-medium cursor-pointer hover:text-foreground transition-colors select-none" onClick={() => handleSort('website')}>Website{sortArrow('website')}</th>
+                      <th className="px-4 py-2.5 font-medium cursor-pointer hover:text-foreground transition-colors select-none" onClick={() => handleSort('hours')}>Hours{sortArrow('hours')}</th>
+                      <th className="px-4 py-2.5 font-medium cursor-pointer hover:text-foreground transition-colors select-none" onClick={() => handleSort('stars')}>Rating{sortArrow('stars')}</th>
                       <th className="px-4 py-2.5 font-medium">Amenities</th>
                       <th className="px-4 py-2.5 font-medium">Social</th>
                       <th className="px-4 py-2.5 font-medium text-right">Actions</th>
@@ -745,6 +782,14 @@ export default function App() {
                             {b.website ? <a href={b.website} target="_blank" rel="noopener" className="text-blue-400 hover:underline">🌐 Link</a> : <span className="text-muted-foreground">—</span>}
                           </td>
                           <td className="px-4 py-3 text-xs text-muted-foreground max-w-[120px] truncate">{b.openingHours || '—'}</td>
+                          <td className="px-4 py-3 text-xs">
+                            {b.stars ? (
+                              <div className="flex items-center gap-1">
+                                <span className="text-amber-400 text-xs">{'★'.repeat(Math.round(parseFloat(b.stars)))}</span>
+                                <span className="text-xs text-muted-foreground">{parseFloat(b.stars).toFixed(1)}</span>
+                              </div>
+                            ) : <span className="text-muted-foreground">—</span>}
+                          </td>
                           <td className="px-4 py-3 text-xs">
                             <div className="flex flex-wrap gap-1">
                               {b.outdoor_seating === 'yes' && <span className="inline-block bg-emerald-500/15 text-emerald-400 px-1.5 py-0.5 rounded text-[10px]">🪑 Outdoor</span>}
