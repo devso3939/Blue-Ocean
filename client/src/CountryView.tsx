@@ -232,7 +232,7 @@ export default function CountryView() {
   }, [selectedCountry]);
 
   // Aggregate comparison data across all cities
-  const comparisonData = (() => {
+  const comparisonData: Array<{category: string; label: string; rows: Array<{cityName: string; existing: number; per10k: number; score: number; population: number; totalBiz: number}>; bestOpportunity: string; leastSaturated: string}> = (() => {
     if (cityData.length === 0) return [];
     
     // For each key category, find the stats across all cities

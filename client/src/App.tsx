@@ -492,14 +492,14 @@ export default function App() {
                 </button>
               )}
               <button
-                onClick={() => setViewMode(viewMode === 'compare' ? 'analysis' : 'compare')}
-                className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${viewMode === 'compare' ? 'bg-primary text-primary-foreground' : 'border border-border text-muted-foreground hover:text-foreground hover:border-primary/50'}`}
+                onClick={() => setViewMode('compare')}
+                className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-border text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all"
               >
                 🏙️ Compare
               </button>
               <button
-                onClick={() => setViewMode(viewMode === 'country' ? 'analysis' : 'country')}
-                className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${viewMode === 'country' ? 'bg-emerald-600 text-white' : 'border border-border text-muted-foreground hover:text-foreground hover:border-emerald-500/50'}`}
+                onClick={() => setViewMode('country')}
+                className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-border text-muted-foreground hover:text-foreground hover:border-emerald-500/50 transition-all"
               >
                 🌍 Country
               </button>
