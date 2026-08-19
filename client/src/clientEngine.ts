@@ -180,9 +180,12 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   if (t === 'hotel' || t === 'motel' || t === 'apartment') return hasName ? 'hotel' : null;
   if (t === 'hostel') return hasName ? 'hostel' : null;
 
-  // ─── Leisure (STRICT: only named fitness centers, NOT pitches/playgrounds) ───
-  if (l === 'fitness_centre' || l === 'sports_centre') return hasName ? 'gym' : null;
-  // DO NOT categorize: pitch, playground, stadium, track,游泳池 etc. as gym
+  // ─── Leisure (fitness and sports centers) ───
+  if (l === 'fitness_centre' || l === 'sports_centre' || l === 'sports_hall' || l === 'swimming_pool') return hasName ? 'gym' : null;
+  // Also check sport tag for fitness activities
+  const sport = tags.sport || '';
+  if ((l === 'pitch' || l === 'stadium' || l === 'track') && (sport === 'fitness' || sport === 'weight_lifting' || sport === 'gymnastics')) return hasName ? 'gym' : null;
+  // DO NOT categorize: pitch, playground, stadium, track, etc. as gym unless sport tag is fitness-related
 
   // ─── Office ───
   if (tags.office === 'coworking' || tags.office === 'company') return hasName ? 'coworking' : null;
@@ -193,15 +196,19 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
 // ─── Parsing Helpers ───────────────────────────────────────────────
 
 function extractPhone(tags: Record<string, string>): string {
-  return tags.phone || tags['contact:phone'] || tags['contact:mobile'] || '';
+  return tags.phone || tags['contact:phone'] || tags['contact:mobile'] || 
+         tags['phone:mobile'] || tags['phone:international'] || 
+         tags['contact:landline'] || tags['contact:fax'] || '';
 }
 
 function extractEmail(tags: Record<string, string>): string {
-  return tags.email || tags['contact:email'] || '';
+  return tags.email || tags['contact:email'] || tags['email:office'] || 
+         tags['contact:email:office'] || '';
 }
 
 function extractWebsite(tags: Record<string, string>): string {
-  return tags.website || tags['contact:website'] || tags.url || '';
+  return tags.website || tags['contact:website'] || tags.url || 
+         tags['contact:url'] || '';
 }
 
 function extractFacebook(tags: Record<string, string>): string {
@@ -232,11 +239,11 @@ const OVERPASS_MIRRORS = [
   'https://lz4.overpass-api.de/api/interpreter',
 ];
 
-async function fetchOverpass(query: string): Promise<any> {
+async function fetchOverpass(query: string, timeoutSec = 60): Promise<any> {
   for (const mirror of OVERPASS_MIRRORS) {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 50000);
+      const timer = setTimeout(() => controller.abort(), (timeoutSec + 10) * 1000);
       const res = await fetch(mirror, {
         method: 'POST',
         body: `data=${encodeURIComponent(query)}`,
@@ -271,42 +278,58 @@ export async function queryBusinesses(
 
   onProgress?.(5, 'Downloading businesses from OpenStreetMap…');
 
-  // Query: only real business tags (amenity, shop, tourism with hotel/hostel, leisure with fitness_centre/sports_centre only)
-  const query = `[out:json][timeout:60];
+  // Simple focused query - one tag type per call to avoid Overpass timeouts
+  // Split into 2 smaller queries for reliability
+  const q1 = `[out:json][timeout:45];
 (
   node(${south},${west},${north},${east})["amenity"];
-  node(${south},${west},${north},${east})["shop"];
-  node(${south},${west},${north},${east})["tourism"~"hotel|hostel|motel"];
-  node(${south},${west},${north},${east})["leisure"~"fitness_centre|sports_centre"];
-  node(${south},${west},${north},${east})["office"];
   way(${south},${west},${north},${east})["amenity"];
-  way(${south},${west},${north},${east})["shop"];
-  way(${south},${west},${north},${east})["tourism"~"hotel|hostel|motel"];
-  way(${south},${west},${north},${east})["leisure"~"fitness_centre|sports_centre"];
-  way(${south},${west},${north},${east})["office"];
 );
 out center body;`;
-
-  let data = await fetchOverpass(query);
-
-  // Fallback
-  if (!data?.elements?.length) {
-    onProgress?.(10, 'Trying alternative query…');
-    const simpleQuery = `[out:json][timeout:45];
+  
+  const q2 = `[out:json][timeout:45];
 (
-  node(${south},${west},${north},${east})["amenity"~"cafe|restaurant|bar|fast_food|pharmacy|bank|hotel|dentist|cinema"];
   node(${south},${west},${north},${east})["shop"];
-  way(${south},${west},${north},${east})["amenity"~"cafe|restaurant|bar|fast_food|pharmacy|bank|hotel|dentist|cinema"];
   way(${south},${west},${north},${east})["shop"];
 );
 out center body;`;
-    data = await fetchOverpass(simpleQuery);
-  }
+
+  const q3 = `[out:json][timeout:45];
+(
+  node(${south},${west},${north},${east})["tourism"];
+  way(${south},${west},${north},${east})["tourism"];
+);
+out center body;`;
+
+  const q4 = `[out:json][timeout:45];
+(
+  node(${south},${west},${north},${east})["leisure"];
+  way(${south},${west},${north},${east})["leisure"];
+);
+out center body;`;
+
+  onProgress?.(10, 'Querying amenities…');
+  const d1 = await fetchOverpass(q1);
+  onProgress?.(15, 'Querying shops…');
+  const d2 = await fetchOverpass(q2);
+  onProgress?.(20, 'Querying tourism…');
+  const d3 = await fetchOverpass(q3);
+  onProgress?.(25, 'Querying leisure & fitness…');
+  const d4 = await fetchOverpass(q4);
+
+  // Merge all results
+  const allElements: any[] = [];
+  if (d1?.elements) allElements.push(...d1.elements);
+  if (d2?.elements) allElements.push(...d2.elements);
+  if (d3?.elements) allElements.push(...d3.elements);
+  if (d4?.elements) allElements.push(...d4.elements);
+  
+  const data = allElements.length > 0 ? { elements: allElements } : null;
 
   onProgress?.(30, 'Categorizing businesses…');
 
-  if (!data?.elements?.length) {
-    onProgress?.(35, 'No businesses found');
+  if (!data || !data.elements || data.elements.length === 0) {
+    onProgress?.(35, 'No businesses found from OSM');
     return results;
   }
 
@@ -322,7 +345,8 @@ out center body;`;
     if (!category) continue;
 
     // Filter: must have a name to be a real business
-    const name = tags.name || tags['name:en'] || tags.brand || '';
+    // Use multiple name sources including local languages
+    const name = tags.name || tags['name:en'] || tags['name:int'] || tags.brand || tags['operator'] || '';
     if (!name.trim()) continue; // Skip unnamed POIs
 
     // Dedup by location + category
