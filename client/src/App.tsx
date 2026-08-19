@@ -156,8 +156,21 @@ export default function App() {
     });
   }, [selectedCity, businesses, opportunities.length]);
 
+  const CAT_EMOJI: Record<string, string> = {
+    cafe: '☕', restaurant: '🍽️', bar: '🍸', pub: '🍺', fast_food: '🍔',
+    hotel: '🏨', gym: '💪', beauty_salon: '💄', hair_salon: '💇',
+    pharmacy: '💊', supermarket: '🛒', bank: '🏦', clothing: '👗',
+    electronics: '📱', bakery: '🥐', cinema: '🎬', car_repair: '🔧',
+    pet_groomer: '🐕', coworking: '💻', spa: '🧖', school: '📚',
+    clinic: '🏥', hospital: '🏥', dentistry: '🦷', post_office: '📮',
+    library: '📖', nightclub: '🎶', car_rental: '🚗', veterinary: '🐾',
+    florist: '🌸', optician: '👓', butcher: '🥩', ice_cream: '🍦',
+    grocery: '🥬', convenience: '🏪', department_store: '🏬',
+    jewelry: '💎', sports: '⚽', books: '📖', fuel: '⛽',
+    art: '🎨', bicycle: '🚲', marketplace: '🏪',
+  };
+
   function addMarkers(map: any, biz: Map<string, Business[]>) {
-    // Clear old markers
     markersRef.current.forEach(m => m.remove());
     markersRef.current = [];
 
@@ -166,50 +179,48 @@ export default function App() {
     if (allBiz.length === 0) return;
 
     import('maplibre-gl').then((maplibregl) => {
-      // Limit markers for performance (max 500)
       const markers = allBiz.length > 500 ? allBiz.slice(0, 500) : allBiz;
 
       markers.forEach(b => {
         const color = CAT_COLORS[b.category] || '#94a3b8';
+        const emoji = CAT_EMOJI[b.category] || '📍';
+
+        // Create an emoji pin element — anchored to bottom-center
         const el = document.createElement('div');
-        el.style.cssText = `width:10px;height:10px;border-radius:50%;background:${color};border:2px solid rgba(255,255,255,0.9);box-shadow:0 2px 6px rgba(0,0,0,0.6);cursor:pointer;transition:transform 0.15s;`;
-        el.onmouseenter = () => { el.style.transform = 'scale(1.8)'; };
-        el.onmouseleave = () => { el.style.transform = 'scale(1)'; };
-        el.title = b.name || b.categoryLabel;
+        el.style.cssText = `position:absolute;width:28px;height:28px;font-size:22px;line-height:28px;text-align:center;cursor:pointer;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.7));transition:transform 0.15s;transform-origin:bottom center;pointer-events:auto;z-index:10;`;
+        el.textContent = emoji;
+        el.onmouseenter = () => { el.style.transform = 'scale(1.3) translateY(-4px)'; };
+        el.onmouseleave = () => { el.style.transform = 'scale(1) translateY(0)'; };
+        el.title = `${b.name} — ${b.categoryLabel}`;
 
         const gmapsUrl = getGoogleMapsUrl(b);
-        
-        // Social links
-        const socialLinks = [];
-        if (b.facebook) socialLinks.push(`<a href="https://facebook.com/${b.facebook.replace('https://facebook.com/', '').replace(/\/$/, '')}" target="_blank" rel="noopener" style="color:#60a5fa;font-size:11px;text-decoration:none;">Facebook</a>`);
-        if (b.instagram) socialLinks.push(`<a href="https://instagram.com/${b.instagram.replace('https://instagram.com/', '').replace('@', '').replace(/\/$/, '')}" target="_blank" rel="noopener" style="color:#e879f9;font-size:11px;text-decoration:none;">Instagram</a>`);
-        const socialHtml = socialLinks.length > 0 ? 
-          `<div style="display:flex;gap:8px;margin-top:6px;">${socialLinks.join('')}</div>` : '';
 
-        // Contact lines
         const contactLines = [];
-        if (b.address) contactLines.push(`<div style="font-size:12px;color:#94a3b8;display:flex;align-items:flex-start;gap:6px;"><span style="flex-shrink:0;">📍</span><span>${b.address}</span></div>`);
-        if (b.phone) contactLines.push(`<div style="font-size:12px;color:#94a3b8;display:flex;align-items:center;gap:6px;"><span style="flex-shrink:0;">📞</span><a href="tel:${b.phone}" style="color:#93c5fd;text-decoration:none;">${b.phone}</a></div>`);
-        if (b.email) contactLines.push(`<div style="font-size:12px;color:#94a3b8;display:flex;align-items:center;gap:6px;"><span style="flex-shrink:0;">✉️</span><a href="mailto:${b.email}" style="color:#93c5fd;text-decoration:none;">${b.email}</a></div>`);
-        if (b.website) contactLines.push(`<div style="font-size:12px;display:flex;align-items:center;gap:6px;"><span style="flex-shrink:0;">🌐</span><a href="${b.website}" target="_blank" rel="noopener" style="color:#60a5fa;text-decoration:none;">${b.website.replace(/^https?:\/\//, '').slice(0, 40)}</a></div>`);
+        if (b.address) contactLines.push('<div style="font-size:12px;color:#94a3b8;display:flex;align-items:flex-start;gap:6px;"><span style="flex-shrink:0;">📍</span><span>' + b.address + '</span></div>');
+        if (b.phone) contactLines.push('<div style="font-size:12px;color:#94a3b8;display:flex;align-items:center;gap:6px;"><span style="flex-shrink:0;">📞</span><a href="tel:' + b.phone + '" style="color:#93c5fd;text-decoration:none;">' + b.phone + '</a></div>');
+        if (b.email) contactLines.push('<div style="font-size:12px;color:#94a3b8;display:flex;align-items:center;gap:6px;"><span style="flex-shrink:0;">✉️</span>' + b.email + '</div>');
+        if (b.website) contactLines.push('<div style="font-size:12px;display:flex;align-items:center;gap:6px;"><span style="flex-shrink:0;">🌐</span><a href="' + b.website + '" target="_blank" rel="noopener" style="color:#60a5fa;text-decoration:none;">' + b.website.replace(/^https?:\/\//, '').slice(0, 35) + '</a></div>');
 
-        const marker = new maplibregl.Marker({ element: el })
+        const socialLines = [];
+        if (b.facebook) socialLines.push('<a href="' + b.facebook + '" target="_blank" rel="noopener" style="color:#60a5fa;font-size:11px;text-decoration:none;">Facebook</a>');
+        if (b.instagram) socialLines.push('<a href="' + b.instagram + '" target="_blank" rel="noopener" style="color:#e879f9;font-size:11px;text-decoration:none;">Instagram</a>');
+
+        const popupHtml = '<div style="background:#0f1117;color:#e2e8f0;padding:14px;border-radius:10px;font-family:system-ui,-apple-system,sans-serif;min-width:220px;max-width:320px;">'
+          + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">'
+          + '<div style="font-weight:700;font-size:15px;color:#f1f5f9;line-height:1.3;">' + emoji + ' ' + (b.name || b.categoryLabel) + '</div>'
+          + '<div style="display:inline-block;background:' + color + '22;color:' + color + ';font-size:10px;padding:2px 8px;border-radius:99px;white-space:nowrap;flex-shrink:0;">' + b.categoryLabel + '</div>'
+          + '</div>'
+          + '<div style="margin-top:8px;display:flex;flex-direction:column;gap:4px;">' + contactLines.join('') + '</div>'
+          + (socialLines.length ? '<div style="display:flex;gap:8px;margin-top:6px;">' + socialLines.join('') + '</div>' : '')
+          + '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #1e293b;display:flex;gap:6px;">'
+          + '<a href="' + gmapsUrl + '" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:5px;background:#1a73e8;color:white;padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none;">📍 Google Maps</a>'
+          + '<a href="https://www.openstreetmap.org/?mlat=' + b.lat + '&mlon=' + b.lon + '#map=17/' + b.lat + '/' + b.lon + '" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:5px;background:#1e293b;color:#94a3b8;padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none;">🗺️ OSM</a>'
+          + '</div>'
+          + '</div>';
+
+        const marker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
           .setLngLat([b.lon, b.lat])
-          .setPopup(new maplibregl.Popup({ className: 'dark-popup', maxWidth: '340px', offset: 12 }).setHTML(`
-            <div style="background:#0f1117;color:#e2e8f0;padding:14px;border-radius:10px;font-family:system-ui,-apple-system,sans-serif;min-width:220px;max-width:320px;">
-              <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">
-                <div style="font-weight:700;font-size:15px;color:#f1f5f9;line-height:1.3;">${b.name || b.categoryLabel}</div>
-                <div style="display:inline-block;background:${color}22;color:${color};font-size:10px;padding:2px 8px;border-radius:99px;white-space:nowrap;flex-shrink:0;">${b.categoryLabel}</div>
-              </div>
-              <div style="margin-top:8px;display:flex;flex-direction:column;gap:4px;">
-                ${contactLines.join('')}
-              </div>
-              ${socialHtml}
-              <div style="margin-top:10px;padding-top:8px;border-top:1px solid #1e293b;">
-                <a href="${gmapsUrl}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:5px;background:#1a73e8;color:white;padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none;">📍 View on Google Maps</a>
-              </div>
-            </div>
-          `))
+          .setPopup(new maplibregl.Popup({ className: 'dark-popup', maxWidth: '340px', offset: 14 }).setHTML(popupHtml))
           .addTo(map);
         markersRef.current.push(marker);
       });

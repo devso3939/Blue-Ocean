@@ -400,7 +400,47 @@ out center body;`;
   }
 
   const totalBiz = Array.from(results.values()).reduce((s, a) => s + a.length, 0);
-  onProgress?.(70, `Found ${totalBiz} businesses in ${results.size} categories`);
+  onProgress?.(70, `Found ${totalBiz} businesses — enriching data…`);
+
+  // ── Enrichment: reverse-geocode businesses missing addresses ──
+  const needsAddress: Business[] = [];
+  for (const bizs of results.values()) {
+    for (const b of bizs) {
+      if (!b.address) needsAddress.push(b);
+    }
+  }
+
+  if (needsAddress.length > 0) {
+    const BATCH = 8;
+    for (let i = 0; i < Math.min(needsAddress.length, 80); i += BATCH) {
+      const batch = needsAddress.slice(i, i + BATCH);
+      const promises = batch.map(async (b) => {
+        try {
+          const r = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=json&zoom=18&addressdetails=1`,
+            { headers: { 'User-Agent': 'BlueOcean/2.0' } }
+          );
+          if (r.ok) {
+            const d = await r.json();
+            if (d.address) {
+              const a = d.address;
+              const parts = [a.road || a.pedestrian, a.house_number, a.suburb || a.neighbourhood || a.city_district, a.city || a.town || a.village].filter(Boolean);
+              b.address = parts.join(', ') || d.display_name?.split(',').slice(0, 3).join(',') || '';
+            }
+            if (!b.phone) b.phone = d.extratags?.phone || d.extratags?.['contact:phone'] || '';
+            if (!b.email) b.email = d.extratags?.email || d.extratags?.['contact:email'] || '';
+            if (!b.website) b.website = d.extratags?.website || d.extratags?.['contact:website'] || '';
+          }
+        } catch {}
+      });
+      await Promise.all(promises);
+      // Nominatim rate limit: 1 req/sec
+      if (i + BATCH < needsAddress.length) await wait(1100);
+      onProgress?.(75, `Enriching business data… ${Math.min(i + BATCH, needsAddress.length)}/${needsAddress.length}`);
+    }
+  }
+
+  onProgress?.(80, `Found ${totalBiz} businesses in ${results.size} categories`);
   return results;
 }
 
