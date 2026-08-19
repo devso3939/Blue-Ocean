@@ -585,7 +585,7 @@ export default function App() {
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 text-white">
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
             </div>
-            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v2.1.0</span></span>
+            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v2.3.0</span></span>
           </div>
           <div className="flex items-center gap-3">
             <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>
