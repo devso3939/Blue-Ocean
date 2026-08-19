@@ -84,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.4.0';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -173,6 +173,7 @@ export default function App() {
   };
 
   function addMarkers(map: any, biz: Map<string, Business[]>) {
+    // Remove old markers
     markersRef.current.forEach(m => m.remove());
     markersRef.current = [];
 
@@ -181,61 +182,55 @@ export default function App() {
     if (allBiz.length === 0) return;
 
     import('maplibre-gl').then((maplibregl) => {
-      // Build GeoJSON from businesses
-      const features = (allBiz.length > 500 ? allBiz.slice(0, 500) : allBiz).map(b => ({
+      const limited = allBiz.length > 500 ? allBiz.slice(0, 500) : allBiz;
+
+      // Build GeoJSON
+      const features = limited.map(b => ({
         type: 'Feature' as const,
         geometry: { type: 'Point' as const, coordinates: [b.lon, b.lat] },
         properties: {
           id: b.id, name: b.name, category: b.category,
-          categoryLabel: b.categoryLabel, address: b.address,
-          phone: b.phone, website: b.website, email: b.email,
-          brand: b.brand, cuisine: b.cuisine,
-          facebook: b.facebook, instagram: b.instagram,
+          categoryLabel: b.categoryLabel, address: b.address || '',
+          phone: b.phone || '', website: b.website || '', email: b.email || '',
+          brand: b.brand || '', cuisine: b.cuisine || '',
+          facebook: b.facebook || '', instagram: b.instagram || '',
           lat: b.lat, lon: b.lon,
+          emoji: (CAT_EMOJI as Record<string,string>)[b.category] || '📍',
         },
       }));
 
-      const geojson: any = { type: 'FeatureCollection', features };
+      const geojson = { type: 'FeatureCollection' as const, features };
 
-      // Remove existing source/layers if re-scanning
-      if (map.getLayer('unclustered-points')) map.removeLayer('unclustered-points');
-      if (map.getLayer('cluster-count')) map.removeLayer('cluster-count');
-      if (map.getLayer('clusters')) map.removeLayer('clusters');
+      // Remove old layers/sources
+      for (const id of ['unclustered-labels', 'unclustered-points', 'cluster-count', 'clusters']) {
+        if (map.getLayer(id)) map.removeLayer(id);
+      }
       if (map.getSource('businesses')) map.removeSource('businesses');
 
+      // Add source with clustering
       map.addSource('businesses', {
         type: 'geojson',
         data: geojson,
         cluster: true,
-        clusterMaxZoom: 16,
-        clusterRadius: 50,
+        clusterMaxZoom: 17,
+        clusterRadius: 45,
       });
 
-      // Cluster circles (colored by count)
+      // 1) Cluster circles
       map.addLayer({
         id: 'clusters',
         type: 'circle',
         source: 'businesses',
         filter: ['has', 'point_count'],
         paint: {
-          'circle-color': [
-            'step', ['get', 'point_count'],
-            '#6366f1', 10,
-            '#8b5cf6', 30,
-            '#a855f7', 60,
-            '#ec4899', 100,
-            '#f43f5e',
-          ],
-          'circle-radius': [
-            'step', ['get', 'point_count'],
-            18, 10, 24, 30, 30, 60, 36, 100, 42,
-          ],
-          'circle-stroke-width': 2,
-          'circle-stroke-color': 'rgba(255,255,255,0.3)',
+          'circle-color': ['step', ['get', 'point_count'], '#6366f1', 10, '#8b5cf6', 30, '#a855f7', 60, '#ec4899'],
+          'circle-radius': ['step', ['get', 'point_count'], 20, 10, 26, 30, 32],
+          'circle-stroke-width': 2.5,
+          'circle-stroke-color': 'rgba(255,255,255,0.4)',
         },
       });
 
-      // Cluster count labels
+      // 2) Cluster count labels
       map.addLayer({
         id: 'cluster-count',
         type: 'symbol',
@@ -243,89 +238,93 @@ export default function App() {
         filter: ['has', 'point_count'],
         layout: {
           'text-field': '{point_count_abbreviated}',
-          'text-font': ['Noto Sans Regular'],
-          'text-size': 13,
+          'text-font': ['Noto Sans Bold'],
+          'text-size': 14,
         },
         paint: { 'text-color': '#ffffff' },
       });
 
-      // Individual business markers
+      // 3) Individual point circles (background)
       map.addLayer({
         id: 'unclustered-points',
         type: 'circle',
         source: 'businesses',
         filter: ['!', ['has', 'point_count']],
         paint: {
-          'circle-color': [
-            'match', ['get', 'category'],
-            'cafe', '#f59e0b',
-            'restaurant', '#ef4444',
-            'bar', '#8b5cf6',
-            'pub', '#a855f7',
-            'hotel', '#3b82f6',
-            'gym', '#10b981',
-            'beauty_salon', '#ec4899',
-            'hair_salon', '#f472b6',
-            'pharmacy', '#06b6d4',
-            'supermarket', '#22c55e',
-            'bank', '#6366f1',
-            'clothing', '#a855f7',
-            'bakery', '#fbbf24',
-            '#94a3b8',
-          ],
-          'circle-radius': 7,
+          'circle-color': ['match', ['get', 'category'],
+            'cafe', '#f59e0b', 'restaurant', '#ef4444', 'bar', '#8b5cf6',
+            'pub', '#a855f7', 'hotel', '#3b82f6', 'gym', '#10b981',
+            'beauty_salon', '#ec4899', 'hair_salon', '#f472b6',
+            'pharmacy', '#06b6d4', 'supermarket', '#22c55e',
+            'bank', '#6366f1', 'clothing', '#a855f7', 'bakery', '#fbbf24',
+            'electronics', '#64748b', '#94a3b8'],
+          'circle-radius': 12,
           'circle-stroke-width': 2,
-          'circle-stroke-color': 'rgba(255,255,255,0.9)',
+          'circle-stroke-color': 'rgba(255,255,255,0.85)',
         },
       });
 
-      // Click handler for individual points → show popup
+      // 4) Individual point emoji labels
+      map.addLayer({
+        id: 'unclustered-labels',
+        type: 'symbol',
+        source: 'businesses',
+        filter: ['!', ['has', 'point_count']],
+        layout: {
+          'text-field': ['get', 'emoji'],
+          'text-size': 14,
+          'text-allow-overlap': true,
+        },
+      });
+
+      // === Popup on click ===
       map.on('click', 'unclustered-points', (e: any) => {
-        const props = e.features[0].properties;
-        const color = CAT_COLORS[props.category] || '#94a3b8';
-        const emoji = CAT_EMOJI[props.category] || '📍';
-        const gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(props.name + (props.address ? ' ' + props.address : ''))}`;
+        const p = e.features[0].properties;
+        const color = (CAT_COLORS as Record<string,string>)[p.category] || '#94a3b8';
+        const emoji = p.emoji || '📍';
+        const gmaps = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(p.name + (p.address ? ' ' + p.address : ''))}`;
 
-        const contactLines = [];
-        if (props.address) contactLines.push(`<div style="font-size:12px;color:#94a3b8;display:flex;align-items:flex-start;gap:6px;"><span>📍</span><span>${props.address}</span></div>`);
-        if (props.phone) contactLines.push(`<div style="font-size:12px;color:#94a3b8;display:flex;align-items:center;gap:6px;"><span>📞</span><a href="tel:${props.phone}" style="color:#93c5fd;text-decoration:none;">${props.phone}</a></div>`);
-        if (props.email) contactLines.push(`<div style="font-size:12px;color:#94a3b8;display:flex;align-items:center;gap:6px;"><span>✉️</span>${props.email}</div>`);
-        if (props.website) contactLines.push(`<div style="font-size:12px;display:flex;align-items:center;gap:6px;"><span>🌐</span><a href="${props.website}" target="_blank" rel="noopener" style="color:#60a5fa;text-decoration:none;">${props.website.replace(/^https?:\/\//, '').slice(0, 35)}</a></div>`);
+        // Build compact contact lines
+        let contactHtml = '';
+        if (p.phone) contactHtml += `<div style="display:flex;align-items:center;gap:6px;font-size:12px;"><a href="tel:${p.phone}" style="color:#60a5fa;text-decoration:none;">📞 ${p.phone}</a></div>`;
+        if (p.email) contactHtml += `<div style="font-size:12px;color:#94a3b8;overflow:hidden;text-overflow:ellipsis;">✉️ ${p.email}</div>`;
+        if (p.website) contactHtml += `<div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;"><a href="${p.website}" target="_blank" style="color:#60a5fa;text-decoration:none;">🌐 ${p.website.replace(/^https?:\/\//, '').slice(0, 30)}</a></div>`;
+        if (p.address) contactHtml += `<div style="font-size:11px;color:#64748b;overflow:hidden;text-overflow:ellipsis;">📍 ${p.address}</div>`;
 
-        const socialLines = [];
-        if (props.facebook) socialLines.push(`<a href="${props.facebook}" target="_blank" rel="noopener" style="color:#60a5fa;font-size:11px;text-decoration:none;">Facebook</a>`);
-        if (props.instagram) socialLines.push(`<a href="${props.instagram}" target="_blank" rel="noopener" style="color:#e879f9;font-size:11px;text-decoration:none;">Instagram</a>`);
+        // Social badges
+        let socialHtml = '';
+        const badges = [];
+        if (p.facebook) badges.push(`<a href="${p.facebook}" target="_blank" style="color:#60a5fa;font-size:10px;text-decoration:none;background:#60a5fa15;padding:2px 6px;border-radius:4px;">FB</a>`);
+        if (p.instagram) badges.push(`<a href="${p.instagram}" target="_blank" style="color:#e879f9;font-size:10px;text-decoration:none;background:#e879f915;padding:2px 6px;border-radius:4px;">IG</a>`);
+        if (badges.length) socialHtml = `<div style="display:flex;gap:4px;margin-top:4px;">${badges.join('')}</div>`;
 
-        const popupHtml = `<div style="background:#0f1117;color:#e2e8f0;padding:14px;border-radius:10px;font-family:system-ui;min-width:220px;max-width:320px;">
-          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">
-            <div style="font-weight:700;font-size:15px;color:#f1f5f9;">${emoji} ${props.name || props.categoryLabel}</div>
-            <div style="background:${color}22;color:${color};font-size:10px;padding:2px 8px;border-radius:99px;white-space:nowrap;">${props.categoryLabel}</div>
-          </div>
-          <div style="margin-top:8px;display:flex;flex-direction:column;gap:4px;">${contactLines.join('')}</div>
-          ${socialLines.length ? `<div style="display:flex;gap:8px;margin-top:6px;">${socialLines.join('')}</div>` : ''}
-          <div style="margin-top:10px;padding-top:8px;border-top:1px solid #1e293b;display:flex;gap:6px;">
-            <a href="${gmapsUrl}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:5px;background:#1a73e8;color:white;padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none;">📍 Google Maps</a>
-            <a href="https://www.openstreetmap.org/?mlat=${props.lat}&mlon=${props.lon}#map=17/${props.lat}/${props.lon}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:5px;background:#1e293b;color:#94a3b8;padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none;">🗺️ OSM</a>
+        const html = `<div style="background:#0f1117;color:#e2e8f0;padding:10px 12px;border-radius:8px;font-family:system-ui;min-width:160px;max-width:240px;font-size:12px;">
+          <div style="font-weight:600;font-size:13px;color:#f1f5f9;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${emoji} ${p.name || p.categoryLabel}</div>
+          <div style="display:inline-block;background:${color}22;color:${color};font-size:9px;padding:1px 6px;border-radius:99px;margin-bottom:6px;">${p.categoryLabel}</div>
+          ${contactHtml}
+          ${socialHtml}
+          <div style="margin-top:6px;padding-top:5px;border-top:1px solid #1e293b;display:flex;gap:4px;">
+            <a href="${gmaps}" target="_blank" style="background:#1a73e8;color:white;padding:4px 8px;border-radius:4px;font-size:10px;font-weight:600;text-decoration:none;">Maps</a>
+            <a href="https://www.openstreetmap.org/?mlat=${p.lat}&mlon=${p.lon}#map=17/${p.lat}/${p.lon}" target="_blank" style="background:#1e293b;color:#94a3b8;padding:4px 8px;border-radius:4px;font-size:10px;font-weight:600;text-decoration:none;">OSM</a>
           </div>
         </div>`;
 
-        new maplibregl.Popup({ className: 'dark-popup', maxWidth: '340px', offset: 14 })
+        new maplibregl.Popup({ className: 'dark-popup', maxWidth: '260px', offset: 12, closeButton: true })
           .setLngLat(e.lngLat)
-          .setHTML(popupHtml)
+          .setHTML(html)
           .addTo(map);
       });
 
-      // Click on cluster → zoom in
+      // Click cluster → zoom
       map.on('click', 'clusters', (e: any) => {
-        const clusterId = e.features[0].properties.cluster_id;
-        const source = map.getSource('businesses');
-        source.getClusterExpansionZoom(clusterId, (err: any, zoom: number) => {
+        const id = e.features[0].properties.cluster_id;
+        map.getSource('businesses').getClusterExpansionZoom(id, (err: any, zoom: number) => {
           if (err) return;
-          map.easeTo({ center: e.lngLat, zoom: zoom + 1, duration: 500 });
+          map.easeTo({ center: e.lngLat, zoom: Math.min(zoom + 1, 18), duration: 500 });
         });
       });
 
-      // Cursor changes
+      // Cursor hints
       map.on('mouseenter', 'unclustered-points', () => { map.getCanvas().style.cursor = 'pointer'; });
       map.on('mouseleave', 'unclustered-points', () => { map.getCanvas().style.cursor = ''; });
       map.on('mouseenter', 'clusters', () => { map.getCanvas().style.cursor = 'pointer'; });
@@ -585,7 +584,7 @@ export default function App() {
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 text-white">
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
             </div>
-            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v2.3.0</span></span>
+            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v2.4.0</span></span>
           </div>
           <div className="flex items-center gap-3">
             <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>
