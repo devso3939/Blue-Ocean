@@ -75,7 +75,7 @@ async function findTopCities(countryName: string, countryCode: string): Promise<
   const res = await fetch(url, { headers: { 'Accept': 'language,en' } });
   const data = await res.json();
 
-  // Filter to only results in the correct country and with population
+  // Build city list from results
   const cities: CityResult[] = [];
   for (const r of data) {
     const addr = r.address || {};
@@ -85,11 +85,20 @@ async function findTopCities(countryName: string, countryCode: string): Promise<
     // Country already filtered by countrycodes param, but double-check
     if (resultCC && resultCC.toLowerCase() !== cc) continue;
     
+    // Skip if not a city/town/village
+    const rawName = addr.city || addr.town || addr.village || addr.municipality;
+    if (!rawName) continue;
+    
+    // Try to get English name from display_name (first part before comma)
+    const displayNameEn = r.display_name?.split(',')[0] || '';
+    // Use the raw name; if it's non-Latin, also store the display name
+    const cityName = rawName !== displayNameEn && /^[a-zA-Z]/.test(displayNameEn) ? displayNameEn : rawName;
+    
     const pop = r.extratags?.population ? parseInt(r.extratags.population) : null;
     const bbox = r.boundingbox.map(Number);
     
     cities.push({
-      name: addr.city || addr.town || addr.village || addr.municipality || r.display_name.split(',')[0],
+      name: cityName,
       country: resultCountry,
       countryCode: resultCC,
       lat: parseFloat(r.lat),
