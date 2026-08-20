@@ -200,44 +200,32 @@ export default function App() {
           const coords = f.geometry.coordinates;
           const gmapsUrl = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent((p.name || '') + ' ' + (p.address || ''));
           const osmUrl = 'https://www.openstreetmap.org/?mlat=' + coords[1] + '&mlon=' + coords[0] + '#map=17/' + coords[1] + '/' + coords[0];
-          // Compact popup: name + category + phone/email/website in a tiny card
-          const lines: string[] = [];
-          // Name row
-          lines.push('<div style="font-weight:700;font-size:12px;color:#f8fafc;margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px">' + (p.emoji || '📍') + ' ' + (p.name || 'Unknown') + '</div>');
-          // Category pill
-          lines.push('<div style="display:inline-block;background:' + (p.color || '#64748b') + '20;color:' + (p.color || '#94a3b8') + ';font-size:8px;padding:1px 5px;border-radius:99px;margin-bottom:5px;font-weight:600">' + (p.categoryLabel || '') + '</div>');
-          // Contact line — phone + email on same row if both exist
-          const contactParts: string[] = [];
-          if (p.phone) contactParts.push('<a href="tel:' + p.phone + '" style="color:#60a5fa;text-decoration:none;font-size:11px">📞 ' + p.phone + '</a>');
-          if (p.email) contactParts.push('<span style="color:#94a3b8;font-size:10px;word-break:break-all">✉️ ' + p.email + '</span>');
-          if (contactParts.length > 0) lines.push('<div style="margin:2px 0">' + contactParts.join(' &nbsp;') + '</div>');
-          // Website
-          if (p.website) lines.push('<div><a href="' + p.website + '" target="_blank" style="color:#60a5fa;text-decoration:none;font-size:10px">🌐 ' + p.website.replace(/^https?:\/\//, '').slice(0, 28) + '</a></div>');
-          // Address
-          if (p.address) lines.push('<div style="font-size:9px;color:#64748b;margin-top:1px">📍 ' + p.address + '</div>');
-          // Social badges inline
-          const socialParts: string[] = [];
-          if (p.facebook) socialParts.push('<a href="' + p.facebook + '" target="_blank" style="color:#60a5fa;font-size:8px;text-decoration:none;background:rgba(96,165,250,0.08);padding:1px 4px;border-radius:3px">FB</a>');
-          if (p.instagram) socialParts.push('<a href="' + p.instagram + '" target="_blank" style="color:#e879f9;font-size:8px;text-decoration:none;background:rgba(232,121,249,0.08);padding:1px 4px;border-radius:3px">IG</a>');
-          if (socialParts.length > 0) lines.push('<div style="display:flex;gap:3px;margin-top:2px">' + socialParts.join('') + '</div>');
-          // Action buttons — tiny
-          lines.push('<div style="margin-top:4px;padding-top:4px;border-top:1px solid rgba(51,65,85,0.5);display:flex;gap:3px">'
-            + '<a href="' + gmapsUrl + '" target="_blank" style="background:#1a73e8;color:white;padding:2px 6px;border-radius:4px;font-size:9px;font-weight:600;text-decoration:none">📍 Maps</a>'
-            + '<a href="' + osmUrl + '" target="_blank" style="background:rgba(30,41,59,0.8);color:#94a3b8;padding:2px 6px;border-radius:4px;font-size:9px;font-weight:600;text-decoration:none">OSM</a>'
-            + '</div>');
-          const html = '<div style="padding:8px 10px;font-family:system-ui,-apple-system,sans-serif">' + lines.join('') + '</div>';
-          // Remove any existing popup first
-          const existing = document.querySelector('.maplibregl-popup');
-          if (existing) existing.remove();
-          new maplibregl.Popup({ closeButton: true, offset: 12, maxWidth: '220px' })
+          let contactHtml = '';
+          if (p.phone) contactHtml += '<div style="margin:3px 0"><a href="tel:' + p.phone + '" style="color:#60a5fa;text-decoration:none;font-size:12px">📞 ' + p.phone + '</a></div>';
+          if (p.email) contactHtml += '<div style="font-size:11px;color:#94a3b8;margin:3px 0;word-break:break-all">✉️ ' + p.email + '</div>';
+          if (p.website) contactHtml += '<div style="margin:3px 0"><a href="' + p.website + '" target="_blank" style="color:#60a5fa;text-decoration:none;font-size:11px">🌐 ' + p.website.replace(/^https?:\/\//, '').slice(0, 25) + '</a></div>';
+          if (p.address) contactHtml += '<div style="font-size:10px;color:#64748b;margin:3px 0">📍 ' + p.address + '</div>';
+          let socialHtml = '';
+          if (p.facebook) socialHtml += '<a href="' + p.facebook + '" target="_blank" style="color:#60a5fa;font-size:9px;text-decoration:none;background:rgba(96,165,250,0.1);padding:2px 5px;border-radius:3px">FB</a> ';
+          if (p.instagram) socialHtml += '<a href="' + p.instagram + '" target="_blank" style="color:#e879f9;font-size:9px;text-decoration:none;background:rgba(232,121,249,0.1);padding:2px 5px;border-radius:3px">IG</a>';
+          const html = '<div style="padding:10px 12px;max-width:220px;font-family:system-ui,sans-serif">'
+            + '<div style="font-weight:600;font-size:13px;color:#f1f5f9;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (p.emoji || '') + ' ' + (p.name || '') + '</div>'
+            + '<div style="display:inline-block;background:' + (p.color || '#64748b') + '22;color:' + (p.color || '#64748b') + ';font-size:9px;padding:1px 6px;border-radius:99px;margin-bottom:6px">' + (p.categoryLabel || '') + '</div>'
+            + contactHtml
+            + (socialHtml ? '<div style="display:flex;gap:3px;margin-top:3px">' + socialHtml + '</div>' : '')
+            + '<div style="margin-top:6px;padding-top:5px;border-top:1px solid #1e293b;display:flex;gap:4px">'
+            + '<a href="' + gmapsUrl + '" target="_blank" style="background:#1a73e8;color:white;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:600;text-decoration:none">📍 Maps</a>'
+            + '<a href="' + osmUrl + '" target="_blank" style="background:#1e293b;color:#94a3b8;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:600;text-decoration:none">OSM</a>'
+            + '</div></div>';
+          new maplibregl.Popup({ maxWidth: '240px', offset: 15, closeButton: true })
             .setLngLat(coords)
             .setHTML(html)
             .addTo(map);
         };
         map.on('click', 'biz-circles', showPopup);
         map.on('click', 'biz-labels', showPopup);
+        // If businesses already exist, render them        });
         // If businesses already exist, render them
-        });
         if (businesses.size > 0) {
           updateMapData(map, businesses);
         }
