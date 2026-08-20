@@ -84,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '2.9.1';
+const APP_VERSION = '2.9.2';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -195,7 +195,7 @@ export default function App() {
 
         // DOM marker: colored circle with emoji
         const el = document.createElement('div');
-        el.style.cssText = `width:28px;height:28px;border-radius:50%;background:${color};display:flex;align-items:center;justify-content:center;font-size:15px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.5);border:2px solid rgba(255,255,255,0.85);transition:transform 0.15s,box-shadow 0.15s;`;
+        el.style.cssText = `width:32px;height:32px;border-radius:50%;background:${color};display:flex;align-items:center;justify-content:center;font-size:17px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,0.6);border:2.5px solid rgba(255,255,255,0.9);transition:transform 0.15s,box-shadow 0.15s;z-index:10;`;
         el.textContent = emoji;
         el.title = `${b.name} — ${b.categoryLabel}`;
         el.onmouseenter = () => { el.style.transform = 'scale(1.2) translateY(-2px)'; el.style.boxShadow = '0 4px 16px rgba(0,0,0,0.7)'; };
@@ -237,8 +237,9 @@ export default function App() {
           .setPopup(new maplibregl.Popup({
             className: 'dark-popup',
             maxWidth: '240px',
-            offset: 16,
+            offset: 18,
             closeButton: true,
+            autoPan: false,
           }).setHTML(popupHtml))
           .addTo(map);
 
@@ -249,7 +250,7 @@ export default function App() {
       if (markers.length > 1) {
         const bounds = new maplibregl.LngLatBounds();
         markers.forEach(b => bounds.extend([b.lon, b.lat]));
-        map.fitBounds(bounds, { padding: 50, maxZoom: 14, duration: 1000 });
+        map.fitBounds(bounds, { padding: 60, maxZoom: 13, duration: 1000 });
       }
     });
   }
@@ -517,7 +518,7 @@ export default function App() {
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 text-white">
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
             </div>
-            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v2.8.0</span></span>
+            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v2.9.2</span></span>
           </div>
           <div className="flex items-center gap-3">
             <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>

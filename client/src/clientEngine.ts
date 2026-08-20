@@ -510,7 +510,7 @@ out center body;`;
 
 // ─── Google Maps Place Search Enrichment ────────────────────────
 async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
-  const NEEDS = businesses.filter(b => !b.phone && !b.website);
+  const NEEDS = businesses.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
   if (NEEDS.length === 0) return;
   const BATCH = 3;
   const max = Math.min(NEEDS.length, 50);
@@ -560,10 +560,10 @@ async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct:
 // ─── Brave Search Enrichment ───────────────────────────────────
 const BRAVE_API_KEY = 'BSAded3tnZfvadieW5pz0tiLrlh2lvn';
 async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
-  const NEEDS = businesses.filter(b => !b.phone && !b.website);
+  const NEEDS = businesses.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
   if (NEEDS.length === 0 || !BRAVE_API_KEY) return;
   const BATCH = 3;
-  const max = Math.min(NEEDS.length, 30); // Brave free tier: 2000 req/mo
+  const max = Math.min(NEEDS.length, 50); // Brave free tier: 2000 req/mo
   let found = 0;
   for (let i = 0; i < max; i += BATCH) {
     const batch = NEEDS.slice(i, i + BATCH);
@@ -613,11 +613,11 @@ async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number
 // ─── DuckDuckGo Search Enrichment ──────────────────────────────
 // Searches DuckDuckGo for business contact info (website, phone, social)
 async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
-  const NEEDS_DATA = businesses.filter(b => !b.website && !b.phone);
+  const NEEDS_DATA = businesses.filter(b => !b.website || !b.phone || !b.email || (!b.facebook && !b.instagram));
   if (NEEDS_DATA.length === 0) return;
 
   const BATCH = 5;
-  const maxEnrich = Math.min(NEEDS_DATA.length, 80);
+  const maxEnrich = Math.min(NEEDS_DATA.length, 120);
   let found = 0;
 
   for (let i = 0; i < maxEnrich; i += BATCH) {
@@ -702,18 +702,28 @@ async function enrichFromWebsite(b: Business): Promise<void> {
     });
     if (!r.ok) return;
     const html = await r.text();
-    const head = html.substring(0, 5000); // Only scan the head section
+    const head = html.substring(0, 15000); // Scan head + body for contact info
 
-    // Extract phone from tel: links or contact pages
+    // Extract phone from tel: links or page text
     if (!b.phone) {
       const telMatch = head.match(/href="tel:([^"]+)"/);
       if (telMatch) b.phone = telMatch[1];
+      else {
+        // Try finding phone in page text (international format)
+        const phoneText = head.match(/\+\d[\d\s\-\.\(\)]{7,18}/);
+        if (phoneText && phoneText[0].length >= 8) b.phone = phoneText[0].trim();
+      }
     }
 
-    // Extract email from mailto: links
+    // Extract email from mailto: links or text
     if (!b.email) {
       const emailMatch = head.match(/href="mailto:([^"]+)"/);
       if (emailMatch) b.email = emailMatch[1];
+      else {
+        // Try finding email in page text
+        const emailText = head.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+        if (emailText && !emailText[0].includes('example.com') && !emailText[0].includes('wixpress')) b.email = emailText[0];
+      }
     }
 
     // Extract Facebook from meta tags or links
@@ -726,6 +736,27 @@ async function enrichFromWebsite(b: Business): Promise<void> {
     if (!b.instagram) {
       const igMatch = head.match(/instagram\.com\/([^"\s&]+)/i);
       if (igMatch) b.instagram = `https://instagram.com/${igMatch[1].replace(/\/$/, '')}`;
+    }
+
+    // Also check body for additional social links (scan more)
+    if (html.length > 5000) {
+      const body = html.substring(5000, 25000);
+      if (!b.facebook) {
+        const fbBody = body.match(/(?:facebook\.com|fb\.com)\/(["\s&\w.]+)/i);
+        if (fbBody) b.facebook = `https://facebook.com/${fbBody[1].trim().replace(/["\s&].*/, '').replace(/\/$/, '')}`;
+      }
+      if (!b.instagram) {
+        const igBody = body.match(/instagram\.com\/(["\s&\w.]+)/i);
+        if (igBody) b.instagram = `https://instagram.com/${igBody[1].trim().replace(/["\s&].*/, '').replace(/\/$/, '')}`;
+      }
+      if (!b.phone) {
+        const phoneBody = body.match(/\+\d[\d\s\-\.\(\)]{7,18}/);
+        if (phoneBody && phoneBody[0].length >= 8) b.phone = phoneBody[0].trim();
+      }
+      if (!b.email) {
+        const emailBody = body.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+        if (emailBody && !emailBody[0].includes('example.com') && !emailBody[0].includes('wixpress')) b.email = emailBody[0];
+      }
     }
   } catch {}
 }
@@ -771,7 +802,7 @@ async function enrichFromWebsite(b: Business): Promise<void> {
     }
   }
 
-  onProgress?.(80, `Found ${totalBiz} businesses — searching web for contact data…`);
+  onProgress?.(80, `Found ${totalBiz} businesses — searching web for phone, email, social…`);
 
   // ── Enrichment Layer 2: DuckDuckGo search for missing websites/phones ──
   await enrichFromWeb(allBizList, onProgress);
@@ -780,9 +811,9 @@ async function enrichFromWebsite(b: Business): Promise<void> {
   await enrichFromGooglePlaces(allBizList, onProgress);
 
   onProgress?.(90, `Scraping websites for social links…`);
-  const hasWebsite = allBizList.filter(b => b.website && (!b.facebook || !b.instagram));
+  const hasWebsite = allBizList.filter(b => b.website && (!b.facebook || !b.instagram || !b.phone || !b.email));
   const webBatch = 5;
-  for (let i = 0; i < Math.min(hasWebsite.length, 40); i += webBatch) {
+  for (let i = 0; i < Math.min(hasWebsite.length, 80); i += webBatch) {
     const batch = hasWebsite.slice(i, i + webBatch);
     await Promise.all(batch.map(b => enrichFromWebsite(b)));
     if (i + webBatch < hasWebsite.length) await wait(1500);
