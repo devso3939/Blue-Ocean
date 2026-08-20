@@ -84,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '3.0.1';
+const APP_VERSION = '3.1.0';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -148,79 +148,12 @@ export default function App() {
 
       map.on('load', () => {
         mapReadyRef.current = true;
-
-        // Register canvas-based emoji images for each category
-        const EMOJI_MAP: Record<string, string> = {
-          cafe: '☕', restaurant: '🍽️', bar: '🍸', pub: '🍺', fast_food: '🍔',
-          hotel: '🏨', gym: '💪', beauty_salon: '💄', hair_salon: '💇',
-          pharmacy: '💊', supermarket: '🛒', bank: '🏦', clothing: '👗',
-          electronics: '📱', bakery: '🥐', cinema: '🎬', car_repair: '🔧',
-          pet_groomer: '🐕', coworking: '💻', spa: '🧖', school: '📚',
-          clinic: '🏥', hospital: '🏥', dentistry: '🦷', post_office: '📮',
-          library: '📖', nightclub: '🎶', car_rental: '🚗', veterinary: '🐾',
-          florist: '🌸', optician: '👓', butcher: '🥩', ice_cream: '🍦',
-          grocery: '🥬', convenience: '🏪', department_store: '🏬',
-          jewelry: '💎', sports: '⚽', books: '📖', fuel: '⛽',
-          art: '🎨', bicycle: '🚲', marketplace: '🏪',
-        };
-
-
-        // Create canvas-based images for each emoji category
-        for (const [cat, emoji] of Object.entries(EMOJI_MAP)) {
-          const size = 36;
-          const canvas = document.createElement('canvas');
-          canvas.width = size;
-          canvas.height = size;
-          const ctx = canvas.getContext('2d');
-          if (!ctx) continue;
-          // Draw colored circle background
-          const color = CAT_COLORS[cat] || '#64748b';
-          ctx.beginPath();
-          ctx.arc(size / 2, size / 2, size / 2 - 1, 0, Math.PI * 2);
-          ctx.fillStyle = color;
-          ctx.fill();
-          ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-          ctx.lineWidth = 2;
-          ctx.stroke();
-          // Draw emoji text
-          ctx.font = '18px serif';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillStyle = '#ffffff';
-          ctx.fillText(emoji, size / 2, size / 2);
-          // Register as MapLibre image
-          map.addImage('emoji-' + cat, canvas as any);
-        }
-        // Also add a default marker image
-        {
-          const size = 36;
-          const canvas = document.createElement('canvas');
-          canvas.width = size;
-          canvas.height = size;
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.beginPath();
-            ctx.arc(size / 2, size / 2, size / 2 - 1, 0, Math.PI * 2);
-            ctx.fillStyle = '#64748b';
-            ctx.fill();
-            ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-            ctx.lineWidth = 2;
-            ctx.stroke();
-            ctx.font = '18px serif';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillStyle = '#ffffff';
-            ctx.fillText('📍', size / 2, size / 2);
-            map.addImage('emoji-default', canvas as any);
-          }
-        }
-
         // Add GeoJSON source for businesses
         map.addSource('businesses', {
           type: 'geojson',
           data: { type: 'FeatureCollection', features: [] },
         });
-        // Circle layer: colored dots (fallback if image fails)
+        // Circle layer: always visible, colored dots sized by zoom
         map.addLayer({
           id: 'biz-circles',
           type: 'circle',
@@ -228,40 +161,39 @@ export default function App() {
           paint: {
             'circle-radius': [
               'interpolate', ['linear'], ['zoom'],
-              10, 6,
-              14, 12,
-              18, 16,
+              8, 8,
+              12, 12,
+              16, 16,
             ],
             'circle-color': ['get', 'color'],
-            'circle-stroke-width': 2,
-            'circle-stroke-color': 'rgba(255,255,255,0.9)',
-            'circle-opacity': 0,
+            'circle-stroke-width': 2.5,
+            'circle-stroke-color': 'rgba(255,255,255,0.95)',
+            'circle-opacity': 0.92,
           },
         });
-        // Icon layer: canvas emoji images on top of circles
+        // Text label layer: category initial letter on each circle
         map.addLayer({
-          id: 'biz-icons',
+          id: 'biz-labels',
           type: 'symbol',
           source: 'businesses',
           layout: {
-            'icon-image': [
-              'case',
-              ['has', 'category'],
-              ['concat', 'emoji-', ['get', 'category']],
-              'emoji-default'
-            ],
-            'icon-size': 1,
-            'icon-allow-overlap': true,
-            'icon-ignore-placement': true,
+            'text-field': ['get', 'label'],
+            'text-size': 12,
+            'text-allow-overlap': true,
+            'text-ignore-placement': true,
+            'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+          },
+          paint: {
+            'text-color': '#ffffff',
           },
         });
-        // Cursor pointer on hover (check both layers)
-        map.on('mouseenter', 'biz-icons', () => { map.getCanvas().style.cursor = 'pointer'; });
-        map.on('mouseleave', 'biz-icons', () => { map.getCanvas().style.cursor = ''; });
+        // Cursor pointer on hover
         map.on('mouseenter', 'biz-circles', () => { map.getCanvas().style.cursor = 'pointer'; });
         map.on('mouseleave', 'biz-circles', () => { map.getCanvas().style.cursor = ''; });
-        // Click handler: show popup
-        map.on('click', 'biz-icons', (e: any) => {
+        map.on('mouseenter', 'biz-labels', () => { map.getCanvas().style.cursor = 'pointer'; });
+        map.on('mouseleave', 'biz-labels', () => { map.getCanvas().style.cursor = ''; });
+        // Click handler on either layer
+        const showPopup = (e: any) => {
           const f = e.features?.[0];
           if (!f) return;
           const p = f.properties;
@@ -289,37 +221,10 @@ export default function App() {
             .setLngLat(coords)
             .setHTML(html)
             .addTo(map);
-        });
-        // Fallback click on circle layer
-        map.on('click', 'biz-circles', (e: any) => {
-          const f = e.features?.[0];
-          if (!f) return;
-          const p = f.properties;
-          const coords = f.geometry.coordinates;
-          const gmapsUrl = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent((p.name || '') + ' ' + (p.address || ''));
-          const osmUrl = 'https://www.openstreetmap.org/?mlat=' + coords[1] + '&mlon=' + coords[0] + '#map=17/' + coords[1] + '/' + coords[0];
-          let contactHtml = '';
-          if (p.phone) contactHtml += '<div style="margin:3px 0"><a href="tel:' + p.phone + '" style="color:#60a5fa;text-decoration:none;font-size:12px">📞 ' + p.phone + '</a></div>';
-          if (p.email) contactHtml += '<div style="font-size:11px;color:#94a3b8;margin:3px 0;word-break:break-all">✉️ ' + p.email + '</div>';
-          if (p.website) contactHtml += '<div style="margin:3px 0"><a href="' + p.website + '" target="_blank" style="color:#60a5fa;text-decoration:none;font-size:11px">🌐 ' + p.website.replace(/^https?:\/\//, '').slice(0, 25) + '</a></div>';
-          if (p.address) contactHtml += '<div style="font-size:10px;color:#64748b;margin:3px 0">📍 ' + p.address + '</div>';
-          let socialHtml = '';
-          if (p.facebook) socialHtml += '<a href="' + p.facebook + '" target="_blank" style="color:#60a5fa;font-size:9px;text-decoration:none;background:rgba(96,165,250,0.1);padding:2px 5px;border-radius:3px">FB</a> ';
-          if (p.instagram) socialHtml += '<a href="' + p.instagram + '" target="_blank" style="color:#e879f9;font-size:9px;text-decoration:none;background:rgba(232,121,249,0.1);padding:2px 5px;border-radius:3px">IG</a>';
-          const html = '<div style="padding:10px 12px;max-width:220px;font-family:system-ui,sans-serif">'
-            + '<div style="font-weight:600;font-size:13px;color:#f1f5f9;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (p.name || '') + '</div>'
-            + '<div style="display:inline-block;background:' + (p.color || '#64748b') + '22;color:' + (p.color || '#64748b') + ';font-size:9px;padding:1px 6px;border-radius:99px;margin-bottom:6px">' + (p.categoryLabel || '') + '</div>'
-            + contactHtml
-            + (socialHtml ? '<div style="display:flex;gap:3px;margin-top:3px">' + socialHtml + '</div>' : '')
-            + '<div style="margin-top:6px;padding-top:5px;border-top:1px solid #1e293b;display:flex;gap:4px">'
-            + '<a href="' + gmapsUrl + '" target="_blank" style="background:#1a73e8;color:white;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:600;text-decoration:none">📍 Maps</a>'
-            + '<a href="' + osmUrl + '" target="_blank" style="background:#1e293b;color:#94a3b8;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:600;text-decoration:none">OSM</a>'
-            + '</div></div>';
-          new maplibregl.Popup({ className: 'dark-popup', maxWidth: '240px', offset: 15, closeButton: true })
-            .setLngLat(coords)
-            .setHTML(html)
-            .addTo(map);
-        });
+        };
+        map.on('click', 'biz-circles', showPopup);
+        map.on('click', 'biz-labels', showPopup);
+        // If businesses already exist, render them        });
         // If businesses already exist, render them
         if (businesses.size > 0) {
           updateMapData(map, businesses);
@@ -362,6 +267,7 @@ export default function App() {
         categoryLabel: b.categoryLabel,
         color: (CAT_COLORS as Record<string,string>)[b.category] || '#64748b',
         emoji: (CAT_EMOJI as Record<string,string>)[b.category] || '📍',
+        label: (b.categoryLabel || b.name || '•').charAt(0).toUpperCase(),
         phone: b.phone || '',
         email: b.email || '',
         website: b.website || '',

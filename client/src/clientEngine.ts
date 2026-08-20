@@ -559,6 +559,60 @@ async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct:
 
 // ─── Brave Search Enrichment ───────────────────────────────────
 const BRAVE_API_KEY = 'BSAded3tnZfvadieW5pz0tiLrlh2lvn';
+
+// ─── Multilingual Search Helpers ───────────────────────────
+// Maps common Georgian city names to English
+const CITY_EN_MAP: Record<string, string> = {
+  'თბილისი': 'Tbilisi', 'ბათუმი': 'Batumi', 'ქუთაისი': 'Kutaisi',
+  'რუსთავი': 'Rustavi', 'ზუგდიდი': 'Zugdidi', 'გორი': 'Gori',
+  'ფოთი': 'Poti', 'ქობულეთი': 'Kobuleti', 'თელავი': 'Telavi',
+  'სამტრედია': 'Samtredia', 'სენაკი': 'Senaki', 'ხაშური': 'Khashuri',
+  'ახალციხე': 'Akhaltsikhe', 'ოზურგეთი': 'Ozurgeti', 'მარნეული': 'Marneuli',
+  'ერევანი': 'Yerevan', 'ბაქო': 'Baku', 'მოსკოვი': 'Moscow',
+  'სტამბოლი': 'Istanbul', 'ლონდონი': 'London', 'პარიზი': 'Paris',
+  'ნიუ-იორკი': 'New York', 'ტოკიო': 'Tokyo',
+};
+
+// Transliterate Georgian characters to Latin
+function transliterateGeo(text: string): string {
+  if (!text) return text;
+  const map: Record<string, string> = {
+    'ა': 'a', 'ბ': 'b', 'გ': 'g', 'დ': 'd', 'ე': 'e', 'ვ': 'v',
+    'ზ': 'z', 'თ': 't', 'ი': 'i', 'კ': 'k', 'ლ': 'l', 'მ': 'm',
+    'ნ': 'n', 'ო': 'o', 'პ': 'p', 'ჟ': 'zh', 'რ': 'r', 'ს': 's',
+    'ტ': 't', 'უ': 'u', 'ფ': 'p', 'ქ': 'k', 'ღ': 'gh', 'ყ': 'q',
+    'შ': 'sh', 'ჩ': 'ch', 'ც': 'ts', 'ძ': 'dz', 'წ': 'ts',
+    'ჭ': 'ch', 'ხ': 'kh', 'ჯ': 'j', 'ჰ': 'h',
+  };
+  return text.split('').map(c => map[c] || c).join('');
+}
+
+// Get English name for a city (from map or transliteration)
+function getEnglishCityName(name: string): string {
+  if (!name) return '';
+  if (CITY_EN_MAP[name]) return CITY_EN_MAP[name];
+  // Check if already Latin
+  if (/^[a-zA-Z\s-]+$/.test(name)) return name;
+  // Try transliteration
+  const translit = transliterateGeo(name);
+  if (translit !== name) return translit;
+  return name;
+}
+
+// Build a smart search query for any language
+function buildSearchQuery(b: { name: string; address?: string; categoryLabel?: string }): string {
+  const nameEn = getEnglishCityName(b.name);
+  const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+  const category = b.categoryLabel || '';
+  // Use both original name AND English transliteration for better results
+  const parts = [`"${b.name}"`];
+  if (nameEn !== b.name) parts.push(`"${nameEn}"`);
+  if (cityEn) parts.push(cityEn);
+  if (category) parts.push(category);
+  parts.push('phone email website contact');
+  return encodeURIComponent(parts.join(' '));
+}
+
 async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
   const NEEDS = businesses.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
   if (NEEDS.length === 0 || !BRAVE_API_KEY) return;
@@ -569,7 +623,7 @@ async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number
     const batch = NEEDS.slice(i, i + BATCH);
     await Promise.all(batch.map(async (b) => {
       try {
-        const q = encodeURIComponent(b.name + ' ' + (b.address || '') + ' ' + (b.categoryLabel || ''));
+        const q = buildSearchQuery(b);
         const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=3`, {
           headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
           signal: AbortSignal.timeout(8000),
@@ -624,10 +678,8 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     const batch = NEEDS_DATA.slice(i, i + BATCH);
     const promises = batch.map(async (b) => {
       try {
-        // Extract city name from address for better search results
-        const addressParts = b.address ? b.address.split(',').map(p => p.trim()) : [];
-        const cityPart = addressParts.length > 1 ? addressParts[addressParts.length - 1] : (addressParts[0] || '');
-        const query = encodeURIComponent(`"${b.name}" ${cityPart} ${b.categoryLabel || ""} phone email website contact`);
+        // Build multilingual query: original name + English transliteration
+        const query = buildSearchQuery(b);
         const url = `https://html.duckduckgo.com/html/?q=${query}`;
         const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`, {
           headers: { 'User-Agent': 'Mozilla/5.0' },
@@ -823,7 +875,7 @@ async function enrichFromWebsite(b: Business): Promise<void> {
       const batch = allBizList.slice(i, i + BATCH);
       const promises = batch.map(async (b) => {
         try {
-          const nominatimRevUrl = `https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=json&zoom=18&addressdetails=1&extratags=1`;
+          const nominatimRevUrl = `https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=json&zoom=18&addressdetails=1&extratags=1&accept-language=en`;
           const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(nominatimRevUrl)}`, {
             headers: { 'Accept': 'application/json' }
           });
@@ -871,8 +923,7 @@ async function enrichFromWebsite(b: Business): Promise<void> {
         try {
           const cityPart = b.address ? b.address.split(',').pop()?.trim() || '' : '';
           // Targeted email + phone search
-          const citySearch = b.address ? b.address.split(',').map(p => p.trim()).pop() || '' : '';
-          const q = encodeURIComponent(`"${b.name}" ${citySearch || ''} ${b.categoryLabel || ''} email phone contact`);
+          const q = buildSearchQuery(b);
           const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
             headers: { 'User-Agent': 'Mozilla/5.0' },
             signal: AbortSignal.timeout(8000),
@@ -938,11 +989,11 @@ async function enrichFromWebsite(b: Business): Promise<void> {
       try {
         // Search specifically for social media
         const cityPart = b.address ? b.address.split(',').pop()?.trim() || '' : '';
-        const citySearch2 = b.address ? b.address.split(',').map(p => p.trim()).pop() || '' : '';
+        const baseQ = buildSearchQuery(b);
         const queries = [
-          encodeURIComponent(`"${b.name}" ${citySearch2} facebook instagram site:facebook.com OR site:instagram.com`),
-          encodeURIComponent(`"${b.name}" ${citySearch2} phone email contact`),
-          encodeURIComponent(`"${b.name}" ${citySearch2} website`),
+          encodeURIComponent(`"${b.name}" ${getEnglishCityName(b.address?.split(',').pop()?.trim() || '')} facebook instagram site:facebook.com OR site:instagram.com`),
+          baseQ,
+          encodeURIComponent(`"${b.name}" ${getEnglishCityName(b.address?.split(',').pop()?.trim() || '')} website`),
         ];
         for (const q of queries) {
           try {
@@ -998,7 +1049,7 @@ async function enrichFromWebsite(b: Business): Promise<void> {
       const batch = stillMissing.slice(i, i + finalBatch);
       await Promise.all(batch.map(async (b) => {
         try {
-          const q = encodeURIComponent(b.name + ' ' + (b.address || '') + ' contact phone email facebook instagram');
+          const q = buildSearchQuery(b);
           const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
             headers: { 'User-Agent': 'Mozilla/5.0' },
             signal: AbortSignal.timeout(10000),
