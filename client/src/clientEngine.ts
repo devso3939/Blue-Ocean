@@ -807,6 +807,9 @@ async function enrichFromWebsite(b: Business): Promise<void> {
   // ── Enrichment Layer 2: DuckDuckGo search for missing websites/phones ──
   await enrichFromWeb(allBizList, onProgress);
 
+  // ── Enrichment Layer 2.5: Brave Search API for structured data ──
+  await enrichFromBrave(allBizList, onProgress);
+
   // ── Enrichment Layer 3: Scrape found websites for social/contact links ──
   await enrichFromGooglePlaces(allBizList, onProgress);
 
@@ -817,6 +820,106 @@ async function enrichFromWebsite(b: Business): Promise<void> {
     const batch = hasWebsite.slice(i, i + webBatch);
     await Promise.all(batch.map(b => enrichFromWebsite(b)));
     if (i + webBatch < hasWebsite.length) await wait(1500);
+  }
+
+  // ── Second pass: focused social media search for businesses still missing data ──
+  onProgress?.(92, `Second pass: searching social media for ${allBizList.length} businesses…`);
+  const stillMissingSocial = allBizList.filter(b => !b.facebook && !b.instagram && !b.website);
+  const socialBatch = 5;
+  for (let i = 0; i < Math.min(stillMissingSocial.length, 60); i += socialBatch) {
+    const batch = stillMissingSocial.slice(i, i + socialBatch);
+    await Promise.all(batch.map(async (b) => {
+      try {
+        // Search specifically for social media
+        const cityPart = b.address ? b.address.split(',').pop()?.trim() || '' : '';
+        const queries = [
+          encodeURIComponent(`"${b.name}" ${cityPart} facebook instagram site:facebook.com OR site:instagram.com`),
+          encodeURIComponent(`"${b.name}" ${cityPart} phone email contact`),
+        ];
+        for (const q of queries) {
+          try {
+            const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+              headers: { 'User-Agent': 'Mozilla/5.0' },
+              signal: AbortSignal.timeout(8000),
+            });
+            if (!r.ok) continue;
+            const html = await r.text();
+            if (!b.facebook) {
+              const m = html.match(/facebook\.com\/([a-zA-Z0-9._]+)/);
+              if (m && !m[0].includes('facebook.com/login') && !m[0].includes('facebook.com/sharer')) {
+                b.facebook = 'https://facebook.com/' + m[1].replace(/\/$/, '');
+              }
+            }
+            if (!b.instagram) {
+              const m = html.match(/instagram\.com\/([a-zA-Z0-9._]+)/);
+              if (m && !m[0].includes('instagram.com/accounts')) {
+                b.instagram = 'https://instagram.com/' + m[1].replace(/\/$/, '');
+              }
+            }
+            if (!b.phone) {
+              const m = html.match(/(?:\+?\d[\d\s\-\.\(\)]{7,15})/);
+              if (m && m[0].length >= 8) b.phone = m[0].trim();
+            }
+            if (!b.email) {
+              const m = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+              if (m && !m[0].includes('example.com') && !m[0].includes('duckduckgo')) b.email = m[0];
+            }
+          } catch {}
+        }
+      } catch {}
+    }));
+    if (i + socialBatch < stillMissingSocial.length) await wait(2000);
+  }
+
+  // ── Final pass: Google Maps social search for businesses still missing everything ──
+  const stillMissing = allBizList.filter(b => !b.phone && !b.email && !b.website && !b.facebook && !b.instagram);
+  if (stillMissing.length > 0) {
+    onProgress?.(94, `Final pass: deep search for ${stillMissing.length} businesses with no contact data…`);
+    const finalBatch = 3;
+    for (let i = 0; i < Math.min(stillMissing.length, 30); i += finalBatch) {
+      const batch = stillMissing.slice(i, i + finalBatch);
+      await Promise.all(batch.map(async (b) => {
+        try {
+          const q = encodeURIComponent(b.name + ' ' + (b.address || '') + ' contact phone email facebook instagram');
+          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: AbortSignal.timeout(10000),
+          });
+          if (!r.ok) return;
+          const html = await r.text();
+          // Extract everything possible from full search results
+          if (!b.phone) {
+            const m = html.match(/(?:\+?\d[\d\s\-\.\(\)]{7,15})/);
+            if (m && m[0].length >= 8) b.phone = m[0].trim();
+          }
+          if (!b.email) {
+            const m = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+            if (m && !m[0].includes('example.com')) b.email = m[0];
+          }
+          if (!b.website) {
+            const links = html.matchAll(/href="([^"]+)"/g);
+            for (const link of links) {
+              let url = link[1];
+              const uddg = url.match(/uddg=([^&]+)/);
+              if (uddg) url = decodeURIComponent(uddg[1]);
+              if (url.startsWith('http') && !url.match(/google\.|facebook|instagram|yelp|tripadvisor|wikipedia|duckduckgo/i)) {
+                b.website = url;
+                break;
+              }
+            }
+          }
+          if (!b.facebook) {
+            const m = html.match(/facebook\.com\/([a-zA-Z0-9._]+)/);
+            if (m && !m[0].includes('login') && !m[0].includes('sharer')) b.facebook = 'https://facebook.com/' + m[1].replace(/\/$/, '');
+          }
+          if (!b.instagram) {
+            const m = html.match(/instagram\.com\/([a-zA-Z0-9._]+)/);
+            if (m && !m[0].includes('accounts')) b.instagram = 'https://instagram.com/' + m[1].replace(/\/$/, '');
+          }
+        } catch {}
+      }));
+      if (i + finalBatch < stillMissing.length) await wait(2500);
+    }
   }
 
   // Count how much data we found
