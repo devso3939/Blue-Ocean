@@ -20,3 +20,51 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: hsl(226 18% 35%);
 }
+
+/* MapLibre popup — compact dark card */
+.maplibregl-popup {
+  pointer-events: auto !important;
+}
+.maplibregl-popup-content {
+  background: #0f172a !important;
+  color: #e2e8f0 !important;
+  border: 1px solid rgba(100,116,139,0.3) !important;
+  border-radius: 10px !important;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.6) !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  min-width: 0 !important;
+  max-width: 240px !important;
+  line-height: 1.4 !important;
+  font-family: system-ui, -apple-system, sans-serif !important;
+}
+.maplibregl-popup-anchor-bottom .maplibregl-popup-tip {
+  border-top-color: #0f172a !important;
+}
+.maplibregl-popup-anchor-top .maplibregl-popup-tip {
+  border-bottom-color: #0f172a !important;
+}
+.maplibregl-popup-anchor-left .maplibregl-popup-tip {
+  border-right-color: #0f172a !important;
+}
+.maplibregl-popup-anchor-right .maplibregl-popup-tip {
+  border-left-color: #0f172a !important;
+}
+.maplibregl-popup-close-button {
+  position: absolute !important;
+  top: 4px !important;
+  right: 6px !important;
+  font-size: 14px !important;
+  color: #64748b !important;
+  background: none !important;
+  border: none !important;
+  cursor: pointer !important;
+  padding: 2px 5px !important;
+  line-height: 1 !important;
+  border-radius: 4px !important;
+  z-index: 10 !important;
+}
+.maplibregl-popup-close-button:hover {
+  color: #f1f5f9 !important;
+  background: rgba(255,255,255,0.08) !important;
+}
