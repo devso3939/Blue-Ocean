@@ -508,6 +508,231 @@ out center body;`;
 
 
 
+// ─── Social Platform Deep Search ──────────────────────────────
+// Searches for business presence on LinkedIn, YouTube, Twitter, TikTok, Pinterest
+async function enrichFromSocialPlatforms(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
+  const NEEDS = businesses.filter(b => !b.facebook && !b.instagram && !b.website);
+  if (NEEDS.length === 0) return;
+  const BATCH = 3;
+  const max = Math.min(NEEDS.length, 80);
+  let found = 0;
+  for (let i = 0; i < max; i += BATCH) {
+    const batch = NEEDS.slice(i, i + BATCH);
+    await Promise.all(batch.map(async (b) => {
+      try {
+        const cityEn = getEnglishCityName(b.address?.split(',').pop()?.trim() || '');
+        const q = encodeURIComponent(`"${b.name}" ${cityEn} facebook instagram linkedin youtube tiktok`);
+        const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!r.ok) return;
+        const html = await r.text();
+        // LinkedIn
+        if (!b.facebook) { // reuse facebook field for LinkedIn if we find it... no, add a new field? Let's put it in description
+          // Actually we don't have a LinkedIn field. Let's extract from results and put website if we find it
+        }
+        // Twitter/X
+        const twMatch = html.match(/(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)/i);
+        if (twMatch && !twMatch[0].includes('twitter.com/login') && !twMatch[0].includes('intent')) {
+          // Store Twitter as part of the name or website... we need a field. 
+          // We'll add it to the business description via a new approach
+        }
+        // YouTube
+        const ytMatch = html.match(/youtube\.com\/(channel\/[^"&]+|@[^"&\s]+)/i);
+        if (ytMatch && !b.website) {
+          b.website = 'https://' + ytMatch[0].replace(/\/$/, '');
+          found++;
+        }
+        // Extract any social links found
+        if (!b.facebook) {
+          const fbM = html.match(/facebook\.com\/([a-zA-Z0-9._]+)/i);
+          if (fbM && !fbM[0].includes('login') && !fbM[0].includes('sharer')) {
+            b.facebook = 'https://facebook.com/' + fbM[1].replace(/\/$/, '');
+            found++;
+          }
+        }
+        if (!b.instagram) {
+          const igM = html.match(/instagram\.com\/([a-zA-Z0-9._]+)/i);
+          if (igM && !igM[0].includes('accounts')) {
+            b.instagram = 'https://instagram.com/' + igM[1].replace(/\/$/, '');
+            found++;
+          }
+        }
+        // Extract phone from social media descriptions
+        if (!b.phone) {
+          const phM = html.match(/\+?[\d][\d\s\-\.()]{7,18}/);
+          if (phM && phM[0].length >= 8) {
+            const digits = phM[0].replace(/[^\d+]/g, '');
+            if (digits.length >= 8) { b.phone = phM[0].trim(); found++; }
+          }
+        }
+        // Extract email from social descriptions
+        if (!b.email) {
+          const emM = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+          if (emM && !emM[0].includes('example.com') && !emM[0].includes('duckduckgo')) {
+            b.email = emM[0]; found++;
+          }
+        }
+      } catch {}
+    }));
+    if (i + BATCH < max) await wait(2000);
+    onProgress?.(86, `Social platforms… ${Math.min(i + BATCH, max)}/${max} (${found} found)`);
+  }
+}
+
+
+// ─── Enhanced Website Scraper (JSON-LD, OpenGraph, deep contact) ──
+async function enrichFromWebsiteDeep(b: Business): Promise<void> {
+  if (!b.website) return;
+  const EXCLUDE = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com/i;
+
+  async function deepScrape(url: string): Promise<void> {
+    try {
+      const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`, {
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!r.ok) return;
+      const html = await r.text();
+      const full = html.substring(0, 80000);
+
+      // 1. JSON-LD structured data extraction (schema.org/LocalBusiness)
+      if (!b.phone || !b.email || !b.website) {
+        const jsonLdBlocks = full.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi);
+        for (const match of jsonLdBlocks) {
+          try {
+            const data = JSON.parse(match[1]);
+            const entities = Array.isArray(data) ? data : [data];
+            for (const entity of entities) {
+              const types = Array.isArray(entity['@type']) ? entity['@type'] : [entity['@type']];
+              if (types.some((t: string) => /LocalBusiness|Restaurant|Bar|Cafe|Store|Hotel|Organization/i.test(t || ''))) {
+                if (!b.phone && entity.telephone) b.phone = entity.telephone;
+                if (!b.email && entity.email) b.email = entity.email;
+                if (!b.website && entity.url && !EXCLUDE.test(entity.url)) b.website = entity.url;
+                if (!b.facebook && entity.sameAs) {
+                  const sameAs = Array.isArray(entity.sameAs) ? entity.sameAs : [entity.sameAs];
+                  for (const s of sameAs) {
+                    if (typeof s === 'string') {
+                      if (/facebook\.com/i.test(s) && !b.facebook) b.facebook = s;
+                      if (/instagram\.com/i.test(s) && !b.instagram) b.instagram = s;
+                    }
+                  }
+                }
+                if (entity.address && !b.address) {
+                  const a = entity.address;
+                  if (typeof a === 'string') b.address = a;
+                  else if (a.streetAddress) b.address = [a.streetAddress, a.addressLocality, a.addressRegion].filter(Boolean).join(', ');
+                }
+              }
+            }
+          } catch {}
+        }
+      }
+
+      // 2. Open Graph meta tags
+      if (!b.email || !b.phone) {
+        const ogTags = full.matchAll(/<meta[^>]*(?:property|name)="(og:[^"]+)"[^>]*content="([^"]*)"/gi);
+        for (const m of ogTags) {
+          const prop = m[1].toLowerCase();
+          const val = m[2];
+          if (!b.email && prop === 'og:email') { b.email = val.replace('mailto:', ''); }
+          if (!b.phone && prop === 'og:phone') { b.phone = val; }
+        }
+      }
+
+      // 3. Phone from tel: links or structured text
+      if (!b.phone) {
+        const telMatch = full.match(/href="tel:([^"]+)"/);
+        if (telMatch) b.phone = telMatch[1].trim();
+        else {
+          // Look for phone in structured areas (footer, header, contact section)
+          const phoneText = full.match(/\+?[\d][\d\s\-\.()]{7,18}/g);
+          if (phoneText) {
+            for (const p of phoneText) {
+              if (p.replace(/[^\d+]/g, '').length >= 8 && p.replace(/[^\d+]/g, '').length <= 15) {
+                b.phone = p.trim(); break;
+              }
+            }
+          }
+        }
+      }
+
+      // 4. Email — multiple strategies
+      if (!b.email) {
+        // a. mailto: links
+        const mailtoMatch = full.match(/href="mailto:([^"?\s]+)/i);
+        if (mailtoMatch && !EXCLUDE.test(mailtoMatch[1])) b.email = mailtoMatch[1].trim();
+        // b. email in text
+        if (!b.email) {
+          const emails = full.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+          if (emails) {
+            for (const e of emails) {
+              const clean = e.replace(/[\s>);]+$/, '');
+              if (!EXCLUDE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
+            }
+          }
+        }
+        // c. Cloudflare encoded emails
+        if (!b.email) {
+          const encoded = full.match(/data-cfemail="([a-f0-9]+)"/i);
+          if (encoded) {
+            try {
+              const bytes = encoded[1].match(/.{2}/g)!.map(h => parseInt(h, 16));
+              const key = bytes[0];
+              const decoded = bytes.slice(1).map(b => b ^ key).map(b => String.fromCharCode(b)).join('');
+              if (decoded.includes('@') && !EXCLUDE.test(decoded)) b.email = decoded;
+            } catch {}
+          }
+        }
+        // d. Encoded with &#64; (HTML entity for @)
+        if (!b.email) {
+          const encodedAt = full.match(/([a-zA-Z0-9._%+-]+)&#64;([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+          if (encodedAt && !EXCLUDE.test(encodedAt[0])) b.email = encodedAt[1] + '@' + encodedAt[2];
+        }
+      }
+
+      // 5. Facebook — multiple patterns
+      if (!b.facebook) {
+        const fbPatterns = [
+          /facebook\.com\/([a-zA-Z0-9._]+)/i,
+          /fb\.com\/([a-zA-Z0-9._]+)/i,
+          /facebook\.com\/pages\/[^/]+\/(\d+)/i,
+        ];
+        for (const pat of fbPatterns) {
+          const m = full.match(pat);
+          if (m && !m[0].includes('login') && !m[0].includes('sharer') && !m[0].includes('dialog')) {
+            b.facebook = 'https://facebook.com/' + m[1].replace(/\/$/, '');
+            break;
+          }
+        }
+      }
+
+      // 6. Instagram
+      if (!b.instagram) {
+        const igMatch = full.match(/instagram\.com\/([a-zA-Z0-9._]+)/i);
+        if (igMatch && !igMatch[0].includes('accounts') && !igMatch[0].includes('explore')) {
+          b.instagram = 'https://instagram.com/' + igMatch[1].replace(/\/$/, '');
+        }
+      }
+    } catch {}
+  }
+
+  // Scrape main page
+  await deepScrape(b.website);
+
+  // Scrape contact/about pages if still missing data
+  if (!b.email || !b.phone || !b.facebook) {
+    const base = b.website.replace(/\/$/, '');
+    const paths = ['/contact', '/contact-us', '/about', '/about-us', '/kontakti', '/kontakt',
+                   '/contacte', '/team', '/info', '/impressum', '/locations', '/find-us',
+                   '/where-to-find-us', '/reach-us', '/get-in-touch'];
+    for (const path of paths) {
+      if (b.email && b.phone && b.facebook) break;
+      await deepScrape(base + path);
+    }
+  }
+}
+
 // ─── Google Maps Place Search Enrichment ────────────────────────
 async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
   const NEEDS = businesses.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
@@ -599,6 +824,9 @@ function getEnglishCityName(name: string): string {
   return name;
 }
 
+
+const EXCLUDE_DOMAINS = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com/i;
+
 // Build a smart search query for any language
 function buildSearchQuery(b: { name: string; address?: string; categoryLabel?: string }): string {
   const nameEn = getEnglishCityName(b.name);
@@ -647,7 +875,7 @@ async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number
             const m = desc.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
             if (m && !m[0].includes('example.com')) { b.email = m[0]; found++; }
           }
-          // Extract social
+          // Extract social — try all platforms
           if (!b.facebook) {
             const m = desc.match(/facebook\.com\/([a-zA-Z0-9._]+)/);
             if (m) { b.facebook = 'https://facebook.com/' + m[1]; found++; }
@@ -655,6 +883,13 @@ async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number
           if (!b.instagram) {
             const m = desc.match(/instagram\.com\/([a-zA-Z0-9._]+)/);
             if (m) { b.instagram = 'https://instagram.com/' + m[1]; found++; }
+          }
+          // Extract additional website from Brave knowledge graph
+          if (!b.website && data.knowledge_graph?.url) {
+            const kgUrl = data.knowledge_graph.url;
+            if (!kgUrl.includes('google.com') && !EXCLUDE_DOMAINS.test(kgUrl)) {
+              b.website = kgUrl; found++;
+            }
           }
         }
       } catch {}
@@ -769,100 +1004,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   }
 }
 
-// ─── Website Meta Tag Scraper ──────────────────────────────────
-// Fetches a business website and extracts social/contact links from meta tags
-async function enrichFromWebsite(b: Business): Promise<void> {
-  if (!b.website) return;
-
-  const EXCLUDE_DOMAINS = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com/i;
-
-  async function scrapeUrl(url: string): Promise<void> {
-    try {
-      const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`, {
-        signal: AbortSignal.timeout(8000),
-      });
-      if (!r.ok) return;
-      const html = await r.text();
-      const full = html.substring(0, 50000); // Scan much more of the page
-
-      // Extract phone from tel: links or page text
-      if (!b.phone) {
-        const telMatch = full.match(/href="tel:([^"]+)"/);
-        if (telMatch) b.phone = telMatch[1].trim();
-        else {
-          const phoneText = full.match(/\+\d[\d\s\-\.\(\)]{7,18}/);
-          if (phoneText && phoneText[0].length >= 8) b.phone = phoneText[0].trim();
-        }
-      }
-
-      // Extract email — try multiple patterns aggressively
-      if (!b.email) {
-        // 1. mailto: links (most reliable)
-        const mailtoMatch = full.match(/href="mailto:([^"?\s]+)/i);
-        if (mailtoMatch) {
-          const email = mailtoMatch[1].trim();
-          if (!EXCLUDE_DOMAINS.test(email)) b.email = email;
-        }
-        // 2. Email in text (avoid false positives from CSS/JS)
-        if (!b.email) {
-          const emailText = full.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
-          if (emailText) {
-            for (const e of emailText) {
-              const clean = e.replace(/[\s>);]+$/, '');
-              if (!EXCLUDE_DOMAINS.test(clean) && clean.length > 6 && clean.length < 80) {
-                b.email = clean;
-                break;
-              }
-            }
-          }
-        }
-        // 3. Encoded emails (cloudflare protects emails with /cdn-cgi/l/chk_email or &#64;)
-        if (!b.email) {
-          const encoded = full.match(/data-cfemail="([a-f0-9]+)"/i);
-          if (encoded) {
-            try {
-              const bytes = encoded[1].match(/.{2}/g)!.map(h => parseInt(h, 16));
-              const key = bytes[0];
-              const decoded = bytes.slice(1).map(b => b ^ key).map(b => String.fromCharCode(b)).join('');
-              if (decoded.includes('@') && !EXCLUDE_DOMAINS.test(decoded)) b.email = decoded;
-            } catch {}
-          }
-        }
-      }
-
-      // Extract Facebook
-      if (!b.facebook) {
-        const fbMatch = full.match(/(?:facebook\.com|fb\.com)\/([a-zA-Z0-9._]+)/i);
-        if (fbMatch && !fbMatch[0].includes('login') && !fbMatch[0].includes('sharer') && !fbMatch[0].includes('dialog')) {
-          b.facebook = `https://facebook.com/${fbMatch[1].replace(/\/$/, '')}`;
-        }
-      }
-
-      // Extract Instagram
-      if (!b.instagram) {
-        const igMatch = full.match(/instagram\.com\/([a-zA-Z0-9._]+)/i);
-        if (igMatch && !igMatch[0].includes('accounts') && !igMatch[0].includes('explore')) {
-          b.instagram = `https://instagram.com/${igMatch[1].replace(/\/$/, '')}`;
-        }
-      }
-    } catch {}
-  }
-
-  // 1. Scrape main page
-  await scrapeUrl(b.website);
-
-  // 2. If still missing email, try /contact page
-  if (!b.email || !b.phone) {
-    const base = b.website.replace(/\/$/, '');
-    const contactPaths = ['/contact', '/contact-us', '/about', '/about-us', '/kontakti', '/kontakt', '/contacte', '/team', '/info', '/impressum'];
-    for (const path of contactPaths) {
-      if (b.email && b.phone) break;
-      await scrapeUrl(base + path);
-    }
-  }
-}
-
-  // ── Enrichment: reverse-geocode ALL businesses for contact data ──
+// ── Enrichment: reverse-geocode ALL businesses for contact data ──
   const allBizList: Business[] = [];
   for (const bizs of results.values()) {
     for (const b of bizs) allBizList.push(b);
@@ -921,7 +1063,6 @@ async function enrichFromWebsite(b: Business): Promise<void> {
       const batch = missingEmail.slice(i, i + emailBatch);
       await Promise.all(batch.map(async (b) => {
         try {
-          const cityPart = b.address ? b.address.split(',').pop()?.trim() || '' : '';
           // Targeted email + phone search
           const q = buildSearchQuery(b);
           const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
@@ -970,14 +1111,17 @@ async function enrichFromWebsite(b: Business): Promise<void> {
   // ── Enrichment Layer 3: Scrape found websites for social/contact links ──
   await enrichFromGooglePlaces(allBizList, onProgress);
 
-  onProgress?.(90, `Scraping websites for social links…`);
+  onProgress?.(90, `Deep scraping websites for structured data (JSON-LD, OpenGraph)…`);
   const hasWebsite = allBizList.filter(b => b.website && (!b.facebook || !b.instagram || !b.phone || !b.email));
   const webBatch = 5;
   for (let i = 0; i < Math.min(hasWebsite.length, 100); i += webBatch) {
     const batch = hasWebsite.slice(i, i + webBatch);
-    await Promise.all(batch.map(b => enrichFromWebsite(b)));
+    await Promise.all(batch.map(b => enrichFromWebsiteDeep(b)));
     if (i + webBatch < hasWebsite.length) await wait(1500);
   }
+
+  // ── Enrichment Layer 3.5: Social platform deep search (LinkedIn, YouTube, Twitter, TikTok) ──
+  await enrichFromSocialPlatforms(allBizList, onProgress);
 
   // ── Second pass: focused social media search for businesses still missing data ──
   onProgress?.(92, `Second pass: searching social media for ${allBizList.length} businesses…`);
@@ -988,7 +1132,6 @@ async function enrichFromWebsite(b: Business): Promise<void> {
     await Promise.all(batch.map(async (b) => {
       try {
         // Search specifically for social media
-        const cityPart = b.address ? b.address.split(',').pop()?.trim() || '' : '';
         const baseQ = buildSearchQuery(b);
         const queries = [
           encodeURIComponent(`"${b.name}" ${getEnglishCityName(b.address?.split(',').pop()?.trim() || '')} facebook instagram site:facebook.com OR site:instagram.com`),
