@@ -253,7 +253,7 @@ export default function CountryView() {
   }, [selectedCountry]);
 
   // Aggregate comparison data across all cities
-  const comparisonData = cityData.length === 0 ? [] : KEY_CATEGORIES.map(cat => {
+  const comparisonData: Array<{ category: string; label: string; rows: Array<{ cityName: string; existing: number; per10k: number; score: number; population: number; totalBiz: number }>; bestOpportunity: string; leastSaturated: string }> = cityData.length === 0 ? [] : KEY_CATEGORIES.map(cat => {
       const rows = cityData.map(cd => {
         const opp = cd.opportunities.find(o => o.category === cat);
         return {
