@@ -84,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '2.9.7';
+const APP_VERSION = '3.0.0';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -108,7 +108,6 @@ export default function App() {
 
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
-  const markersRef = useRef<any[]>([]);
   const maplibreRef = useRef<any>(null);
   const mapReadyRef = useRef(false);
 
@@ -127,15 +126,14 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [cityQuery, selectedCountry]);
 
+  // ─── Map initialization ─────────────────────────────────────────
   // Initialize map when selectedCity changes
   useEffect(() => {
     if (!selectedCity || !mapRef.current) return;
-    // If map already exists, just fly to new city
     if (mapInstanceRef.current) {
       mapInstanceRef.current.flyTo({ center: [selectedCity.lon, selectedCity.lat], zoom: 12, duration: 1500 });
       return;
     }
-    // Create map (once)
     import('maplibre-gl').then((maplibregl) => {
       if (!mapRef.current || mapInstanceRef.current) return;
       maplibreRef.current = maplibregl;
@@ -147,124 +145,143 @@ export default function App() {
       });
       map.addControl(new maplibregl.NavigationControl());
       mapInstanceRef.current = map;
-      // After map loads, add markers if businesses already exist (race condition fix)
+
       map.on('load', () => {
-        requestAnimationFrame(() => {
-          map.resize();
-          addMarkers(map, businesses);
+        mapReadyRef.current = true;
+        // Add GeoJSON source for businesses
+        map.addSource('businesses', {
+          type: 'geojson',
+          data: { type: 'FeatureCollection', features: [] },
         });
+        // Circle layer: colored dots
+        map.addLayer({
+          id: 'biz-circles',
+          type: 'circle',
+          source: 'businesses',
+          paint: {
+            'circle-radius': [
+              'interpolate', ['linear'], ['zoom'],
+              10, 5,
+              14, 10,
+              18, 14,
+            ],
+            'circle-color': ['get', 'color'],
+            'circle-stroke-width': 2,
+            'circle-stroke-color': 'rgba(255,255,255,0.9)',
+            'circle-opacity': 0.9,
+          },
+        });
+        // Symbol layer: emoji labels on top of circles
+        map.addLayer({
+          id: 'biz-labels',
+          type: 'symbol',
+          source: 'businesses',
+          layout: {
+            'text-field': ['get', 'emoji'],
+            'text-size': 14,
+            'text-allow-overlap': true,
+            'text-ignore-placement': true,
+          },
+          paint: {
+            'text-color': '#ffffff',
+          },
+        });
+        // Cursor pointer on hover
+        map.on('mouseenter', 'biz-circles', () => { map.getCanvas().style.cursor = 'pointer'; });
+        map.on('mouseleave', 'biz-circles', () => { map.getCanvas().style.cursor = ''; });
+        // Click handler: show popup
+        map.on('click', 'biz-circles', (e: any) => {
+          const f = e.features?.[0];
+          if (!f) return;
+          const p = f.properties;
+          const coords = f.geometry.coordinates;
+          const gmapsUrl = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent((p.name || '') + ' ' + (p.address || ''));
+          const osmUrl = 'https://www.openstreetmap.org/?mlat=' + coords[1] + '&mlon=' + coords[0] + '#map=17/' + coords[1] + '/' + coords[0];
+          let contactHtml = '';
+          if (p.phone) contactHtml += '<div style="margin:3px 0"><a href="tel:' + p.phone + '" style="color:#60a5fa;text-decoration:none;font-size:12px">📞 ' + p.phone + '</a></div>';
+          if (p.email) contactHtml += '<div style="font-size:11px;color:#94a3b8;margin:3px 0;word-break:break-all">✉️ ' + p.email + '</div>';
+          if (p.website) contactHtml += '<div style="margin:3px 0"><a href="' + p.website + '" target="_blank" style="color:#60a5fa;text-decoration:none;font-size:11px">🌐 ' + p.website.replace(/^https?:\/\//, '').slice(0, 25) + '</a></div>';
+          if (p.address) contactHtml += '<div style="font-size:10px;color:#64748b;margin:3px 0">📍 ' + p.address + '</div>';
+          let socialHtml = '';
+          if (p.facebook) socialHtml += '<a href="' + p.facebook + '" target="_blank" style="color:#60a5fa;font-size:9px;text-decoration:none;background:rgba(96,165,250,0.1);padding:2px 5px;border-radius:3px">FB</a> ';
+          if (p.instagram) socialHtml += '<a href="' + p.instagram + '" target="_blank" style="color:#e879f9;font-size:9px;text-decoration:none;background:rgba(232,121,249,0.1);padding:2px 5px;border-radius:3px">IG</a>';
+          const html = '<div style="padding:10px 12px;max-width:220px;font-family:system-ui,sans-serif">'
+            + '<div style="font-weight:600;font-size:13px;color:#f1f5f9;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (p.emoji || '') + ' ' + (p.name || '') + '</div>'
+            + '<div style="display:inline-block;background:' + (p.color || '#64748b') + '22;color:' + (p.color || '#64748b') + ';font-size:9px;padding:1px 6px;border-radius:99px;margin-bottom:6px">' + (p.categoryLabel || '') + '</div>'
+            + contactHtml
+            + (socialHtml ? '<div style="display:flex;gap:3px;margin-top:3px">' + socialHtml + '</div>' : '')
+            + '<div style="margin-top:6px;padding-top:5px;border-top:1px solid #1e293b;display:flex;gap:4px">'
+            + '<a href="' + gmapsUrl + '" target="_blank" style="background:#1a73e8;color:white;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:600;text-decoration:none">📍 Maps</a>'
+            + '<a href="' + osmUrl + '" target="_blank" style="background:#1e293b;color:#94a3b8;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:600;text-decoration:none">OSM</a>'
+            + '</div></div>';
+          new maplibregl.Popup({ className: 'dark-popup', maxWidth: '240px', offset: 15, closeButton: true })
+            .setLngLat(coords)
+            .setHTML(html)
+            .addTo(map);
+        });
+        // If businesses already exist, render them
+        if (businesses.size > 0) {
+          updateMapData(map, businesses);
+        }
       });
     });
   }, [selectedCity, opportunities.length]);
 
-  // Update markers whenever businesses change (separate from map creation)
+  // Update map data whenever businesses change
   useEffect(() => {
-    if (!mapInstanceRef.current) return;
-    const map = mapInstanceRef.current;
-    const tryAddMarkers = () => {
-      if (!maplibreRef.current) {
-        // maplibre-gl not loaded yet — retry after short delay
-        setTimeout(tryAddMarkers, 200);
-        return;
-      }
-      requestAnimationFrame(() => {
-        map.resize();
-        addMarkers(map, businesses);
-        const allBiz: Business[] = [];
-        businesses.forEach(bizs => allBiz.push(...bizs));
-        if (allBiz.length > 1) {
-          const bounds = new (maplibreRef.current as any).LngLatBounds();
-          allBiz.forEach(b => bounds.extend([b.lon, b.lat]));
-          map.fitBounds(bounds, { padding: 80, maxZoom: 14, duration: 1200 });
-        }
-      });
-    };
-    tryAddMarkers();
+    if (!mapInstanceRef.current || !mapReadyRef.current) return;
+    updateMapData(mapInstanceRef.current, businesses);
   }, [businesses]);
 
-  const CAT_EMOJI: Record<string, string> = {
-    cafe: '☕', restaurant: '🍽️', bar: '🍸', pub: '🍺', fast_food: '🍔',
-    hotel: '🏨', gym: '💪', beauty_salon: '💄', hair_salon: '💇',
-    pharmacy: '💊', supermarket: '🛒', bank: '🏦', clothing: '👗',
-    electronics: '📱', bakery: '🥐', cinema: '🎬', car_repair: '🔧',
-    pet_groomer: '🐕', coworking: '💻', spa: '🧖', school: '📚',
-    clinic: '🏥', hospital: '🏥', dentistry: '🦷', post_office: '📮',
-    library: '📖', nightclub: '🎶', car_rental: '🚗', veterinary: '🐾',
-    florist: '🌸', optician: '👓', butcher: '🥩', ice_cream: '🍦',
-    grocery: '🥬', convenience: '🏪', department_store: '🏬',
-    jewelry: '💎', sports: '⚽', books: '📖', fuel: '⛽',
-    art: '🎨', bicycle: '🚲', marketplace: '🏪',
-  };
-
-  function addMarkers(map: any, biz: Map<string, Business[]>) {
-    const maplibregl = maplibreRef.current;
-    if (!maplibregl) return; // Module not loaded yet
-    markersRef.current.forEach(m => m.remove());
-    markersRef.current = [];
-
+  function updateMapData(map: any, biz: Map<string, Business[]>) {
     const allBiz: Business[] = [];
     biz.forEach(bizs => allBiz.push(...bizs));
     if (allBiz.length === 0) return;
 
-    // Show up to 400 markers as DOM elements with emoji
-    const markers = allBiz.length > 400 ? allBiz.slice(0, 400) : allBiz;
+    const CAT_EMOJI: Record<string, string> = {
+      cafe: '☕', restaurant: '🍽️', bar: '🍸', pub: '🍺', fast_food: '🍔',
+      hotel: '🏨', gym: '💪', beauty_salon: '💄', hair_salon: '💇',
+      pharmacy: '💊', supermarket: '🛒', bank: '🏦', clothing: '👗',
+      electronics: '📱', bakery: '🥐', cinema: '🎬', car_repair: '🔧',
+      pet_groomer: '🐕', coworking: '💻', spa: '🧖', school: '📚',
+      clinic: '🏥', hospital: '🏥', dentistry: '🦷', post_office: '📮',
+      library: '📖', nightclub: '🎶', car_rental: '🚗', veterinary: '🐾',
+      florist: '🌸', optician: '👓', butcher: '🥩', ice_cream: '🍦',
+      grocery: '🥬', convenience: '🏪', department_store: '🏬',
+      jewelry: '💎', sports: '⚽', books: '📖', fuel: '⛽',
+      art: '🎨', bicycle: '🚲', marketplace: '🏪',
+    };
 
-    markers.forEach(b => {
-      const color = (CAT_COLORS as Record<string,string>)[b.category] || '#64748b';
-      const emoji = (CAT_EMOJI as Record<string,string>)[b.category] || '📍';
+    const features = allBiz.slice(0, 500).map(b => ({
+      type: 'Feature' as const,
+      geometry: { type: 'Point' as const, coordinates: [b.lon, b.lat] },
+      properties: {
+        name: b.name,
+        category: b.category,
+        categoryLabel: b.categoryLabel,
+        color: (CAT_COLORS as Record<string,string>)[b.category] || '#64748b',
+        emoji: (CAT_EMOJI as Record<string,string>)[b.category] || '📍',
+        phone: b.phone || '',
+        email: b.email || '',
+        website: b.website || '',
+        address: b.address || '',
+        facebook: b.facebook || '',
+        instagram: b.instagram || '',
+      },
+    }));
 
-      // DOM marker: colored circle with emoji
-      const el = document.createElement('div');
-      el.style.cssText = `width:38px;height:38px;border-radius:50%;background:${color};display:flex;align-items:center;justify-content:center;font-size:19px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,0.8),0 0 0 2px rgba(255,255,255,0.85);transform-origin:bottom center;transition:box-shadow 0.15s;position:relative;z-index:2;pointer-events:auto;`;
-      el.textContent = emoji;
-      el.title = `${b.name} — ${b.categoryLabel}`;
-      el.onmouseenter = () => { el.style.boxShadow = '0 4px 20px rgba(0,0,0,0.9),0 0 0 3px rgba(255,255,255,1)'; el.style.zIndex = '999'; };
-      el.onmouseleave = () => { el.style.boxShadow = '0 2px 10px rgba(0,0,0,0.8),0 0 0 2px rgba(255,255,255,0.85)'; el.style.zIndex = '2'; };
+    const geojson = { type: 'FeatureCollection' as const, features };
+    const source = map.getSource('businesses');
+    if (source) {
+      source.setData(geojson);
+    }
 
-      // Build popup HTML from LIVE business data (not snapshot)
-      const gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(b.name + (b.address ? ' ' + b.address : ''))}`;
-      const osmUrl = `https://www.openstreetmap.org/?mlat=${b.lat}&mlon=${b.lon}#map=17/${b.lat}/${b.lon}`;
-
-      // Contact section
-      let contact = '';
-      if (b.phone) contact += '<div style="display:flex;align-items:center;gap:5px;margin:2px 0;"><a href="tel:' + b.phone + '" style="color:#60a5fa;text-decoration:none;font-size:12px;">📞 ' + b.phone + '</a></div>';
-      if (b.email) contact += '<div style="font-size:11px;color:#94a3b8;margin:2px 0;word-break:break-all;">✉️ ' + b.email + '</div>';
-      if (b.website) {
-        const short = b.website.replace(/^https?:\/\//, '').replace(/\/\/$/, '').slice(0, 28);
-        contact += '<div style="margin:2px 0;"><a href="' + b.website + '" target="_blank" style="color:#60a5fa;text-decoration:none;font-size:11px;">🌐 ' + short + '</a></div>';
-      }
-      if (b.address) contact += '<div style="font-size:10px;color:#64748b;margin:2px 0;">📍 ' + b.address + '</div>';
-
-      // Social badges
-      let social = '';
-      const soc = [];
-      if (b.facebook) soc.push('<a href="' + b.facebook + '" target="_blank" style="color:#60a5fa;font-size:9px;text-decoration:none;background:rgba(96,165,250,0.1);padding:2px 5px;border-radius:3px;">FB</a>');
-      if (b.instagram) soc.push('<a href="' + b.instagram + '" target="_blank" style="color:#e879f9;font-size:9px;text-decoration:none;background:rgba(232,121,249,0.1);padding:2px 5px;border-radius:3px;">IG</a>');
-      if (soc.length) social = '<div style="display:flex;gap:3px;margin-top:3px;">' + soc.join('') + '</div>';
-
-      const popupHtml = '<div style="padding:10px 12px;min-width:150px;max-width:220px;">'
-        + '<div style="font-weight:600;font-size:13px;color:#f1f5f9;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + emoji + ' ' + (b.name || b.categoryLabel) + '</div>'
-        + '<div style="display:inline-block;background:' + color + '22;color:' + color + ';font-size:9px;padding:1px 6px;border-radius:99px;margin-bottom:6px;">' + b.categoryLabel + '</div>'
-        + contact
-        + social
-        + '<div style="margin-top:6px;padding-top:5px;border-top:1px solid #1e293b;display:flex;gap:4px;">'
-        + '<a href="' + gmapsUrl + '" target="_blank" style="background:#1a73e8;color:white;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:600;text-decoration:none;">📍 Maps</a>'
-        + '<a href="' + osmUrl + '" target="_blank" style="background:#1e293b;color:#94a3b8;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:600;text-decoration:none;">OSM</a>'
-        + '</div></div>';
-
-      const marker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
-        .setLngLat([b.lon, b.lat])
-        .setPopup(new maplibregl.Popup({
-          className: 'dark-popup',
-          maxWidth: '240px',
-          offset: 20,
-          closeButton: true,
-        }).setHTML(popupHtml))
-        .addTo(map);
-
-      markersRef.current.push(marker);
-    });
-
+    // Fit bounds to all markers
+    if (allBiz.length > 1) {
+      const bounds = new (maplibreRef.current as any).LngLatBounds();
+      allBiz.forEach(b => bounds.extend([b.lon, b.lat]));
+      map.fitBounds(bounds, { padding: 60, maxZoom: 14, duration: 1200 });
+    }
   }
 
   // Discover all opportunities
