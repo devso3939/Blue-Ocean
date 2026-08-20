@@ -163,7 +163,7 @@ export default function App() {
           jewelry: '💎', sports: '⚽', books: '📖', fuel: '⛽',
           art: '🎨', bicycle: '🚲', marketplace: '🏪',
         };
-        const CAT_COLORS: Record<string, string> = {"cafe": "#f97316", "restaurant": "#ef4444", "bar": "#a855f7", "pub": "#8b5cf6", "fast_food": "#f59e0b", "hotel": "#3b82f6", "gym": "#ef4444", "beauty_salon": "#ec4899", "hair_salon": "#f472b6", "pharmacy": "#22c55e", "supermarket": "#84cc16", "bank": "#0ea5e9", "clothing": "#d946ef", "electronics": "#6366f1", "bakery": "#f97316", "cinema": "#e11d48", "car_repair": "#78716c", "coworking": "#06b6d4", "nightclub": "#7c3aed"};
+
 
         // Create canvas-based images for each emoji category
         for (const [cat, emoji] of Object.entries(EMOJI_MAP)) {
@@ -189,7 +189,7 @@ export default function App() {
           ctx.fillStyle = '#ffffff';
           ctx.fillText(emoji, size / 2, size / 2);
           // Register as MapLibre image
-          map.addImage('emoji-' + cat, canvas);
+          map.addImage('emoji-' + cat, canvas as any);
         }
         // Also add a default marker image
         {
@@ -211,7 +211,7 @@ export default function App() {
             ctx.textBaseline = 'middle';
             ctx.fillStyle = '#ffffff';
             ctx.fillText('📍', size / 2, size / 2);
-            map.addImage('emoji-default', canvas);
+            map.addImage('emoji-default', canvas as any);
           }
         }
 
