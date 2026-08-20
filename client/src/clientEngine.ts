@@ -695,70 +695,93 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
 // Fetches a business website and extracts social/contact links from meta tags
 async function enrichFromWebsite(b: Business): Promise<void> {
   if (!b.website) return;
-  try {
-    const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(b.website)}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!r.ok) return;
-    const html = await r.text();
-    const head = html.substring(0, 15000); // Scan head + body for contact info
 
-    // Extract phone from tel: links or page text
-    if (!b.phone) {
-      const telMatch = head.match(/href="tel:([^"]+)"/);
-      if (telMatch) b.phone = telMatch[1];
-      else {
-        // Try finding phone in page text (international format)
-        const phoneText = head.match(/\+\d[\d\s\-\.\(\)]{7,18}/);
-        if (phoneText && phoneText[0].length >= 8) b.phone = phoneText[0].trim();
-      }
-    }
+  const EXCLUDE_DOMAINS = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com/i;
 
-    // Extract email from mailto: links or text
-    if (!b.email) {
-      const emailMatch = head.match(/href="mailto:([^"]+)"/);
-      if (emailMatch) b.email = emailMatch[1];
-      else {
-        // Try finding email in page text
-        const emailText = head.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-        if (emailText && !emailText[0].includes('example.com') && !emailText[0].includes('wixpress')) b.email = emailText[0];
-      }
-    }
+  async function scrapeUrl(url: string): Promise<void> {
+    try {
+      const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`, {
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!r.ok) return;
+      const html = await r.text();
+      const full = html.substring(0, 50000); // Scan much more of the page
 
-    // Extract Facebook from meta tags or links
-    if (!b.facebook) {
-      const fbMatch = head.match(/(?:facebook\.com|fb\.com)\/([^"\s&]+)/i);
-      if (fbMatch) b.facebook = `https://facebook.com/${fbMatch[1].replace(/\/$/, '')}`;
-    }
-
-    // Extract Instagram from meta tags or links
-    if (!b.instagram) {
-      const igMatch = head.match(/instagram\.com\/([^"\s&]+)/i);
-      if (igMatch) b.instagram = `https://instagram.com/${igMatch[1].replace(/\/$/, '')}`;
-    }
-
-    // Also check body for additional social links (scan more)
-    if (html.length > 5000) {
-      const body = html.substring(5000, 25000);
-      if (!b.facebook) {
-        const fbBody = body.match(/(?:facebook\.com|fb\.com)\/(["\s&\w.]+)/i);
-        if (fbBody) b.facebook = `https://facebook.com/${fbBody[1].trim().replace(/["\s&].*/, '').replace(/\/$/, '')}`;
-      }
-      if (!b.instagram) {
-        const igBody = body.match(/instagram\.com\/(["\s&\w.]+)/i);
-        if (igBody) b.instagram = `https://instagram.com/${igBody[1].trim().replace(/["\s&].*/, '').replace(/\/$/, '')}`;
-      }
+      // Extract phone from tel: links or page text
       if (!b.phone) {
-        const phoneBody = body.match(/\+\d[\d\s\-\.\(\)]{7,18}/);
-        if (phoneBody && phoneBody[0].length >= 8) b.phone = phoneBody[0].trim();
+        const telMatch = full.match(/href="tel:([^"]+)"/);
+        if (telMatch) b.phone = telMatch[1].trim();
+        else {
+          const phoneText = full.match(/\+\d[\d\s\-\.\(\)]{7,18}/);
+          if (phoneText && phoneText[0].length >= 8) b.phone = phoneText[0].trim();
+        }
       }
+
+      // Extract email — try multiple patterns aggressively
       if (!b.email) {
-        const emailBody = body.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-        if (emailBody && !emailBody[0].includes('example.com') && !emailBody[0].includes('wixpress')) b.email = emailBody[0];
+        // 1. mailto: links (most reliable)
+        const mailtoMatch = full.match(/href="mailto:([^"?\s]+)/i);
+        if (mailtoMatch) {
+          const email = mailtoMatch[1].trim();
+          if (!EXCLUDE_DOMAINS.test(email)) b.email = email;
+        }
+        // 2. Email in text (avoid false positives from CSS/JS)
+        if (!b.email) {
+          const emailText = full.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+          if (emailText) {
+            for (const e of emailText) {
+              const clean = e.replace(/[\s>);]+$/, '');
+              if (!EXCLUDE_DOMAINS.test(clean) && clean.length > 6 && clean.length < 80) {
+                b.email = clean;
+                break;
+              }
+            }
+          }
+        }
+        // 3. Encoded emails (cloudflare protects emails with /cdn-cgi/l/chk_email or &#64;)
+        if (!b.email) {
+          const encoded = full.match(/data-cfemail="([a-f0-9]+)"/i);
+          if (encoded) {
+            try {
+              const bytes = encoded[1].match(/.{2}/g)!.map(h => parseInt(h, 16));
+              const key = bytes[0];
+              const decoded = bytes.slice(1).map(b => b ^ key).map(b => String.fromCharCode(b)).join('');
+              if (decoded.includes('@') && !EXCLUDE_DOMAINS.test(decoded)) b.email = decoded;
+            } catch {}
+          }
+        }
       }
+
+      // Extract Facebook
+      if (!b.facebook) {
+        const fbMatch = full.match(/(?:facebook\.com|fb\.com)\/([a-zA-Z0-9._]+)/i);
+        if (fbMatch && !fbMatch[0].includes('login') && !fbMatch[0].includes('sharer') && !fbMatch[0].includes('dialog')) {
+          b.facebook = `https://facebook.com/${fbMatch[1].replace(/\/$/, '')}`;
+        }
+      }
+
+      // Extract Instagram
+      if (!b.instagram) {
+        const igMatch = full.match(/instagram\.com\/([a-zA-Z0-9._]+)/i);
+        if (igMatch && !igMatch[0].includes('accounts') && !igMatch[0].includes('explore')) {
+          b.instagram = `https://instagram.com/${igMatch[1].replace(/\/$/, '')}`;
+        }
+      }
+    } catch {}
+  }
+
+  // 1. Scrape main page
+  await scrapeUrl(b.website);
+
+  // 2. If still missing email, try /contact page
+  if (!b.email || !b.phone) {
+    const base = b.website.replace(/\/$/, '');
+    const contactPaths = ['/contact', '/contact-us', '/about', '/about-us', '/kontakti', '/kontakt', '/contacte'];
+    for (const path of contactPaths) {
+      if (b.email && b.phone) break;
+      await scrapeUrl(base + path);
     }
-  } catch {}
+  }
 }
 
   // ── Enrichment: reverse-geocode ALL businesses for contact data ──

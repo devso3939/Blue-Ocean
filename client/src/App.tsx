@@ -84,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '2.9.3';
+const APP_VERSION = '2.9.4';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -109,6 +109,7 @@ export default function App() {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
   const markersRef = useRef<any[]>([]);
+  const maplibreRef = useRef<any>(null);
   const mapReadyRef = useRef(false);
 
   // Search cities
@@ -143,6 +144,7 @@ export default function App() {
     // Create map
     import('maplibre-gl').then((maplibregl) => {
       if (!mapRef.current || mapInstanceRef.current) return;
+      maplibreRef.current = maplibregl;
       const map = new maplibregl.Map({
         container: mapRef.current,
         style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
@@ -174,6 +176,8 @@ export default function App() {
   };
 
   function addMarkers(map: any, biz: Map<string, Business[]>) {
+    const maplibregl = maplibreRef.current;
+    if (!maplibregl) return; // Module not loaded yet
     markersRef.current.forEach(m => m.remove());
     markersRef.current = [];
 
@@ -181,78 +185,71 @@ export default function App() {
     biz.forEach(bizs => allBiz.push(...bizs));
     if (allBiz.length === 0) return;
 
-    import('maplibre-gl').then((maplibregl) => {
-      // Build a lookup map for live data access in popups
-      const bizLookup = new Map<string, Business>();
-      allBiz.forEach(b => bizLookup.set(b.id, b));
+    // Show up to 400 markers as DOM elements with emoji
+    const markers = allBiz.length > 400 ? allBiz.slice(0, 400) : allBiz;
 
-      // Show up to 400 markers as DOM elements with emoji
-      const markers = allBiz.length > 400 ? allBiz.slice(0, 400) : allBiz;
+    markers.forEach(b => {
+      const color = (CAT_COLORS as Record<string,string>)[b.category] || '#64748b';
+      const emoji = (CAT_EMOJI as Record<string,string>)[b.category] || '📍';
 
-      markers.forEach(b => {
-        const color = (CAT_COLORS as Record<string,string>)[b.category] || '#64748b';
-        const emoji = (CAT_EMOJI as Record<string,string>)[b.category] || '📍';
+      // DOM marker: colored circle with emoji
+      const el = document.createElement('div');
+      el.style.cssText = `width:36px;height:36px;border-radius:50%;background:${color};display:flex;align-items:center;justify-content:center;font-size:18px;cursor:pointer;box-shadow:0 3px 12px rgba(0,0,0,0.7);border:2.5px solid rgba(255,255,255,0.9);transform-origin:bottom center;transition:transform 0.15s,box-shadow 0.15s;position:relative;z-index:1;`;
+      el.textContent = emoji;
+      el.title = `${b.name} — ${b.categoryLabel}`;
+      el.onmouseenter = () => { el.style.transform = 'scale(1.25)'; el.style.boxShadow = '0 6px 20px rgba(0,0,0,0.8)'; el.style.zIndex = '999'; };
+      el.onmouseleave = () => { el.style.transform = 'scale(1)'; el.style.boxShadow = '0 3px 12px rgba(0,0,0,0.7)'; el.style.zIndex = '1'; };
 
-        // DOM marker: colored circle with emoji
-        const el = document.createElement('div');
-        el.style.cssText = `width:32px;height:32px;border-radius:50%;background:${color};display:flex;align-items:center;justify-content:center;font-size:17px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,0.6);border:2.5px solid rgba(255,255,255,0.9);transition:transform 0.15s,box-shadow 0.15s;z-index:10;`;
-        el.textContent = emoji;
-        el.title = `${b.name} — ${b.categoryLabel}`;
-        el.onmouseenter = () => { el.style.transform = 'scale(1.2) translateY(-2px)'; el.style.boxShadow = '0 4px 16px rgba(0,0,0,0.7)'; };
-        el.onmouseleave = () => { el.style.transform = 'scale(1)'; el.style.boxShadow = '0 2px 8px rgba(0,0,0,0.5)'; };
+      // Build popup HTML from LIVE business data (not snapshot)
+      const gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(b.name + (b.address ? ' ' + b.address : ''))}`;
+      const osmUrl = `https://www.openstreetmap.org/?mlat=${b.lat}&mlon=${b.lon}#map=17/${b.lat}/${b.lon}`;
 
-        // Build popup HTML from LIVE business data (not snapshot)
-        const gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(b.name + (b.address ? ' ' + b.address : ''))}`;
-        const osmUrl = `https://www.openstreetmap.org/?mlat=${b.lat}&mlon=${b.lon}#map=17/${b.lat}/${b.lon}`;
-
-        // Contact section
-        let contact = '';
-        if (b.phone) contact += '<div style="display:flex;align-items:center;gap:5px;margin:2px 0;"><a href="tel:' + b.phone + '" style="color:#60a5fa;text-decoration:none;font-size:12px;">📞 ' + b.phone + '</a></div>';
-        if (b.email) contact += '<div style="font-size:11px;color:#94a3b8;margin:2px 0;word-break:break-all;">✉️ ' + b.email + '</div>';
-        if (b.website) {
-          const short = b.website.replace(/^https?:\/\//, '').replace(/\/\/$/, '').slice(0, 28);
-          contact += '<div style="margin:2px 0;"><a href="' + b.website + '" target="_blank" style="color:#60a5fa;text-decoration:none;font-size:11px;">🌐 ' + short + '</a></div>';
-        }
-        if (b.address) contact += '<div style="font-size:10px;color:#64748b;margin:2px 0;">📍 ' + b.address + '</div>';
-
-        // Social badges
-        let social = '';
-        const soc = [];
-        if (b.facebook) soc.push('<a href="' + b.facebook + '" target="_blank" style="color:#60a5fa;font-size:9px;text-decoration:none;background:rgba(96,165,250,0.1);padding:2px 5px;border-radius:3px;">FB</a>');
-        if (b.instagram) soc.push('<a href="' + b.instagram + '" target="_blank" style="color:#e879f9;font-size:9px;text-decoration:none;background:rgba(232,121,249,0.1);padding:2px 5px;border-radius:3px;">IG</a>');
-        if (soc.length) social = '<div style="display:flex;gap:3px;margin-top:3px;">' + soc.join('') + '</div>';
-
-        const popupHtml = '<div style="padding:10px 12px;min-width:150px;max-width:220px;">'
-          + '<div style="font-weight:600;font-size:13px;color:#f1f5f9;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + emoji + ' ' + (b.name || b.categoryLabel) + '</div>'
-          + '<div style="display:inline-block;background:' + color + '22;color:' + color + ';font-size:9px;padding:1px 6px;border-radius:99px;margin-bottom:6px;">' + b.categoryLabel + '</div>'
-          + contact
-          + social
-          + '<div style="margin-top:6px;padding-top:5px;border-top:1px solid #1e293b;display:flex;gap:4px;">'
-          + '<a href="' + gmapsUrl + '" target="_blank" style="background:#1a73e8;color:white;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:600;text-decoration:none;">📍 Maps</a>'
-          + '<a href="' + osmUrl + '" target="_blank" style="background:#1e293b;color:#94a3b8;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:600;text-decoration:none;">OSM</a>'
-          + '</div></div>';
-
-        const marker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
-          .setLngLat([b.lon, b.lat])
-          .setPopup(new maplibregl.Popup({
-            className: 'dark-popup',
-            maxWidth: '240px',
-            offset: 18,
-            closeButton: true,
-            
-          }).setHTML(popupHtml))
-          .addTo(map);
-
-        markersRef.current.push(marker);
-      });
-
-      // Auto-fit map bounds to show all markers
-      if (markers.length > 1) {
-        const bounds = new maplibregl.LngLatBounds();
-        markers.forEach(b => bounds.extend([b.lon, b.lat]));
-        map.fitBounds(bounds, { padding: 60, maxZoom: 13, duration: 1000 });
+      // Contact section
+      let contact = '';
+      if (b.phone) contact += '<div style="display:flex;align-items:center;gap:5px;margin:2px 0;"><a href="tel:' + b.phone + '" style="color:#60a5fa;text-decoration:none;font-size:12px;">📞 ' + b.phone + '</a></div>';
+      if (b.email) contact += '<div style="font-size:11px;color:#94a3b8;margin:2px 0;word-break:break-all;">✉️ ' + b.email + '</div>';
+      if (b.website) {
+        const short = b.website.replace(/^https?:\/\//, '').replace(/\/\/$/, '').slice(0, 28);
+        contact += '<div style="margin:2px 0;"><a href="' + b.website + '" target="_blank" style="color:#60a5fa;text-decoration:none;font-size:11px;">🌐 ' + short + '</a></div>';
       }
+      if (b.address) contact += '<div style="font-size:10px;color:#64748b;margin:2px 0;">📍 ' + b.address + '</div>';
+
+      // Social badges
+      let social = '';
+      const soc = [];
+      if (b.facebook) soc.push('<a href="' + b.facebook + '" target="_blank" style="color:#60a5fa;font-size:9px;text-decoration:none;background:rgba(96,165,250,0.1);padding:2px 5px;border-radius:3px;">FB</a>');
+      if (b.instagram) soc.push('<a href="' + b.instagram + '" target="_blank" style="color:#e879f9;font-size:9px;text-decoration:none;background:rgba(232,121,249,0.1);padding:2px 5px;border-radius:3px;">IG</a>');
+      if (soc.length) social = '<div style="display:flex;gap:3px;margin-top:3px;">' + soc.join('') + '</div>';
+
+      const popupHtml = '<div style="padding:10px 12px;min-width:150px;max-width:220px;">'
+        + '<div style="font-weight:600;font-size:13px;color:#f1f5f9;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + emoji + ' ' + (b.name || b.categoryLabel) + '</div>'
+        + '<div style="display:inline-block;background:' + color + '22;color:' + color + ';font-size:9px;padding:1px 6px;border-radius:99px;margin-bottom:6px;">' + b.categoryLabel + '</div>'
+        + contact
+        + social
+        + '<div style="margin-top:6px;padding-top:5px;border-top:1px solid #1e293b;display:flex;gap:4px;">'
+        + '<a href="' + gmapsUrl + '" target="_blank" style="background:#1a73e8;color:white;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:600;text-decoration:none;">📍 Maps</a>'
+        + '<a href="' + osmUrl + '" target="_blank" style="background:#1e293b;color:#94a3b8;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:600;text-decoration:none;">OSM</a>'
+        + '</div></div>';
+
+      const marker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
+        .setLngLat([b.lon, b.lat])
+        .setPopup(new maplibregl.Popup({
+          className: 'dark-popup',
+          maxWidth: '240px',
+          offset: 20,
+          closeButton: true,
+        }).setHTML(popupHtml))
+        .addTo(map);
+
+      markersRef.current.push(marker);
     });
+
+    // Auto-fit map bounds to show all markers
+    if (markers.length > 1) {
+      const bounds = new maplibregl.LngLatBounds();
+      markers.forEach(b => bounds.extend([b.lon, b.lat]));
+      map.fitBounds(bounds, { padding: 80, maxZoom: 15, duration: 1200 });
+    }
   }
 
   // Discover all opportunities
@@ -518,7 +515,7 @@ export default function App() {
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 text-white">
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
             </div>
-            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v2.9.3</span></span>
+            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v2.9.4</span></span>
           </div>
           <div className="flex items-center gap-3">
             <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>
