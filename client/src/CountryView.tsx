@@ -8,6 +8,7 @@ import {
   type Business,
   type OpportunityResult,
 } from './clientEngine';
+import { analyzeCountry } from './aiAnalysis';
 
 function fmtNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return '—';
@@ -148,6 +149,7 @@ const KEY_CATEGORIES = [
 export default function CountryView() {
   const [selectedCountry, setSelectedCountry] = useState('');
   const [scanning, setScanning] = useState(false);
+  const [aiInsight, setAiInsight] = useState('');
   const [progress, setProgress] = useState(0);
   const [stage, setStage] = useState('');
   const [error, setError] = useState('');
@@ -226,6 +228,20 @@ export default function CountryView() {
       }
 
       setCityData(results);
+      setProgress(98);
+      setStage('Generating AI insights…');
+      try {
+        const aiText = await analyzeCountry(
+          selectedCountry,
+          results.map(r => ({
+            name: r.city.name,
+            population: r.city.population || 200000,
+            totalBiz: r.totalBiz,
+            topOpps: r.opportunities.slice(0, 5),
+          }))
+        );
+        setAiInsight(aiText);
+      } catch { /* AI unavailable */ }
       setProgress(100);
       setStage('Done!');
     } catch (e: any) {
@@ -327,6 +343,14 @@ export default function CountryView() {
           </div>
         )}
       </div>
+
+      {/* AI Country Insights */}
+      {aiInsight && (
+        <div className="bg-gradient-to-br from-purple-900/40 to-blue-900/40 border border-purple-500/30 rounded-xl p-5 mb-6">
+          <h4 className="text-sm font-semibold text-purple-300 mb-2">🤖 AI Country Analysis</h4>
+          <p className="text-sm text-gray-300 whitespace-pre-line">{aiInsight}</p>
+        </div>
+      )}
 
       {/* Results */}
       {cityData.length > 0 && (

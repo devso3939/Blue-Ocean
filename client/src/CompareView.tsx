@@ -9,6 +9,7 @@ import {
   type DemandSignal,
   type OpportunityResult,
 } from './clientEngine';
+import { analyzeComparison } from './aiAnalysis';
 
 function fmtNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return '—';
@@ -154,6 +155,7 @@ export default function CompareView() {
   const [progress, setProgress] = useState(0);
   const [loadingStage, setLoadingStage] = useState('');
   const [error, setError] = useState('');
+  const [aiInsight, setAiInsight] = useState('');
   const mapRef = useRef<HTMLDivElement>(null);
   const mapRefB = useRef<HTMLDivElement>(null);
   const mapARef = useRef<any>(null);
@@ -178,6 +180,23 @@ export default function CompareView() {
       const data: CityData = { city, businesses: biz, opportunities: opps, totalBiz };
       if (which === 'a') setCityA(data);
       else setCityB(data);
+
+      // AI comparison after both cities scanned
+      const other = which === 'a' ? cityB : cityA;
+      if (other) {
+        const oppsA = which === 'a' ? opps : other.opportunities;
+        const oppsB = which === 'b' ? opps : other.opportunities;
+        const popA = which === 'a' ? (city.population || 500000) : (other.city.population || 500000);
+        const popB = which === 'b' ? (city.population || 500000) : (other.city.population || 500000);
+        const tA = which === 'a' ? totalBiz : other.totalBiz;
+        const tB = which === 'b' ? totalBiz : other.totalBiz;
+        const nA = which === 'a' ? city.name : other.city.name;
+        const nB = which === 'b' ? city.name : other.city.name;
+        try {
+          const txt = await analyzeComparison(nA, nB, oppsA, oppsB, popA, popB, tA, tB);
+          setAiInsight(txt);
+        } catch { /* AI unavailable */ }
+      }
     } catch (e: any) {
       setError(e.message || 'Scan failed');
     } finally {
@@ -418,6 +437,14 @@ export default function CompareView() {
               </div>
             </div>
           </div>
+
+          {/* AI Comparison Insights */}
+          {aiInsight && (
+            <div className="bg-gradient-to-br from-purple-900/40 to-blue-900/40 border border-purple-500/30 rounded-xl p-5">
+              <h4 className="text-sm font-semibold text-purple-300 mb-2">🤖 AI Comparison Analysis</h4>
+              <p className="text-sm text-gray-300 whitespace-pre-line">{aiInsight}</p>
+            </div>
+          )}
 
           {/* Comparison Table */}
           <div className="rounded-xl border border-border bg-card overflow-hidden">
