@@ -148,7 +148,7 @@ export default function App() {
       map.addControl(new maplibregl.NavigationControl());
       mapInstanceRef.current = map;
     });
-  }, [selectedCity]);
+  }, [selectedCity, opportunities.length]);
 
   // Update markers whenever businesses change (separate from map creation)
   useEffect(() => {
