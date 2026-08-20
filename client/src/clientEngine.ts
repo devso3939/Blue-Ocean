@@ -833,6 +833,62 @@ async function enrichFromWebsite(b: Business): Promise<void> {
   // ── Enrichment Layer 2.5: Brave Search API for structured data ──
   await enrichFromBrave(allBizList, onProgress);
 
+
+  // ── Enrichment Layer 2.7: Email-focused search for businesses still missing email ──
+  const missingEmail = allBizList.filter(b => !b.email);
+  if (missingEmail.length > 0) {
+    onProgress?.(83, `Searching for ${missingEmail.length} business emails…`);
+    const emailBatch = 5;
+    for (let i = 0; i < Math.min(missingEmail.length, 80); i += emailBatch) {
+      const batch = missingEmail.slice(i, i + emailBatch);
+      await Promise.all(batch.map(async (b) => {
+        try {
+          const cityPart = b.address ? b.address.split(',').pop()?.trim() || '' : '';
+          // Targeted email search
+          const q = encodeURIComponent(`"${b.name}" ${cityPart} email`);
+          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: AbortSignal.timeout(8000),
+          });
+          if (!r.ok) return;
+          const html = await r.text();
+          const emails = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+          if (emails) {
+            for (const e of emails) {
+              const clean = e.replace(/[\s>);]+$/, '');
+              if (!clean.includes('example.com') && !clean.includes('duckduckgo') && !clean.includes('google') && !clean.includes('wixpress') && clean.length > 6 && clean.length < 80) {
+                b.email = clean;
+                break;
+              }
+            }
+          }
+          // Also try to extract from Brave API if available
+          if (!b.email) {
+            try {
+              const bq = encodeURIComponent(`"${b.name}" ${b.address || ''} email contact`);
+              const br = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${bq}&count=2`, {
+                headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
+                signal: AbortSignal.timeout(6000),
+              });
+              if (br.ok) {
+                const bd = await br.json();
+                for (const res of (bd.web?.results || [])) {
+                  const desc = (res.description || '') + ' ' + (res.title || '');
+                  const em = desc.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+                  if (em && !em[0].includes('example.com') && !em[0].includes('google')) {
+                    b.email = em[0];
+                    break;
+                  }
+                }
+              }
+            } catch {}
+          }
+        } catch {}
+      }));
+      if (i + emailBatch < missingEmail.length) await wait(1500);
+    }
+  }
+
   // ── Enrichment Layer 3: Scrape found websites for social/contact links ──
   await enrichFromGooglePlaces(allBizList, onProgress);
 

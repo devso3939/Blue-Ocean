@@ -84,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '2.9.4';
+const APP_VERSION = '2.9.5';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -127,21 +127,15 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [cityQuery, selectedCountry]);
 
-  // Initialize map when results section becomes visible
+  // Initialize map when selectedCity changes
   useEffect(() => {
-    if (!selectedCity || opportunities.length === 0) return;
-    if (!mapRef.current) return;
+    if (!selectedCity || !mapRef.current) return;
+    // If map already exists, just fly to new city
     if (mapInstanceRef.current) {
-      // Map already exists — just fly to city and add markers
-      const map = mapInstanceRef.current;
-      map.flyTo({ center: [selectedCity.lon, selectedCity.lat], zoom: 12, duration: 1500 });
-      // Resize after DOM update
-      requestAnimationFrame(() => { map.resize(); addMarkers(map, businesses); });
-      setTimeout(() => map.resize(), 1000);
+      mapInstanceRef.current.flyTo({ center: [selectedCity.lon, selectedCity.lat], zoom: 12, duration: 1500 });
       return;
     }
-
-    // Create map
+    // Create map (once)
     import('maplibre-gl').then((maplibregl) => {
       if (!mapRef.current || mapInstanceRef.current) return;
       maplibreRef.current = maplibregl;
@@ -149,17 +143,31 @@ export default function App() {
         container: mapRef.current,
         style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
         center: [selectedCity.lon, selectedCity.lat],
-        zoom: 11,
+        zoom: 12,
       });
       map.addControl(new maplibregl.NavigationControl());
-      map.on('load', () => {
-        mapReadyRef.current = true;
-        map.resize();
-        addMarkers(map, businesses);
-      });
       mapInstanceRef.current = map;
     });
-  }, [selectedCity, businesses, opportunities.length]);
+  }, [selectedCity]);
+
+  // Update markers whenever businesses change (separate from map creation)
+  useEffect(() => {
+    if (!mapInstanceRef.current || !maplibreRef.current) return;
+    const map = mapInstanceRef.current;
+    // Ensure map is sized correctly after React render
+    requestAnimationFrame(() => {
+      map.resize();
+      addMarkers(map, businesses);
+      // Auto-zoom to fit all markers
+      const allBiz: Business[] = [];
+      businesses.forEach(bizs => allBiz.push(...bizs));
+      if (allBiz.length > 1) {
+        const bounds = new (maplibreRef.current as any).LngLatBounds();
+        allBiz.forEach(b => bounds.extend([b.lon, b.lat]));
+        map.fitBounds(bounds, { padding: 80, maxZoom: 15, duration: 1200 });
+      }
+    });
+  }, [businesses]);
 
   const CAT_EMOJI: Record<string, string> = {
     cafe: '☕', restaurant: '🍽️', bar: '🍸', pub: '🍺', fast_food: '🍔',
@@ -244,12 +252,6 @@ export default function App() {
       markersRef.current.push(marker);
     });
 
-    // Auto-fit map bounds to show all markers
-    if (markers.length > 1) {
-      const bounds = new maplibregl.LngLatBounds();
-      markers.forEach(b => bounds.extend([b.lon, b.lat]));
-      map.fitBounds(bounds, { padding: 80, maxZoom: 15, duration: 1200 });
-    }
   }
 
   // Discover all opportunities
@@ -515,7 +517,7 @@ export default function App() {
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 text-white">
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
             </div>
-            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v2.9.4</span></span>
+            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v2.9.5</span></span>
           </div>
           <div className="flex items-center gap-3">
             <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>
@@ -721,7 +723,7 @@ export default function App() {
           )}
 
           {/* Map */}
-          <div className="rounded-xl border border-border bg-card overflow-hidden">
+          <div className="rounded-xl border border-border bg-card">
             <div className="px-5 py-3 border-b border-border flex items-center justify-between">
               <h3 className="text-sm font-semibold">
                 {selectedOppCategory
@@ -880,7 +882,7 @@ export default function App() {
           )}
 
           {/* Opportunity table */}
-          <div className="rounded-xl border border-border bg-card overflow-hidden">
+          <div className="rounded-xl border border-border bg-card">
             <div className="px-5 py-3 border-b border-border flex items-center justify-between">
               <h3 className="text-sm font-semibold">
                 {selectedCategory ? `${getCategoryLabel(selectedCategory)} Opportunities` : 'All Opportunities'}
