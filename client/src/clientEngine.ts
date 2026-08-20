@@ -633,7 +633,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         if (!r.ok) return;
         const html = await r.text();
 
-        // Extract phone numbers from search results
+        // Extract phone numbers from search results (look for local format too)
         if (!b.phone) {
           const phoneMatch = html.match(/(?:\+?\d[\d\s\-\.\(\)]{7,15})/);
           if (phoneMatch) {
@@ -642,6 +642,14 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               b.phone = phone;
               found++;
             }
+          }
+        }
+        // Also look for Georgian-format phones (995 XXX XX XX XX)
+        if (!b.phone) {
+          const geoMatch = html.match(/\+995\s?\d{3}\s?\d{2}\s?\d{2}\s?\d{2}/);
+          if (geoMatch) {
+            b.phone = geoMatch[0].trim();
+            found++;
           }
         }
 
@@ -667,6 +675,21 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           }
         }
 
+        // Extract email from search result text
+        if (!b.email) {
+          const emails = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+          if (emails) {
+            const junk = ['example.com', 'duckduckgo', 'googleapis', 'sentry', 'wixpress', 'cloudflare', 'schema.org'];
+            for (const e of emails) {
+              const clean = e.replace(/[\s>);]+$/, '');
+              if (junk.every(j => !clean.includes(j)) && clean.length > 6 && clean.length < 80) {
+                b.email = clean;
+                found++;
+                break;
+              }
+            }
+          }
+        }
         // Extract Facebook/Instagram from search snippets
         const snippetMatch = html.match(/class="result__snippet"[^>]*>([^<]+)/g);
         if (snippetMatch) {
@@ -845,7 +868,7 @@ async function enrichFromWebsite(b: Business): Promise<void> {
         try {
           const cityPart = b.address ? b.address.split(',').pop()?.trim() || '' : '';
           // Targeted email search
-          const q = encodeURIComponent(`"${b.name}" ${cityPart} email`);
+          const q = encodeURIComponent(`"${b.name}" ${cityPart || ''} ${b.categoryLabel || ''} email contact`);
           const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
             headers: { 'User-Agent': 'Mozilla/5.0' },
             signal: AbortSignal.timeout(8000),
@@ -895,7 +918,7 @@ async function enrichFromWebsite(b: Business): Promise<void> {
   onProgress?.(90, `Scraping websites for social links…`);
   const hasWebsite = allBizList.filter(b => b.website && (!b.facebook || !b.instagram || !b.phone || !b.email));
   const webBatch = 5;
-  for (let i = 0; i < Math.min(hasWebsite.length, 80); i += webBatch) {
+  for (let i = 0; i < Math.min(hasWebsite.length, 100); i += webBatch) {
     const batch = hasWebsite.slice(i, i + webBatch);
     await Promise.all(batch.map(b => enrichFromWebsite(b)));
     if (i + webBatch < hasWebsite.length) await wait(1500);
@@ -941,7 +964,17 @@ async function enrichFromWebsite(b: Business): Promise<void> {
             }
             if (!b.email) {
               const m = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-              if (m && !m[0].includes('example.com') && !m[0].includes('duckduckgo')) b.email = m[0];
+              const junk = ['example.com', 'duckduckgo', 'googleapis', 'sentry'];
+              if (m && junk.every(j => !m[0].includes(j))) b.email = m[0];
+            }
+            // Also extract phone from full text
+            if (!b.phone) {
+              const m = html.match(/(?:\+?\d[\d\s\-\.\(\)]{7,15})/g);
+              if (m) {
+                for (const p of m) {
+                  if (p.replace(/[^\d]/g, '').length >= 8) { b.phone = p.trim(); break; }
+                }
+              }
             }
           } catch {}
         }

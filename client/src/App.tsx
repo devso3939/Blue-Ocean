@@ -84,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '2.9.5';
+const APP_VERSION = '2.9.6';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -147,26 +147,46 @@ export default function App() {
       });
       map.addControl(new maplibregl.NavigationControl());
       mapInstanceRef.current = map;
+      // After map is ready, add markers if businesses already exist (fixes race condition)
+      map.on('load', () => {
+        requestAnimationFrame(() => {
+          map.resize();
+          addMarkers(map, businesses);
+          const allBiz: Business[] = [];
+          businesses.forEach(bizs => allBiz.push(...bizs));
+          if (allBiz.length > 1) {
+            const bounds = new (maplibregl as any).LngLatBounds();
+            allBiz.forEach(b => bounds.extend([b.lon, b.lat]));
+            map.fitBounds(bounds, { padding: 80, maxZoom: 14, duration: 1200 });
+          }
+        });
+      });
     });
   }, [selectedCity, opportunities.length]);
 
   // Update markers whenever businesses change (separate from map creation)
   useEffect(() => {
-    if (!mapInstanceRef.current || !maplibreRef.current) return;
+    if (!mapInstanceRef.current) return;
     const map = mapInstanceRef.current;
-    // Ensure map is sized correctly after React render
-    requestAnimationFrame(() => {
-      map.resize();
-      addMarkers(map, businesses);
-      // Auto-zoom to fit all markers
-      const allBiz: Business[] = [];
-      businesses.forEach(bizs => allBiz.push(...bizs));
-      if (allBiz.length > 1) {
-        const bounds = new (maplibreRef.current as any).LngLatBounds();
-        allBiz.forEach(b => bounds.extend([b.lon, b.lat]));
-        map.fitBounds(bounds, { padding: 80, maxZoom: 15, duration: 1200 });
+    const tryAddMarkers = () => {
+      if (!maplibreRef.current) {
+        // maplibre-gl not loaded yet — retry after short delay
+        setTimeout(tryAddMarkers, 200);
+        return;
       }
-    });
+      requestAnimationFrame(() => {
+        map.resize();
+        addMarkers(map, businesses);
+        const allBiz: Business[] = [];
+        businesses.forEach(bizs => allBiz.push(...bizs));
+        if (allBiz.length > 1) {
+          const bounds = new (maplibreRef.current as any).LngLatBounds();
+          allBiz.forEach(b => bounds.extend([b.lon, b.lat]));
+          map.fitBounds(bounds, { padding: 80, maxZoom: 14, duration: 1200 });
+        }
+      });
+    };
+    tryAddMarkers();
   }, [businesses]);
 
   const CAT_EMOJI: Record<string, string> = {
@@ -202,11 +222,11 @@ export default function App() {
 
       // DOM marker: colored circle with emoji
       const el = document.createElement('div');
-      el.style.cssText = `width:36px;height:36px;border-radius:50%;background:${color};display:flex;align-items:center;justify-content:center;font-size:18px;cursor:pointer;box-shadow:0 3px 12px rgba(0,0,0,0.7);border:2.5px solid rgba(255,255,255,0.9);transform-origin:bottom center;transition:transform 0.15s,box-shadow 0.15s;position:relative;z-index:1;`;
+      el.style.cssText = `width:38px;height:38px;border-radius:50%;background:${color};display:flex;align-items:center;justify-content:center;font-size:19px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,0.8),0 0 0 2px rgba(255,255,255,0.85);transform-origin:bottom center;transition:box-shadow 0.15s;position:relative;z-index:2;pointer-events:auto;`;
       el.textContent = emoji;
       el.title = `${b.name} — ${b.categoryLabel}`;
-      el.onmouseenter = () => { el.style.transform = 'scale(1.25)'; el.style.boxShadow = '0 6px 20px rgba(0,0,0,0.8)'; el.style.zIndex = '999'; };
-      el.onmouseleave = () => { el.style.transform = 'scale(1)'; el.style.boxShadow = '0 3px 12px rgba(0,0,0,0.7)'; el.style.zIndex = '1'; };
+      el.onmouseenter = () => { el.style.boxShadow = '0 4px 20px rgba(0,0,0,0.9),0 0 0 3px rgba(255,255,255,1)'; el.style.zIndex = '999'; };
+      el.onmouseleave = () => { el.style.boxShadow = '0 2px 10px rgba(0,0,0,0.8),0 0 0 2px rgba(255,255,255,0.85)'; el.style.zIndex = '2'; };
 
       // Build popup HTML from LIVE business data (not snapshot)
       const gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(b.name + (b.address ? ' ' + b.address : ''))}`;
@@ -517,7 +537,7 @@ export default function App() {
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 text-white">
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
             </div>
-            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v2.9.5</span></span>
+            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v2.9.6</span></span>
           </div>
           <div className="flex items-center gap-3">
             <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>
