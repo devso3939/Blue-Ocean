@@ -624,11 +624,14 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     const batch = NEEDS_DATA.slice(i, i + BATCH);
     const promises = batch.map(async (b) => {
       try {
-        const cityPart = b.address ? b.address.split(',').pop()?.trim() || '' : '';
-        const query = encodeURIComponent(`${b.name} ${cityPart} ${b.categoryLabel || ""} phone website contact`);
+        // Extract city name from address for better search results
+        const addressParts = b.address ? b.address.split(',').map(p => p.trim()) : [];
+        const cityPart = addressParts.length > 1 ? addressParts[addressParts.length - 1] : (addressParts[0] || '');
+        const query = encodeURIComponent(`"${b.name}" ${cityPart} ${b.categoryLabel || ""} phone email website contact`);
         const url = `https://html.duckduckgo.com/html/?q=${query}`;
         const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`, {
-          headers: { 'User-Agent': 'Mozilla/5.0' }
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          signal: AbortSignal.timeout(12000),
         });
         if (!r.ok) return;
         const html = await r.text();
@@ -799,7 +802,7 @@ async function enrichFromWebsite(b: Business): Promise<void> {
   // 2. If still missing email, try /contact page
   if (!b.email || !b.phone) {
     const base = b.website.replace(/\/$/, '');
-    const contactPaths = ['/contact', '/contact-us', '/about', '/about-us', '/kontakti', '/kontakt', '/contacte'];
+    const contactPaths = ['/contact', '/contact-us', '/about', '/about-us', '/kontakti', '/kontakt', '/contacte', '/team', '/info', '/impressum'];
     for (const path of contactPaths) {
       if (b.email && b.phone) break;
       await scrapeUrl(base + path);
@@ -867,8 +870,9 @@ async function enrichFromWebsite(b: Business): Promise<void> {
       await Promise.all(batch.map(async (b) => {
         try {
           const cityPart = b.address ? b.address.split(',').pop()?.trim() || '' : '';
-          // Targeted email search
-          const q = encodeURIComponent(`"${b.name}" ${cityPart || ''} ${b.categoryLabel || ''} email contact`);
+          // Targeted email + phone search
+          const citySearch = b.address ? b.address.split(',').map(p => p.trim()).pop() || '' : '';
+          const q = encodeURIComponent(`"${b.name}" ${citySearch || ''} ${b.categoryLabel || ''} email phone contact`);
           const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
             headers: { 'User-Agent': 'Mozilla/5.0' },
             signal: AbortSignal.timeout(8000),
@@ -934,9 +938,11 @@ async function enrichFromWebsite(b: Business): Promise<void> {
       try {
         // Search specifically for social media
         const cityPart = b.address ? b.address.split(',').pop()?.trim() || '' : '';
+        const citySearch2 = b.address ? b.address.split(',').map(p => p.trim()).pop() || '' : '';
         const queries = [
-          encodeURIComponent(`"${b.name}" ${cityPart} facebook instagram site:facebook.com OR site:instagram.com`),
-          encodeURIComponent(`"${b.name}" ${cityPart} phone email contact`),
+          encodeURIComponent(`"${b.name}" ${citySearch2} facebook instagram site:facebook.com OR site:instagram.com`),
+          encodeURIComponent(`"${b.name}" ${citySearch2} phone email contact`),
+          encodeURIComponent(`"${b.name}" ${citySearch2} website`),
         ];
         for (const q of queries) {
           try {

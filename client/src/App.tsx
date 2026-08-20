@@ -84,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '2.9.6';
+const APP_VERSION = '2.9.7';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -147,18 +147,11 @@ export default function App() {
       });
       map.addControl(new maplibregl.NavigationControl());
       mapInstanceRef.current = map;
-      // After map is ready, add markers if businesses already exist (fixes race condition)
+      // After map loads, add markers if businesses already exist (race condition fix)
       map.on('load', () => {
         requestAnimationFrame(() => {
           map.resize();
           addMarkers(map, businesses);
-          const allBiz: Business[] = [];
-          businesses.forEach(bizs => allBiz.push(...bizs));
-          if (allBiz.length > 1) {
-            const bounds = new (maplibregl as any).LngLatBounds();
-            allBiz.forEach(b => bounds.extend([b.lon, b.lat]));
-            map.fitBounds(bounds, { padding: 80, maxZoom: 14, duration: 1200 });
-          }
         });
       });
     });
@@ -743,7 +736,7 @@ export default function App() {
           )}
 
           {/* Map */}
-          <div className="rounded-xl border border-border bg-card">
+          <div className="rounded-xl border border-border bg-card overflow-hidden">
             <div className="px-5 py-3 border-b border-border flex items-center justify-between">
               <h3 className="text-sm font-semibold">
                 {selectedOppCategory
