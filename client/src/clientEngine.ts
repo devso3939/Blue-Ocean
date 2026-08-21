@@ -1786,7 +1786,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
 
 
 // ─── Detail-Mode Enrichment ─────────────────────────────────
-export async function enrichCategory(
+export async function deepEnrichCategory(
   businesses: Business[],
   onProgress?: (pct: number, msg: string) => void,
 ): Promise<Business[]> {
