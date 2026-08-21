@@ -111,6 +111,15 @@ export const CATEGORY_QUERIES: Record<string, { label: string }> = {
   marketplace: { label: 'Marketplace' },
   wedding: { label: 'Wedding Venue' },
   fuel: { label: 'Gas Station' },
+  web_agency: { label: 'Web Agency' }, software: { label: 'Software Company' },
+  it_consulting: { label: 'IT Consulting' }, digital_marketing: { label: 'Digital Marketing' },
+  lawyer: { label: 'Law Firm' }, accountant: { label: 'Accounting' },
+  real_estate: { label: 'Real Estate' }, insurance: { label: 'Insurance' },
+  travel_agency: { label: 'Travel Agency' }, printing: { label: 'Printing Shop' },
+  nail_salon: { label: 'Nail Salon' }, tattoo: { label: 'Tattoo Parlor' },
+  car_wash: { label: 'Car Wash' }, market: { label: 'Local Market' },
+  dance: { label: 'Dance Studio' }, music_school: { label: 'Music School' },
+  cleaning: { label: 'Cleaning Service' }, courier: { label: 'Courier Service' },
 };
 
 export function getCategoryLabel(id: string): string {
@@ -1332,29 +1341,59 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     }
   }
 
-  onProgress?.(80, `Found ${totalBiz} businesses — enriching data in parallel…`);
+    onProgress?.(80, `Found ${totalBiz} businesses - quick scan...`);
+  // FAST MODE: Nominatim only. Deep enrichment in enrichCategory().
+  const BATCH = 10;
+  const maxEnrich = Math.min(allBizList.length, 200);
+  for (let i = 0; i < maxEnrich; i += BATCH) {
+    const batch = allBizList.slice(i, i + BATCH);
+    await Promise.all(batch.map(async (b) => {
+      try {
+        const url = `https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=json&zoom=18&addressdetails=1&extratags=1&accept-language=en`;
+        const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`, { headers: { 'Accept': 'application/json' } });
+        if (r.ok) {
+          const d = await r.json();
+          if (!b.address && d.address) {
+            const a = d.address;
+            b.address = [a.road || a.pedestrian, a.house_number, a.suburb || a.neighbourhood, a.city || a.town].filter(Boolean).join(', ') || '';
+          }
+          if (!b.phone) b.phone = d.extratags?.phone || d.extratags?.['contact:phone'] || '';
+          if (!b.email) b.email = d.extratags?.email || d.extratags?.['contact:email'] || '';
+          if (!b.website) b.website = d.extratags?.website || d.extratags?.['contact:website'] || d.extratags?.url || '';
+          if (!b.facebook) b.facebook = d.extratags?.['contact:facebook'] || d.extratags?.facebook || '';
+          if (!b.instagram) b.instagram = d.extratags?.['contact:instagram'] || d.extratags?.instagram || '';
+        }
+      } catch {}
+    }));
+    if (i + BATCH < maxEnrich) await wait(1100);
+    onProgress?.(85, `Quick scan... ${Math.min(i + BATCH, maxEnrich)}/${maxEnrich}`);
+  }
+return results;
+}
 
-  // ── TURBO ENRICHMENT: Multi-strategy parallel pass ──
+
+// ─── AI-Powered Opportunity Analysis ───────────────────────────
+// Uses Hugging Face free inference API for market analysis
+
+// Detail-mode enrichment for a single category
+export async function enrichCategory(
+  businesses: Business[],
+  onProgress?: (pct: number, msg: string) => void,
+): Promise<Business[]> {
+  if (businesses.length === 0) return businesses;
   const BATCH_SIZE = 8;
-  let enrichedCount = 0;
+  const total = businesses.length;
+  onProgress?.(0, `Enriching ${total} businesses...`);
 
-  // ── Pass 1: DDG + Brave in parallel for every business ──
-  const NEEDS_ENRICHMENT = allBizList.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
-  const maxEnrich = Math.min(NEEDS_ENRICHMENT.length, 200);
-
-  for (let i = 0; i < maxEnrich; i += BATCH_SIZE) {
-    const batch = NEEDS_ENRICHMENT.slice(i, i + BATCH_SIZE);
+  // Pass 1: DDG + Brave in parallel
+  for (let i = 0; i < Math.min(total, 150); i += BATCH_SIZE) {
+    const batch = businesses.slice(i, i + BATCH_SIZE);
     await Promise.all(batch.map(async (b) => {
       try {
         const q = buildSearchQuery(b);
-        // DDG + Brave in parallel
         const ddgP = fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-          signal: AbortSignal.timeout(10000),
-        }).then(async r => {
-          if (r.ok) { extractFromHtml(await r.text(), b); enrichedCount++; }
-        }).catch(() => {});
-
+          headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(10000),
+        }).then(async r => { if (r.ok) extractFromHtml(await r.text(), b); }).catch(() => {});
         const braveP = BRAVE_API_KEY ? fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=3`, {
           headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
           signal: AbortSignal.timeout(8000),
@@ -1365,419 +1404,70 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             extractFromText((res.description || '') + ' ' + (res.title || ''), b);
             if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com')) b.website = res.url;
           }
-          if (!b.website && data.knowledge_graph?.url && !EXCLUDE_DOMAINS.test(data.knowledge_graph.url)) b.website = data.knowledge_graph.url;
         }).catch(() => {}) : Promise.resolve();
-
-        // Bing search (different results than DDG/Brave)
-        const bingP = searchBing(q).then(results => {
-          for (const res of results) {
-            if (!b.phone) {
-              const phM = (res.snippet + ' ' + res.title).match(/\+?[\d][\d\s\-\.()]{7,18}/);
-              if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
-            }
-            if (!b.email) {
-              const emM = (res.snippet + ' ' + res.title).match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-              if (emM && !emM[0].includes('example.com')) b.email = emM[0];
-            }
-            if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com') && !res.url.includes('bing.com')) {
-              b.website = res.url;
-            }
-          }
-        }).catch(() => {});
-
-        await Promise.all([ddgP, braveP, bingP]);
-        // Probe domains if still no website
-        if (!b.website) await probeDomains(b);
-        // Scrape website if found
-        if (b.website && (!b.email || !b.phone || !b.facebook)) await enrichFromWebsiteDeep(b);
+        await Promise.all([ddgP, braveP]);
       } catch {}
     }));
-    if (i + BATCH_SIZE < maxEnrich) await wait(1200);
-    onProgress?.(83, `Pass 1 (search)… ${Math.min(i + BATCH_SIZE, maxEnrich)}/${maxEnrich} (${enrichedCount} enriched)`);
+    if (i + BATCH_SIZE < total) await wait(1200);
+    onProgress?.(Math.min(40, Math.round((i + BATCH_SIZE) / total * 40)), `Search... ${Math.min(i + BATCH_SIZE, total)}/${total}`);
   }
 
-  // ── Pass 1b: Category-based search for businesses still missing ALL data ─
-  const stillMissing = allBizList.filter(b => !b.phone && !b.email && !b.website);
-  if (stillMissing.length > 0) {
-    const byCategory = new Map<string, Business[]>();
-    for (const b of stillMissing) {
-      const cat = b.categoryLabel || b.category;
-      if (!byCategory.has(cat)) byCategory.set(cat, []);
-      byCategory.get(cat)!.push(b);
+  // Pass 2: Scrape websites
+  const withWebsite = businesses.filter(b => b.website && (!b.email || !b.phone || !b.facebook));
+  if (withWebsite.length > 0) {
+    onProgress?.(45, `Scraping ${withWebsite.length} websites...`);
+    for (let i = 0; i < Math.min(withWebsite.length, 80); i += BATCH_SIZE) {
+      const batch = withWebsite.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (b) => {
+        await enrichFromWebsiteDeep(b);
+        if (!b.email) await scrapeContactPageForEmail(b);
+      }));
+      if (i + BATCH_SIZE < withWebsite.length) await wait(800);
+      onProgress?.(55, `Scraping... ${Math.min(i + BATCH_SIZE, withWebsite.length)}/${withWebsite.length}`);
     }
-    for (const [catLabel, catBizs] of byCategory) {
-      const cityEn = catBizs[0].address ? getEnglishCityName(catBizs[0].address.split(',').pop()?.trim() || '') : '';
-      if (!cityEn) continue;
-      const catQuery = encodeURIComponent(catLabel + ' ' + cityEn + ' phone email contact');
-      try {
-        const r = await fetch('https://corsproxy.io/?' + encodeURIComponent('https://html.duckduckgo.com/html/?q=' + catQuery), {
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-          signal: AbortSignal.timeout(10000),
-        });
-        if (r.ok) {
-          const html = await r.text();
-          const resultBlocks = html.match(/class="result__body"[^>]*>[\s\S]*?(?=class="result__body"|$)/g) || [];
-          for (const block of resultBlocks) {
-            const blockText = block.replace(/<[^>]+>/g, ' ');
-            const blockLinks = block.match(/href="([^"]+)"/g) || [];
-            for (const b of catBizs) {
-              const nameEn2 = getEnglishCityName(b.name);
-              const nameLower = (nameEn2 || b.name).toLowerCase();
-              const blockLower = blockText.toLowerCase();
-              if (blockLower.includes(nameLower) || (nameLower.length > 3 && blockLower.includes(nameLower.substring(0, Math.min(nameLower.length, 6))))) {
-                if (!b.phone) {
-                  const phM = blockText.match(/\+?[\d][\d\s\-\.()]{7,18}/);
-                  if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
-                }
-                if (!b.email) {
-                  const emM = blockText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-                  if (emM && !emM[0].includes('example.com')) b.email = emM[0];
-                }
-                if (!b.website) {
-                  for (const link of blockLinks) {
-                    let url = link.replace(/href="/, '').replace(/"$/, '');
-                    const uddg = url.match(/uddg=([^&]+)/);
-                    if (uddg) url = decodeURIComponent(uddg[1]);
-                    if (url.startsWith('http') && !url.match(/google|facebook|instagram|yelp|wikipedia|duckduckgo/i)) {
-                      b.website = url; break;
-                    }
-                  }
-                }
-                if (b.phone || b.email || b.website) break;
-              }
-            }
-          }
-        }
-      } catch {}
-      await wait(1500);
-    }
-    onProgress?.(85, 'Category search complete');
   }
 
-  // ── Pass 1d: Address-based search for non-Latin businesses ─
-  const needAddressSearch = allBizList.filter(b => !b.phone && !b.email && !b.website && !/^[a-zA-Z]/.test(b.name));
-  if (needAddressSearch.length > 0) {
-    onProgress?.(86, `Pass 1d (address search)... ${needAddressSearch.length} businesses`);
-    for (let i = 0; i < Math.min(needAddressSearch.length, 50); i += BATCH_SIZE) {
-      const batch = needAddressSearch.slice(i, i + BATCH_SIZE);
+  // Pass 3: Address-based search for non-Latin names
+  const needAddress = businesses.filter(b => !b.phone && !b.email && !b.website && !/^[a-zA-Z]/.test(b.name));
+  if (needAddress.length > 0) {
+    onProgress?.(60, `Address search... ${needAddress.length} businesses`);
+    for (let i = 0; i < Math.min(needAddress.length, 50); i += BATCH_SIZE) {
+      const batch = needAddress.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (b) => {
         try {
           const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
           const streetEn = getEnglishCityName(street);
           const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
-          const category = b.categoryLabel || '';
           if (!streetEn || streetEn === street) return;
-          const q = encodeURIComponent(streetEn + ' ' + cityEn + ' ' + category + ' phone email');
-          const ddgR = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal: AbortSignal.timeout(8000),
-          });
-          if (ddgR.ok) extractFromHtml(await ddgR.text(), b);
-          if (!b.phone || !b.email) {
-            const bingResults = await searchBing(q);
-            for (const res of bingResults) {
-              const text = res.snippet + ' ' + res.title;
-              if (!b.phone) {
-                const phM = text.match(/\+?[\d][\d\s\-\.()]{7,18}/);
-                if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
-              }
-              if (!b.email) {
-                const emM = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-                if (emM && !emM[0].includes('example.com')) b.email = emM[0];
-              }
-              if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com')) {
-                b.website = res.url;
-              }
-              if (b.phone && b.email) break;
-            }
-          }
-        } catch {}
-      }));
-      if (i + BATCH_SIZE < needAddressSearch.length) await wait(1200);
-    }
-  }
-
-  // ── Pass 2: Targeted email search for businesses still missing email ──
-  // Also try direct contact page scraping for businesses with websites
-  const missingEmailWebsites = allBizList.filter(b => !b.email && b.website);
-  if (missingEmailWebsites.length > 0) {
-    for (let i = 0; i < Math.min(missingEmailWebsites.length, 60); i += BATCH_SIZE) {
-      const batch = missingEmailWebsites.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(b => scrapeContactPageForEmail(b)));
-      if (i + BATCH_SIZE < missingEmailWebsites.length) await wait(800);
-    }
-  }
-  // ── Pass 1c: Domain probing for businesses without websites ──
-  const noWebsite = allBizList.filter(b => !b.website);
-  if (noWebsite.length > 0) {
-    for (let i = 0; i < Math.min(noWebsite.length, 40); i += BATCH_SIZE) {
-      const batch = noWebsite.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(b => probeDomains(b)));
-      if (i + BATCH_SIZE < noWebsite.length) await wait(500);
-    }
-  }
-
-  const missingEmail = allBizList.filter(b => !b.email);
-  if (missingEmail.length > 0) {
-    onProgress?.(87, `Pass 2 (email)… searching ${missingEmail.length} businesses`);
-    for (let i = 0; i < Math.min(missingEmail.length, 80); i += BATCH_SIZE) {
-      const batch = missingEmail.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (b) => {
-        try {
-          const q = buildEmailQuery(b);
+          const q = encodeURIComponent(streetEn + ' ' + cityEn + ' ' + (b.categoryLabel || '') + ' phone email');
           const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal: AbortSignal.timeout(8000),
-          });
-          if (r.ok) extractFromHtml(await r.text(), b);
-          // Also try Brave for email
-          if (!b.email && BRAVE_API_KEY) {
-            try {
-              const br = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=2`, {
-                headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
-                signal: AbortSignal.timeout(6000),
-              });
-              if (br.ok) {
-                const bd = await br.json();
-                for (const res of (bd.web?.results || [])) extractFromText((res.description || '') + ' ' + (res.title || ''), b);
-              }
-            } catch {}
-          }
-          // If still no email but we have a website, try guessing email patterns
-          if (!b.email && b.website) {
-            const guesses = guessEmailsFromDomain(b.website);
-            if (guesses.length > 0) {
-              // Quick HEAD request to check if common emails exist (won't work for most servers)
-              // Instead, just set info@ as fallback — most common business email
-              b.email = guesses[0]; // info@domain.com
-            }
-          }
-        } catch {}
-      }));
-      if (i + BATCH_SIZE < missingEmail.length) await wait(1200);
-    }
-  }
-
-  // ── Pass 3: Targeted phone search for businesses still missing phone ──
-  const missingPhone = allBizList.filter(b => !b.phone);
-  if (missingPhone.length > 0) {
-    onProgress?.(90, `Pass 3 (phone)… searching ${missingPhone.length} businesses`);
-    for (let i = 0; i < Math.min(missingPhone.length, 80); i += BATCH_SIZE) {
-      const batch = missingPhone.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (b) => {
-        try {
-          const q = buildPhoneQuery(b);
-          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal: AbortSignal.timeout(8000),
-          });
-          if (r.ok) extractFromHtml(await r.text(), b);
-          // Also try Brave
-          if (!b.phone && BRAVE_API_KEY) {
-            try {
-              const br = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=2`, {
-                headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
-                signal: AbortSignal.timeout(6000),
-              });
-              if (br.ok) {
-                const bd = await br.json();
-                for (const res of (bd.web?.results || [])) extractFromText((res.description || '') + ' ' + (res.title || ''), b);
-              }
-            } catch {}
-          }
-        } catch {}
-      }));
-      if (i + BATCH_SIZE < missingPhone.length) await wait(1200);
-    }
-  }
-
-  // ── Pass 4: Website scraping for businesses that got website from search ──
-  const needScrape = allBizList.filter(b => b.website && (!b.email || !b.phone || !b.facebook || !b.instagram));
-  if (needScrape.length > 0) {
-    onProgress?.(93, `Pass 4 (website scraping)… ${needScrape.length} sites`);
-    for (let i = 0; i < Math.min(needScrape.length, 80); i += BATCH_SIZE) {
-      const batch = needScrape.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (b) => {
-        await enrichFromWebsiteDeep(b);
-        if (!b.email) await scrapeContactPageForEmail(b);
-      }));
-      if (i + BATCH_SIZE < needScrape.length) await wait(1000);
-    }
-  }
-
-  // ── Pass 5: Social media search for businesses still missing social ──
-  const missingSocial = allBizList.filter(b => !b.facebook && !b.instagram && !b.website);
-  if (missingSocial.length > 0) {
-    onProgress?.(95, `Pass 5 (social)… ${missingSocial.length} businesses`);
-    for (let i = 0; i < Math.min(missingSocial.length, 50); i += BATCH_SIZE) {
-      const batch = missingSocial.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (b) => {
-        try {
-          const cityEn = getEnglishCityName(b.address?.split(',').pop()?.trim() || '');
-          const socialQ = encodeURIComponent(`"${b.name}" ${cityEn} facebook instagram`);
-          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + socialQ)}`, {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal: AbortSignal.timeout(8000),
+            headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(8000),
           });
           if (r.ok) extractFromHtml(await r.text(), b);
         } catch {}
       }));
-      if (i + BATCH_SIZE < missingSocial.length) await wait(1200);
+      if (i + BATCH_SIZE < needAddress.length) await wait(1200);
     }
   }
 
-  // ── Pass 6b: 2GIS search for businesses still missing data ─
-  // 2GIS is excellent for Georgia, Russia, CIS countries
-  const need2GIS = allBizList.filter(b => !b.phone && !b.email && !b.website);
-  if (need2GIS.length > 0) {
-    onProgress?.(94, `Pass 6b (2GIS)... ${need2GIS.length} businesses`);
-    for (let i = 0; i < Math.min(need2GIS.length, 40); i += BATCH_SIZE) {
-      const batch = need2GIS.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (b) => {
-        try {
-          const nameEn = getEnglishCityName(b.name);
-          const q = encodeURIComponent((nameEn || b.name) + ' ' + (b.address?.split(',').pop() || ''));
-          // Search 2GIS catalog API
-          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://catalog.api.2gis.com/3.0/items?q=' + q + '&key=rurbbn3446&fields=items.contact_groups,items.reviews')}`, {
-            signal: AbortSignal.timeout(8000),
-          });
-          if (r.ok) {
-            const data = await r.json();
-            const items = data.result?.items || [];
-            for (const item of items) {
-              const itemName = (item.name || '').toLowerCase();
-              const bizName = (nameEn || b.name).toLowerCase();
-              if (itemName.includes(bizName.substring(0, 5)) || bizName.includes(itemName.substring(0, 5))) {
-                // Found match — extract contact info
-                if (!b.phone && item.contact_groups) {
-                  for (const grp of item.contact_groups) {
-                    for (const contact of (grp.contacts || [])) {
-                      if (contact.type === 'phone' && contact.value) {
-                        b.phone = contact.value.replace(/\D/g, '').length >= 8 ? contact.value : '';
-                      }
-                    }
-                  }
-                }
-                if (!b.website && item.contact_groups) {
-                  for (const grp of item.contact_groups) {
-                    for (const contact of (grp.contacts || [])) {
-                      if (contact.type === 'website' && contact.value && !contact.value.includes('2gis.com')) {
-                        b.website = contact.value.startsWith('http') ? contact.value : 'https://' + contact.value;
-                      }
-                    }
-                  }
-                }
-                if (!b.address && item.address_name) {
-                  b.address = item.address_name;
-                }
-                break;
-              }
-            }
-          }
-        } catch {}
-      }));
-      if (i + BATCH_SIZE < need2GIS.length) await wait(1000);
-    }
+  // Pass 4: Domain probing
+  const noWebsite = businesses.filter(b => !b.website);
+  for (let i = 0; i < Math.min(noWebsite.length, 30); i += BATCH_SIZE) {
+    const batch = noWebsite.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map(b => probeDomains(b)));
+    if (i + BATCH_SIZE < noWebsite.length) await wait(500);
   }
 
-  // ── Pass 6c: Yandex search for businesses still missing data ─
-  // Yandex is dominant in Georgia/Russia/CIS
-  const needYandex = allBizList.filter(b => !b.phone && !b.email && !b.website);
-  if (needYandex.length > 0) {
-    onProgress?.(95, `Pass 6c (Yandex)... ${needYandex.length} businesses`);
-    for (let i = 0; i < Math.min(needYandex.length, 30); i += BATCH_SIZE) {
-      const batch = needYandex.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (b) => {
-        try {
-          const nameEn = getEnglishCityName(b.name);
-          const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
-          const q = encodeURIComponent(`site:yandex.* ${nameEn || b.name} ${cityEn || ''} phone`);
-          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal: AbortSignal.timeout(8000),
-          });
-          if (r.ok) {
-            const html = await r.text();
-            // Extract from Yandex search result snippets
-            const snippetBlocks = html.match(/class="result__snippet"[^>]*>[\s\S]*?(?=class="result__body"|$)/g) || [];
-            for (const block of snippetBlocks) {
-              const text = block.replace(/<[^>]+>/g, ' ');
-              if (!b.phone) {
-                const phM = text.match(/\+?[\d][\d\s\-\.()]{7,18}/);
-                if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
-              }
-              if (!b.email) {
-                const emM = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-                if (emM && !emM[0].includes('example.com')) b.email = emM[0];
-              }
-              if (b.phone || b.email) break;
-            }
-          }
-        } catch {}
-      }));
-      if (i + BATCH_SIZE < needYandex.length) await wait(1200);
-    }
+  // Pass 5: Email guess
+  for (const b of businesses.filter(b => b.website && !b.email)) {
+    const guesses = guessEmailsFromDomain(b.website);
+    if (guesses.length > 0) b.email = guesses[0];
   }
 
-  // ── Pass 6d: Wikipedia/Wikidata lookup for popular businesses ─
-  const needWiki = allBizList.filter(b => !b.phone && !b.email && !b.website && !b.facebook);
-  if (needWiki.length > 0) {
-    const cityEn = selectedCityEn || '';
-    for (let i = 0; i < Math.min(needWiki.length, 30); i += BATCH_SIZE) {
-      const batch = needWiki.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (b) => {
-        try {
-          const nameEn = getEnglishCityName(b.name);
-          const q = encodeURIComponent(`"${nameEn || b.name}" Wikipedia`);
-          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal: AbortSignal.timeout(6000),
-          });
-          if (r.ok) {
-            const html = await r.text();
-            // Find Wikipedia links
-            const wikiMatch = html.match(/en\.wikipedia\.org\/wiki\/([\w%]+)/);
-            if (wikiMatch) {
-              const wikiUrl = 'https://en.wikipedia.org/wiki/' + wikiMatch[1];
-              if (!b.website) b.website = wikiUrl;
-              // Try to get info from Wikipedia page
-              try {
-                const wr = await fetch(`https://corsproxy.io/?${encodeURIComponent(wikiUrl)}`, {
-                  signal: AbortSignal.timeout(6000),
-                });
-                if (wr.ok) {
-                  const wHtml = await wr.text();
-                  if (!b.phone) {
-                    const phM = wHtml.match(/\+?[\d][\d\s\-\.()]{7,18}/);
-                    if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
-                  }
-                  if (!b.email) {
-                    const emM = wHtml.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-                    if (emM && !emM[0].includes('example.com') && !emM[0].includes('wikipedia')) b.email = emM[0];
-                  }
-                }
-              } catch {}
-            }
-          }
-        } catch {}
-      }));
-      if (i + BATCH_SIZE < needWiki.length) await wait(800);
-    }
-  }
-
-  // ── Pass 6: Google Maps for businesses with zero data ──
-  const zeroData = allBizList.filter(b => !b.phone && !b.email && !b.website && !b.facebook && !b.instagram);
-  if (zeroData.length > 0) {
-    onProgress?.(97, `Pass 6 (Google Maps)… ${zeroData.length} businesses`);
-    await enrichFromGooglePlaces(zeroData, onProgress);
-  }
-
-  return results;
+  onProgress?.(100, `Enrichment complete!`);
+  return businesses;
 }
 
-
-// ─── AI-Powered Opportunity Analysis ───────────────────────────
-// Uses Hugging Face free inference API for market analysis
 export async function getAIAnalysis(
   cityName: string,
   countryName: string,
