@@ -1523,7 +1523,6 @@ export async function enrichCategory(
 
   const BATCH_SIZE = 8;
   const total = businesses.length;
-  let enriched = 0;
 
   onProgress?.(0, `Enriching ${total} businesses with contact data...`);
 
@@ -1560,7 +1559,6 @@ export async function enrichCategory(
         }).catch(() => {});
 
         await Promise.all([ddgP, braveP, multiP]);
-        enriched++;
       } catch {}
     }));
     if (i + BATCH_SIZE < total) await wait(1200);
