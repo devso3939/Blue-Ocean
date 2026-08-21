@@ -84,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '3.2.0';
+const APP_VERSION = '3.3.0';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -200,24 +200,27 @@ export default function App() {
           const coords = f.geometry.coordinates;
           const gmapsUrl = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent((p.name || '') + ' ' + (p.address || ''));
           const osmUrl = 'https://www.openstreetmap.org/?mlat=' + coords[1] + '&mlon=' + coords[0] + '#map=17/' + coords[1] + '/' + coords[0];
-          let contactHtml = '';
-          if (p.phone) contactHtml += '<div style="margin:3px 0"><a href="tel:' + p.phone + '" style="color:#60a5fa;text-decoration:none;font-size:12px">📞 ' + p.phone + '</a></div>';
-          if (p.email) contactHtml += '<div style="font-size:11px;color:#94a3b8;margin:3px 0;word-break:break-all">✉️ ' + p.email + '</div>';
-          if (p.website) contactHtml += '<div style="margin:3px 0"><a href="' + p.website + '" target="_blank" style="color:#60a5fa;text-decoration:none;font-size:11px">🌐 ' + p.website.replace(/^https?:\/\//, '').slice(0, 25) + '</a></div>';
-          if (p.address) contactHtml += '<div style="font-size:10px;color:#64748b;margin:3px 0">📍 ' + p.address + '</div>';
-          let socialHtml = '';
-          if (p.facebook) socialHtml += '<a href="' + p.facebook + '" target="_blank" style="color:#60a5fa;font-size:9px;text-decoration:none;background:rgba(96,165,250,0.1);padding:2px 5px;border-radius:3px">FB</a> ';
-          if (p.instagram) socialHtml += '<a href="' + p.instagram + '" target="_blank" style="color:#e879f9;font-size:9px;text-decoration:none;background:rgba(232,121,249,0.1);padding:2px 5px;border-radius:3px">IG</a>';
-          const html = '<div style="padding:10px 12px;max-width:220px;font-family:system-ui,sans-serif">'
-            + '<div style="font-weight:600;font-size:13px;color:#f1f5f9;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (p.emoji || '') + ' ' + (p.name || '') + '</div>'
-            + '<div style="display:inline-block;background:' + (p.color || '#64748b') + '22;color:' + (p.color || '#64748b') + ';font-size:9px;padding:1px 6px;border-radius:99px;margin-bottom:6px">' + (p.categoryLabel || '') + '</div>'
-            + contactHtml
-            + (socialHtml ? '<div style="display:flex;gap:3px;margin-top:3px">' + socialHtml + '</div>' : '')
-            + '<div style="margin-top:6px;padding-top:5px;border-top:1px solid #1e293b;display:flex;gap:4px">'
-            + '<a href="' + gmapsUrl + '" target="_blank" style="background:#1a73e8;color:white;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:600;text-decoration:none">📍 Maps</a>'
-            + '<a href="' + osmUrl + '" target="_blank" style="background:#1e293b;color:#94a3b8;padding:3px 7px;border-radius:4px;font-size:10px;font-weight:600;text-decoration:none">OSM</a>'
+          // Build compact contact info
+          const info: string[] = [];
+          if (p.phone) info.push('<a href="tel:' + p.phone + '" style="color:#93c5fd;text-decoration:none;font-size:10px">📞 ' + String(p.phone).slice(0, 18) + '</a>');
+          if (p.email) info.push('<span style="color:#94a3b8;font-size:10px;word-break:break-all">✉️ ' + String(p.email).slice(0, 30) + '</span>');
+          if (p.website) info.push('<a href="' + p.website + '" target="_blank" style="color:#93c5fd;text-decoration:none;font-size:10px">🌐 ' + String(p.website).replace(/^https?:\/\//, '').slice(0, 20) + '</a>');
+          if (p.address) info.push('<span style="color:#64748b;font-size:9px">📍 ' + String(p.address).slice(0, 40) + '</span>');
+          // Social badges
+          const socials: string[] = [];
+          if (p.facebook) socials.push('<a href="' + p.facebook + '" target="_blank" style="color:#60a5fa;font-size:8px;text-decoration:none;background:rgba(96,165,250,0.12);padding:1px 4px;border-radius:3px">FB</a>');
+          if (p.instagram) socials.push('<a href="' + p.instagram + '" target="_blank" style="color:#e879f9;font-size:8px;text-decoration:none;background:rgba(232,121,249,0.12);padding:1px 4px;border-radius:3px">IG</a>');
+
+          const html = '<div style="padding:8px 10px;max-width:190px;font-family:system-ui,sans-serif;line-height:1.3">'
+            + '<div style="font-weight:700;font-size:11px;color:#f1f5f9;margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (p.name || '') + '</div>'
+            + '<div style="display:inline-block;background:' + (p.color || '#64748b') + '25;color:' + (p.color || '#64748b') + ';font-size:8px;padding:1px 5px;border-radius:99px;margin-bottom:4px">' + (p.categoryLabel || '') + '</div>'
+            + info.map(s => '<div style="margin:2px 0">' + s + '</div>').join('')
+            + (socials.length ? '<div style="display:flex;gap:3px;margin-top:3px">' + socials.join(' ') + '</div>' : '')
+            + '<div style="margin-top:5px;padding-top:4px;border-top:1px solid #1e293b;display:flex;gap:3px">'
+            + '<a href="' + gmapsUrl + '" target="_blank" style="background:#1a73e8;color:white;padding:2px 6px;border-radius:3px;font-size:9px;font-weight:600;text-decoration:none">Maps</a>'
+            + '<a href="' + osmUrl + '" target="_blank" style="background:#1e293b;color:#94a3b8;padding:2px 6px;border-radius:3px;font-size:9px;font-weight:600;text-decoration:none">OSM</a>'
             + '</div></div>';
-          new maplibregl.Popup({ maxWidth: '240px', offset: 15, closeButton: true })
+          new maplibregl.Popup({ maxWidth: '200px', offset: 10, closeButton: true, closeOnClick: true })
             .setLngLat(coords)
             .setHTML(html)
             .addTo(map);
