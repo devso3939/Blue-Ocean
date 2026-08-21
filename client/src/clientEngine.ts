@@ -976,52 +976,9 @@ function buildPhoneQuery(b: Business): string {
 function guessEmailsFromDomain(domain: string): string[] {
   try {
     const host = new URL(domain).hostname.replace(/^www\./, '');
-    const prefixes = ['info', 'contact', 'hello', 'mail', 'office', 'admin', 'support', 'reception', 'reservations', 'booking', 'sales', 'team'];
+    const prefixes = ['info', 'contact', 'hello', 'mail', 'office', 'admin', 'support', 'reception', 'reservations'];
     return prefixes.map(p => p + '@' + host);
   } catch { return []; }
-}
-
-// Also try to find email by scraping the website's contact page directly
-async function scrapeContactPageForEmail(b: Business): Promise<void> {
-  if (b.email || !b.website) return;
-  try {
-    const base = b.website.replace(/\/$/, '');
-    const paths = ['/contact', '/contact-us', '/about', '/about-us', '/kontakti', '/kontakt', '/team', '/info'];
-    for (const path of paths) {
-      if (b.email) break;
-      try {
-        const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(base + path)}`, {
-          signal: AbortSignal.timeout(6000),
-        });
-        if (!r.ok) continue;
-        const html = await r.text();
-        // Look for email patterns
-        const emails = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
-        if (emails) {
-          const junk = /example\.com|wixpress|sentry|googleapis|google\.com|cloudflare|schema\.org|duckduckgo/i;
-          for (const e of emails) {
-            const clean = e.replace(/[\s>);]+$/, '');
-            if (!junk.test(clean) && clean.length > 6 && clean.length < 80) {
-              b.email = clean;
-              break;
-            }
-          }
-        }
-        // Also check Cloudflare encoded emails
-        if (!b.email) {
-          const cfM = html.match(/data-cfemail="([a-f0-9]+)"/i);
-          if (cfM) {
-            try {
-              const bytes = cfM[1].match(/.{2}/g)!.map(h => parseInt(h, 16));
-              const key = bytes[0];
-              const decoded = bytes.slice(1).map(x => x ^ key).map(x => String.fromCharCode(x)).join('');
-              if (decoded.includes('@') && !junk.test(decoded)) b.email = decoded;
-            } catch {}
-          }
-        }
-      } catch {}
-    }
-  } catch {}
 }
 
 async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
@@ -1228,7 +1185,6 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     }
   }
 
-
   onProgress?.(80, `Found ${totalBiz} businesses — enriching data in parallel…`);
 
   // ── TURBO ENRICHMENT: Multi-strategy parallel pass ──
@@ -1275,15 +1231,6 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   }
 
   // ── Pass 2: Targeted email search for businesses still missing email ──
-  // Also try direct contact page scraping for businesses with websites
-  const missingEmailWebsites = allBizList.filter(b => !b.email && b.website);
-  if (missingEmailWebsites.length > 0) {
-    for (let i = 0; i < Math.min(missingEmailWebsites.length, 60); i += BATCH_SIZE) {
-      const batch = missingEmailWebsites.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(b => scrapeContactPageForEmail(b)));
-      if (i + BATCH_SIZE < missingEmailWebsites.length) await wait(800);
-    }
-  }
   const missingEmail = allBizList.filter(b => !b.email);
   if (missingEmail.length > 0) {
     onProgress?.(87, `Pass 2 (email)… searching ${missingEmail.length} businesses`);
@@ -1358,17 +1305,13 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     }
   }
 
-  // ── Pass 4: Website scraping + contact page scraping ──
+  // ── Pass 4: Website scraping for businesses that got website from search ──
   const needScrape = allBizList.filter(b => b.website && (!b.email || !b.phone || !b.facebook || !b.instagram));
   if (needScrape.length > 0) {
     onProgress?.(93, `Pass 4 (website scraping)… ${needScrape.length} sites`);
     for (let i = 0; i < Math.min(needScrape.length, 80); i += BATCH_SIZE) {
       const batch = needScrape.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (b) => {
-        await enrichFromWebsiteDeep(b);
-        // If still missing email, try scraping contact pages directly
-        if (!b.email) await scrapeContactPageForEmail(b);
-      }));
+      await Promise.all(batch.map(b => enrichFromWebsiteDeep(b)));
       if (i + BATCH_SIZE < needScrape.length) await wait(1000);
     }
   }
