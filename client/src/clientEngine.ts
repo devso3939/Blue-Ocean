@@ -111,15 +111,6 @@ export const CATEGORY_QUERIES: Record<string, { label: string }> = {
   marketplace: { label: 'Marketplace' },
   wedding: { label: 'Wedding Venue' },
   fuel: { label: 'Gas Station' },
-  web_agency: { label: 'Web Agency' }, software: { label: 'Software Company' },
-  it_consulting: { label: 'IT Consulting' }, digital_marketing: { label: 'Digital Marketing' },
-  lawyer: { label: 'Law Firm' }, accountant: { label: 'Accounting' },
-  real_estate: { label: 'Real Estate' }, insurance: { label: 'Insurance' },
-  travel_agency: { label: 'Travel Agency' }, printing: { label: 'Printing Shop' },
-  nail_salon: { label: 'Nail Salon' }, tattoo: { label: 'Tattoo Parlor' },
-  car_wash: { label: 'Car Wash' }, market: { label: 'Local Market' },
-  dance: { label: 'Dance Studio' }, music_school: { label: 'Music School' },
-  cleaning: { label: 'Cleaning Service' }, courier: { label: 'Courier Service' },
 };
 
 export function getCategoryLabel(id: string): string {
@@ -1784,42 +1775,6 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   return results;
 }
 
-
-// ─── Detail-Mode Enrichment ─────────────────────────────────
-export async function enrichCategory(
-  businesses: Business[],
-  onProgress?: (pct: number, msg: string) => void,
-): Promise<Business[]> {
-  onProgress?.(0, 'Enriching ' + businesses.length + ' businesses...');
-  // Pass 1: DDG + Brave search
-  const BATCH_SIZE = 8;
-  for (let i = 0; i < Math.min(businesses.length, 100); i += BATCH_SIZE) {
-    const batch = businesses.slice(i, i + BATCH_SIZE);
-    await Promise.all(batch.map(async (b) => {
-      try {
-        const q = buildSearchQuery(b);
-        const ddgP = fetch('https://corsproxy.io/?' + encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q), {
-          headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(10000),
-        }).then(async r => { if (r.ok) extractFromHtml(await r.text(), b); }).catch(() => {});
-        const braveP = BRAVE_API_KEY ? fetch('https://api.search.brave.com/res/v1/web/search?q=' + q + '&count=3', {
-          headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
-          signal: AbortSignal.timeout(8000),
-        }).then(async r => {
-          if (!r.ok) return;
-          const data = await r.json();
-          for (const res of (data.web?.results || [])) {
-            extractFromText((res.description || '') + ' ' + (res.title || ''), b);
-            if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com')) b.website = res.url;
-          }
-        }).catch(() => {}) : Promise.resolve();
-        await Promise.all([ddgP, braveP]);
-      } catch {}
-    }));
-    if (i + BATCH_SIZE < businesses.length) await wait(1200);
-  }
-  onProgress?.(100, 'Done!');
-  return businesses;
-}
 
 // ─── AI-Powered Opportunity Analysis ───────────────────────────
 // Uses Hugging Face free inference API for market analysis
