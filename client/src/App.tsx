@@ -84,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '3.4.0';
+const APP_VERSION = '3.4.1';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -776,55 +776,35 @@ export default function App() {
                 )}
               </div>
             </div>
-            <div className="flex flex-col lg:flex-row">
-              <div ref={mapRef} className="h-[500px] w-full lg:flex-1 map-container" />
+            <div className="flex flex-col">
+              <div ref={mapRef} className="h-[420px] w-full map-container" />
               {selectedBiz && (
-                <div className="w-full lg:w-[300px] border-t lg:border-t-0 lg:border-l border-border bg-card p-4 overflow-y-auto" style={{maxHeight: '500px'}}>
-                  <div className="flex items-start justify-between mb-3">
-                    <div>
-                      <div className="font-bold text-sm text-foreground leading-tight">{selectedBiz.name}</div>
-                      <div className="mt-1 inline-block text-[10px] px-2 py-0.5 rounded-full" style={{background: selectedBiz.color + '22', color: selectedBiz.color}}>{selectedBiz.categoryLabel}</div>
+                <div className="border-t border-border bg-card/80 backdrop-blur-sm p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="inline-block w-2.5 h-2.5 rounded-full flex-shrink-0" style={{background: selectedBiz.color}} />
+                      <span className="font-bold text-sm text-foreground truncate">{selectedBiz.name}</span>
+                      <span className="text-[10px] px-2 py-0.5 rounded-full flex-shrink-0" style={{background: selectedBiz.color + '22', color: selectedBiz.color}}>{selectedBiz.categoryLabel}</span>
                     </div>
-                    <button onClick={() => setSelectedBiz(null)} className="text-muted-foreground hover:text-foreground text-lg leading-none">✕</button>
+                    <button onClick={() => setSelectedBiz(null)} className="text-muted-foreground hover:text-foreground text-xs flex-shrink-0 ml-2">✕</button>
                   </div>
-                  <div className="space-y-2.5 text-xs">
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
                     {selectedBiz.phone && (
-                      <div className="flex items-center gap-2">
-                        <span className="text-muted-foreground w-5 text-center">📞</span>
-                        <a href={'tel:' + selectedBiz.phone} className="text-blue-400 hover:underline font-medium">{selectedBiz.phone}</a>
-                      </div>
+                      <a href={'tel:' + selectedBiz.phone} className="inline-flex items-center gap-1 text-blue-400 hover:underline font-medium">📞 {selectedBiz.phone}</a>
                     )}
                     {selectedBiz.email && (
-                      <div className="flex items-center gap-2">
-                        <span className="text-muted-foreground w-5 text-center">✉️</span>
-                        <a href={'mailto:' + selectedBiz.email} className="text-blue-400 hover:underline break-all">{selectedBiz.email}</a>
-                      </div>
+                      <a href={'mailto:' + selectedBiz.email} className="inline-flex items-center gap-1 text-blue-400 hover:underline">✉️ <span className="truncate max-w-[200px]">{selectedBiz.email}</span></a>
                     )}
                     {selectedBiz.website && (
-                      <div className="flex items-center gap-2">
-                        <span className="text-muted-foreground w-5 text-center">🌐</span>
-                        <a href={selectedBiz.website} target="_blank" rel="noopener" className="text-blue-400 hover:underline truncate block max-w-[220px]">{selectedBiz.website.replace(/^https?:\/\//, '')}</a>
-                      </div>
+                      <a href={selectedBiz.website} target="_blank" rel="noopener" className="inline-flex items-center gap-1 text-blue-400 hover:underline">🌐 <span className="truncate max-w-[200px]">{selectedBiz.website.replace(/^https?:\/\//, '')}</span></a>
                     )}
                     {selectedBiz.address && (
-                      <div className="flex items-center gap-2">
-                        <span className="text-muted-foreground w-5 text-center">📍</span>
-                        <span className="text-muted-foreground">{selectedBiz.address}</span>
-                      </div>
+                      <span className="inline-flex items-center gap-1 text-muted-foreground">📍 <span className="truncate max-w-[250px]">{selectedBiz.address}</span></span>
                     )}
-                    {(selectedBiz.facebook || selectedBiz.instagram) && (
-                      <div className="flex items-center gap-2">
-                        <span className="text-muted-foreground w-5 text-center">📱</span>
-                        <div className="flex gap-1.5">
-                          {selectedBiz.facebook && <a href={selectedBiz.facebook} target="_blank" rel="noopener" className="text-[10px] px-2 py-0.5 rounded bg-blue-500/15 text-blue-400 hover:bg-blue-500/25">Facebook</a>}
-                          {selectedBiz.instagram && <a href={selectedBiz.instagram} target="_blank" rel="noopener" className="text-[10px] px-2 py-0.5 rounded bg-pink-500/15 text-pink-400 hover:bg-pink-500/25">Instagram</a>}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  <div className="mt-4 pt-3 border-t border-border flex gap-2">
-                    <a href={'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(selectedBiz.name + ' ' + selectedBiz.address)} target="_blank" rel="noopener" className="flex-1 text-center text-[10px] py-1.5 rounded bg-blue-600 text-white font-semibold hover:bg-blue-700 transition-colors">📍 Google Maps</a>
-                    <a href={'https://www.openstreetmap.org/?mlat=' + selectedBiz.lat + '&mlon=' + selectedBiz.lon + '#map=17/' + selectedBiz.lat + '/' + selectedBiz.lon} target="_blank" rel="noopener" className="flex-1 text-center text-[10px] py-1.5 rounded bg-muted text-muted-foreground font-semibold hover:bg-muted/80 transition-colors">OpenStreetMap</a>
+                    {selectedBiz.facebook && <a href={selectedBiz.facebook} target="_blank" rel="noopener" className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 hover:bg-blue-500/25">FB</a>}
+                    {selectedBiz.instagram && <a href={selectedBiz.instagram} target="_blank" rel="noopener" className="text-[10px] px-1.5 py-0.5 rounded bg-pink-500/15 text-pink-400 hover:bg-pink-500/25">IG</a>}
+                    <a href={'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(selectedBiz.name + ' ' + selectedBiz.address)} target="_blank" rel="noopener" className="text-[10px] px-2 py-0.5 rounded bg-blue-600 text-white font-semibold hover:bg-blue-700 transition-colors">📍 Maps</a>
+                    <a href={'https://www.openstreetmap.org/?mlat=' + selectedBiz.lat + '&mlon=' + selectedBiz.lon + '#map=17/' + selectedBiz.lat + '/' + selectedBiz.lon} target="_blank" rel="noopener" className="text-[10px] px-2 py-0.5 rounded bg-muted text-muted-foreground font-semibold hover:bg-muted/80 transition-colors">OSM</a>
                   </div>
                 </div>
               )}

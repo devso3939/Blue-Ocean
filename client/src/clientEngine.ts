@@ -1232,6 +1232,9 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     for (const b of bizs) allBizList.push(b);
   }
 
+  // English city name for enrichment passes
+  const selectedCityEn = allBizList.length > 0 ? getEnglishCityName((allBizList[0].address || '').split(',').pop()?.trim() || '') : '';
+
   if (allBizList.length > 0) {
     const BATCH = 10;
     const maxEnrich = Math.min(allBizList.length, 200);
@@ -1486,6 +1489,145 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         } catch {}
       }));
       if (i + BATCH_SIZE < missingSocial.length) await wait(1200);
+    }
+  }
+
+  // ── Pass 6b: 2GIS search for businesses still missing data ─
+  // 2GIS is excellent for Georgia, Russia, CIS countries
+  const need2GIS = allBizList.filter(b => !b.phone && !b.email && !b.website);
+  if (need2GIS.length > 0) {
+    onProgress?.(94, `Pass 6b (2GIS)... ${need2GIS.length} businesses`);
+    for (let i = 0; i < Math.min(need2GIS.length, 40); i += BATCH_SIZE) {
+      const batch = need2GIS.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (b) => {
+        try {
+          const nameEn = getEnglishCityName(b.name);
+          const q = encodeURIComponent((nameEn || b.name) + ' ' + (b.address?.split(',').pop() || ''));
+          // Search 2GIS catalog API
+          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://catalog.api.2gis.com/3.0/items?q=' + q + '&key=rurbbn3446&fields=items.contact_groups,items.reviews')}`, {
+            signal: AbortSignal.timeout(8000),
+          });
+          if (r.ok) {
+            const data = await r.json();
+            const items = data.result?.items || [];
+            for (const item of items) {
+              const itemName = (item.name || '').toLowerCase();
+              const bizName = (nameEn || b.name).toLowerCase();
+              if (itemName.includes(bizName.substring(0, 5)) || bizName.includes(itemName.substring(0, 5))) {
+                // Found match — extract contact info
+                if (!b.phone && item.contact_groups) {
+                  for (const grp of item.contact_groups) {
+                    for (const contact of (grp.contacts || [])) {
+                      if (contact.type === 'phone' && contact.value) {
+                        b.phone = contact.value.replace(/\D/g, '').length >= 8 ? contact.value : '';
+                      }
+                    }
+                  }
+                }
+                if (!b.website && item.contact_groups) {
+                  for (const grp of item.contact_groups) {
+                    for (const contact of (grp.contacts || [])) {
+                      if (contact.type === 'website' && contact.value && !contact.value.includes('2gis.com')) {
+                        b.website = contact.value.startsWith('http') ? contact.value : 'https://' + contact.value;
+                      }
+                    }
+                  }
+                }
+                if (!b.address && item.address_name) {
+                  b.address = item.address_name;
+                }
+                break;
+              }
+            }
+          }
+        } catch {}
+      }));
+      if (i + BATCH_SIZE < need2GIS.length) await wait(1000);
+    }
+  }
+
+  // ── Pass 6c: Yandex search for businesses still missing data ─
+  // Yandex is dominant in Georgia/Russia/CIS
+  const needYandex = allBizList.filter(b => !b.phone && !b.email && !b.website);
+  if (needYandex.length > 0) {
+    onProgress?.(95, `Pass 6c (Yandex)... ${needYandex.length} businesses`);
+    for (let i = 0; i < Math.min(needYandex.length, 30); i += BATCH_SIZE) {
+      const batch = needYandex.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (b) => {
+        try {
+          const nameEn = getEnglishCityName(b.name);
+          const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+          const q = encodeURIComponent(`site:yandex.* ${nameEn || b.name} ${cityEn || ''} phone`);
+          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: AbortSignal.timeout(8000),
+          });
+          if (r.ok) {
+            const html = await r.text();
+            // Extract from Yandex search result snippets
+            const snippetBlocks = html.match(/class="result__snippet"[^>]*>[\s\S]*?(?=class="result__body"|$)/g) || [];
+            for (const block of snippetBlocks) {
+              const text = block.replace(/<[^>]+>/g, ' ');
+              if (!b.phone) {
+                const phM = text.match(/\+?[\d][\d\s\-\.()]{7,18}/);
+                if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
+              }
+              if (!b.email) {
+                const emM = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+                if (emM && !emM[0].includes('example.com')) b.email = emM[0];
+              }
+              if (b.phone || b.email) break;
+            }
+          }
+        } catch {}
+      }));
+      if (i + BATCH_SIZE < needYandex.length) await wait(1200);
+    }
+  }
+
+  // ── Pass 6d: Wikipedia/Wikidata lookup for popular businesses ─
+  const needWiki = allBizList.filter(b => !b.phone && !b.email && !b.website && !b.facebook);
+  if (needWiki.length > 0) {
+    const cityEn = selectedCityEn || '';
+    for (let i = 0; i < Math.min(needWiki.length, 30); i += BATCH_SIZE) {
+      const batch = needWiki.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (b) => {
+        try {
+          const nameEn = getEnglishCityName(b.name);
+          const q = encodeURIComponent(`"${nameEn || b.name}" Wikipedia`);
+          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: AbortSignal.timeout(6000),
+          });
+          if (r.ok) {
+            const html = await r.text();
+            // Find Wikipedia links
+            const wikiMatch = html.match(/en\.wikipedia\.org\/wiki\/([\w%]+)/);
+            if (wikiMatch) {
+              const wikiUrl = 'https://en.wikipedia.org/wiki/' + wikiMatch[1];
+              if (!b.website) b.website = wikiUrl;
+              // Try to get info from Wikipedia page
+              try {
+                const wr = await fetch(`https://corsproxy.io/?${encodeURIComponent(wikiUrl)}`, {
+                  signal: AbortSignal.timeout(6000),
+                });
+                if (wr.ok) {
+                  const wHtml = await wr.text();
+                  if (!b.phone) {
+                    const phM = wHtml.match(/\+?[\d][\d\s\-\.()]{7,18}/);
+                    if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
+                  }
+                  if (!b.email) {
+                    const emM = wHtml.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+                    if (emM && !emM[0].includes('example.com') && !emM[0].includes('wikipedia')) b.email = emM[0];
+                  }
+                }
+              } catch {}
+            }
+          }
+        } catch {}
+      }));
+      if (i + BATCH_SIZE < needWiki.length) await wait(800);
     }
   }
 
