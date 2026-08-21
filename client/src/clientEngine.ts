@@ -912,6 +912,56 @@ function extractFromText(text: string, b: Business): void {
 }
 
 // ─── Brave Search Enrichment ───────────────────────────────────
+// Bing Search (free scraping, no API key needed)
+async function searchBing(query: string): Promise<{title: string; url: string; snippet: string}[]> {
+  try {
+    const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://www.bing.com/search?q=' + query + '&count=5')}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!r.ok) return [];
+    const html = await r.text();
+    const results: {title: string; url: string; snippet: string}[] = [];
+    // Extract search result blocks
+    const blocks = html.match(/<li class="b_algo"[^>]*>[\s\S]*?<\/li>/gi) || [];
+    for (const block of blocks) {
+      const titleMatch = block.match(/<h2[^>]*><a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+      const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+      if (titleMatch) {
+        results.push({
+          url: titleMatch[1],
+          title: titleMatch[2].replace(/<[^>]+>/g, ''),
+          snippet: snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '') : '',
+        });
+      }
+    }
+    return results;
+  } catch { return []; }
+}
+
+// Domain probing - check if common domain patterns exist for a business
+async function probeDomains(b: Business): Promise<void> {
+  if (b.website) return;
+  const nameEn = getEnglishCityName(b.name);
+  if (!nameEn || nameEn === b.name) return; // Only probe for Latin names
+  const slug = nameEn.toLowerCase().replace(/[^a-z0-9]+/g, '').substring(0, 20);
+  if (slug.length < 3) return;
+  const tlds = ['.com', '.ge', '.org', '.net'];
+  for (const tld of tlds) {
+    try {
+      const domain = 'https://' + slug + tld;
+      const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(domain)}`, {
+        method: 'HEAD',
+        signal: AbortSignal.timeout(4000),
+      });
+      if (r.ok) {
+        b.website = domain;
+        return;
+      }
+    } catch {}
+  }
+}
+
 const BRAVE_API_KEY = 'BSAded3tnZfvadieW5pz0tiLrlh2lvn';
 
 // ─── Multilingual Search Helpers ───────────────────────────
@@ -1025,7 +1075,7 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
   if (b.email || !b.website) return;
   try {
     const base = b.website.replace(/\/$/, '');
-    const paths = ['/contact', '/contact-us', '/about', '/about-us', '/kontakti', '/kontakt', '/team', '/info'];
+    const paths = ['/contact', '/contact-us', '/about', '/about-us', '/kontakti', '/kontakt', '/team', '/info', '/footer', '/imprint', '/privacy', '/sitemap.xml'];
     for (const path of paths) {
       if (b.email) break;
       try {
@@ -1306,7 +1356,26 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           if (!b.website && data.knowledge_graph?.url && !EXCLUDE_DOMAINS.test(data.knowledge_graph.url)) b.website = data.knowledge_graph.url;
         }).catch(() => {}) : Promise.resolve();
 
-        await Promise.all([ddgP, braveP]);
+        // Bing search (different results than DDG/Brave)
+        const bingP = searchBing(q).then(results => {
+          for (const res of results) {
+            if (!b.phone) {
+              const phM = (res.snippet + ' ' + res.title).match(/\+?[\d][\d\s\-\.()]{7,18}/);
+              if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
+            }
+            if (!b.email) {
+              const emM = (res.snippet + ' ' + res.title).match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+              if (emM && !emM[0].includes('example.com')) b.email = emM[0];
+            }
+            if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com') && !res.url.includes('bing.com')) {
+              b.website = res.url;
+            }
+          }
+        }).catch(() => {});
+
+        await Promise.all([ddgP, braveP, bingP]);
+        // Probe domains if still no website
+        if (!b.website) await probeDomains(b);
         // Scrape website if found
         if (b.website && (!b.email || !b.phone || !b.facebook)) await enrichFromWebsiteDeep(b);
       } catch {}
@@ -1383,6 +1452,16 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       if (i + BATCH_SIZE < missingEmailWebsites.length) await wait(800);
     }
   }
+  // ── Pass 1c: Domain probing for businesses without websites ──
+  const noWebsite = allBizList.filter(b => !b.website);
+  if (noWebsite.length > 0) {
+    for (let i = 0; i < Math.min(noWebsite.length, 40); i += BATCH_SIZE) {
+      const batch = noWebsite.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(b => probeDomains(b)));
+      if (i + BATCH_SIZE < noWebsite.length) await wait(500);
+    }
+  }
+
   const missingEmail = allBizList.filter(b => !b.email);
   if (missingEmail.length > 0) {
     onProgress?.(87, `Pass 2 (email)… searching ${missingEmail.length} businesses`);
