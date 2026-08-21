@@ -84,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '3.3.0';
+const APP_VERSION = '3.3.1';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -211,7 +211,7 @@ export default function App() {
           if (p.facebook) socials.push('<a href="' + p.facebook + '" target="_blank" style="color:#60a5fa;font-size:8px;text-decoration:none;background:rgba(96,165,250,0.12);padding:1px 4px;border-radius:3px">FB</a>');
           if (p.instagram) socials.push('<a href="' + p.instagram + '" target="_blank" style="color:#e879f9;font-size:8px;text-decoration:none;background:rgba(232,121,249,0.12);padding:1px 4px;border-radius:3px">IG</a>');
 
-          const html = '<div style="padding:8px 10px;max-width:190px;font-family:system-ui,sans-serif;line-height:1.3">'
+          const html = '<div style="padding:8px 10px;max-width:220px;font-family:system-ui,sans-serif;line-height:1.3">'
             + '<div style="font-weight:700;font-size:11px;color:#f1f5f9;margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (p.name || '') + '</div>'
             + '<div style="display:inline-block;background:' + (p.color || '#64748b') + '25;color:' + (p.color || '#64748b') + ';font-size:8px;padding:1px 5px;border-radius:99px;margin-bottom:4px">' + (p.categoryLabel || '') + '</div>'
             + info.map(s => '<div style="margin:2px 0">' + s + '</div>').join('')
@@ -220,7 +220,7 @@ export default function App() {
             + '<a href="' + gmapsUrl + '" target="_blank" style="background:#1a73e8;color:white;padding:2px 6px;border-radius:3px;font-size:9px;font-weight:600;text-decoration:none">Maps</a>'
             + '<a href="' + osmUrl + '" target="_blank" style="background:#1e293b;color:#94a3b8;padding:2px 6px;border-radius:3px;font-size:9px;font-weight:600;text-decoration:none">OSM</a>'
             + '</div></div>';
-          new maplibregl.Popup({ maxWidth: '200px', offset: 10, closeButton: true, closeOnClick: true })
+          new maplibregl.Popup({ maxWidth: '240px', offset: 10, closeButton: true, closeOnClick: true })
             .setLngLat(coords)
             .setHTML(html)
             .addTo(map);
@@ -557,7 +557,7 @@ export default function App() {
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 text-white">
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
             </div>
-            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v3.2.0</span></span>
+            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v{APP_VERSION}</span></span>
           </div>
           <div className="flex items-center gap-3">
             <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>

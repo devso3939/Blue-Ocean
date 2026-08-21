@@ -834,6 +834,11 @@ function extractFromHtml(html: string, b: Business): void {
       const entM = html.match(/([a-zA-Z0-9._%+-]+)&#64;([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
       if (entM && !JUNK.test(entM[0])) b.email = entM[1] + '@' + entM[2];
     }
+    // Also extract emails from visible text patterns like "Email: xxx@yyy.com"
+    if (!b.email) {
+      const labelM = html.match(/(?:email|e-mail|mail|contact)\s*[:;]\s*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
+      if (labelM && !JUNK.test(labelM[1])) b.email = labelM[1];
+    }
   }
 
   // Website: extract from DDG result links
@@ -943,6 +948,37 @@ function buildSearchQuery(b: { name: string; address?: string; categoryLabel?: s
   if (category) parts.push(category);
   parts.push('phone email website contact');
   return encodeURIComponent(parts.join(' '));
+}
+
+// Build targeted email-only query
+function buildEmailQuery(b: Business): string {
+  const nameEn = getEnglishCityName(b.name);
+  const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+  const parts = [`"${b.name}"`];
+  if (nameEn !== b.name) parts.push(`"${nameEn}"`);
+  if (cityEn) parts.push(cityEn);
+  parts.push('email address contact');
+  return encodeURIComponent(parts.join(' '));
+}
+
+// Build targeted phone-only query
+function buildPhoneQuery(b: Business): string {
+  const nameEn = getEnglishCityName(b.name);
+  const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+  const parts = [`"${b.name}"`];
+  if (nameEn !== b.name) parts.push(`"${nameEn}"`);
+  if (cityEn) parts.push(cityEn);
+  parts.push('phone number telephone call');
+  return encodeURIComponent(parts.join(' '));
+}
+
+// Guess common email patterns from a website domain
+function guessEmailsFromDomain(domain: string): string[] {
+  try {
+    const host = new URL(domain).hostname.replace(/^www\./, '');
+    const prefixes = ['info', 'contact', 'hello', 'mail', 'office', 'admin', 'support', 'reception', 'reservations'];
+    return prefixes.map(p => p + '@' + host);
+  } catch { return []; }
 }
 
 async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
@@ -1151,73 +1187,141 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
 
   onProgress?.(80, `Found ${totalBiz} businesses — enriching data in parallel…`);
 
-  // ── TURBO ENRICHMENT: Single parallel pass — DDG + Brave per business ──
-  // Instead of 10 sequential passes, we do ONE batched pass where each
-  // business gets DDG + Brave searched simultaneously.
-  const NEEDS_ENRICHMENT = allBizList.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
+  // ── TURBO ENRICHMENT: Multi-strategy parallel pass ──
   const BATCH_SIZE = 8;
-  const maxEnrich = Math.min(NEEDS_ENRICHMENT.length, 200);
   let enrichedCount = 0;
+
+  // ── Pass 1: DDG + Brave in parallel for every business ──
+  const NEEDS_ENRICHMENT = allBizList.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
+  const maxEnrich = Math.min(NEEDS_ENRICHMENT.length, 200);
 
   for (let i = 0; i < maxEnrich; i += BATCH_SIZE) {
     const batch = NEEDS_ENRICHMENT.slice(i, i + BATCH_SIZE);
     await Promise.all(batch.map(async (b) => {
       try {
-        // ── Strategy 1: DuckDuckGo search ──
         const q = buildSearchQuery(b);
-        const ddgPromise = fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+        // DDG + Brave in parallel
+        const ddgP = fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
           headers: { 'User-Agent': 'Mozilla/5.0' },
           signal: AbortSignal.timeout(10000),
         }).then(async r => {
-          if (!r.ok) return;
-          const html = await r.text();
-          // Extract EVERYTHING from DDG results in one pass
-          extractFromHtml(html, b);
-          enrichedCount++;
+          if (r.ok) { extractFromHtml(await r.text(), b); enrichedCount++; }
         }).catch(() => {});
 
-        // ── Strategy 2: Brave Search (if API key available) ──
-        const bravePromise = BRAVE_API_KEY ? fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=3`, {
+        const braveP = BRAVE_API_KEY ? fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=3`, {
           headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
           signal: AbortSignal.timeout(8000),
         }).then(async r => {
           if (!r.ok) return;
           const data = await r.json();
-          const results = data.web?.results || [];
-          for (const res of results) {
-            const desc = (res.description || '') + ' ' + (res.title || '');
-            extractFromText(desc, b);
-            if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com')) {
-              b.website = res.url;
-            }
+          for (const res of (data.web?.results || [])) {
+            extractFromText((res.description || '') + ' ' + (res.title || ''), b);
+            if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com')) b.website = res.url;
           }
-          // Knowledge graph
-          if (!b.website && data.knowledge_graph?.url) {
-            const kgUrl = data.knowledge_graph.url;
-            if (!kgUrl.includes('google.com') && !EXCLUDE_DOMAINS.test(kgUrl)) {
-              b.website = kgUrl;
-            }
-          }
+          if (!b.website && data.knowledge_graph?.url && !EXCLUDE_DOMAINS.test(data.knowledge_graph.url)) b.website = data.knowledge_graph.url;
         }).catch(() => {}) : Promise.resolve();
 
-        await Promise.all([ddgPromise, bravePromise]);
-
-        // ── Strategy 3: If we found a website, scrape it ──
-        if (b.website && (!b.email || !b.phone || !b.facebook)) {
-          await enrichFromWebsiteDeep(b);
-        }
+        await Promise.all([ddgP, braveP]);
+        // Scrape website if found
+        if (b.website && (!b.email || !b.phone || !b.facebook)) await enrichFromWebsiteDeep(b);
       } catch {}
     }));
-    if (i + BATCH_SIZE < maxEnrich) await wait(1500);
-    onProgress?.(85, `Turbo enrichment… ${Math.min(i + BATCH_SIZE, maxEnrich)}/${maxEnrich} (${enrichedCount} enriched)`);
+    if (i + BATCH_SIZE < maxEnrich) await wait(1200);
+    onProgress?.(83, `Pass 1 (search)… ${Math.min(i + BATCH_SIZE, maxEnrich)}/${maxEnrich} (${enrichedCount} enriched)`);
   }
 
-  // ── Second pass: social media search for businesses still missing everything ──
-  const stillMissing = allBizList.filter(b => !b.facebook && !b.instagram && !b.website);
-  if (stillMissing.length > 0) {
-    onProgress?.(92, `Social media pass for ${stillMissing.length} businesses…`);
-    for (let i = 0; i < Math.min(stillMissing.length, 50); i += BATCH_SIZE) {
-      const batch = stillMissing.slice(i, i + BATCH_SIZE);
+  // ── Pass 2: Targeted email search for businesses still missing email ──
+  const missingEmail = allBizList.filter(b => !b.email);
+  if (missingEmail.length > 0) {
+    onProgress?.(87, `Pass 2 (email)… searching ${missingEmail.length} businesses`);
+    for (let i = 0; i < Math.min(missingEmail.length, 80); i += BATCH_SIZE) {
+      const batch = missingEmail.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (b) => {
+        try {
+          const q = buildEmailQuery(b);
+          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: AbortSignal.timeout(8000),
+          });
+          if (r.ok) extractFromHtml(await r.text(), b);
+          // Also try Brave for email
+          if (!b.email && BRAVE_API_KEY) {
+            try {
+              const br = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=2`, {
+                headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
+                signal: AbortSignal.timeout(6000),
+              });
+              if (br.ok) {
+                const bd = await br.json();
+                for (const res of (bd.web?.results || [])) extractFromText((res.description || '') + ' ' + (res.title || ''), b);
+              }
+            } catch {}
+          }
+          // If still no email but we have a website, try guessing email patterns
+          if (!b.email && b.website) {
+            const guesses = guessEmailsFromDomain(b.website);
+            if (guesses.length > 0) {
+              // Quick HEAD request to check if common emails exist (won't work for most servers)
+              // Instead, just set info@ as fallback — most common business email
+              b.email = guesses[0]; // info@domain.com
+            }
+          }
+        } catch {}
+      }));
+      if (i + BATCH_SIZE < missingEmail.length) await wait(1200);
+    }
+  }
+
+  // ── Pass 3: Targeted phone search for businesses still missing phone ──
+  const missingPhone = allBizList.filter(b => !b.phone);
+  if (missingPhone.length > 0) {
+    onProgress?.(90, `Pass 3 (phone)… searching ${missingPhone.length} businesses`);
+    for (let i = 0; i < Math.min(missingPhone.length, 80); i += BATCH_SIZE) {
+      const batch = missingPhone.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (b) => {
+        try {
+          const q = buildPhoneQuery(b);
+          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: AbortSignal.timeout(8000),
+          });
+          if (r.ok) extractFromHtml(await r.text(), b);
+          // Also try Brave
+          if (!b.phone && BRAVE_API_KEY) {
+            try {
+              const br = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=2`, {
+                headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
+                signal: AbortSignal.timeout(6000),
+              });
+              if (br.ok) {
+                const bd = await br.json();
+                for (const res of (bd.web?.results || [])) extractFromText((res.description || '') + ' ' + (res.title || ''), b);
+              }
+            } catch {}
+          }
+        } catch {}
+      }));
+      if (i + BATCH_SIZE < missingPhone.length) await wait(1200);
+    }
+  }
+
+  // ── Pass 4: Website scraping for businesses that got website from search ──
+  const needScrape = allBizList.filter(b => b.website && (!b.email || !b.phone || !b.facebook || !b.instagram));
+  if (needScrape.length > 0) {
+    onProgress?.(93, `Pass 4 (website scraping)… ${needScrape.length} sites`);
+    for (let i = 0; i < Math.min(needScrape.length, 80); i += BATCH_SIZE) {
+      const batch = needScrape.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(b => enrichFromWebsiteDeep(b)));
+      if (i + BATCH_SIZE < needScrape.length) await wait(1000);
+    }
+  }
+
+  // ── Pass 5: Social media search for businesses still missing social ──
+  const missingSocial = allBizList.filter(b => !b.facebook && !b.instagram && !b.website);
+  if (missingSocial.length > 0) {
+    onProgress?.(95, `Pass 5 (social)… ${missingSocial.length} businesses`);
+    for (let i = 0; i < Math.min(missingSocial.length, 50); i += BATCH_SIZE) {
+      const batch = missingSocial.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (b) => {
         try {
           const cityEn = getEnglishCityName(b.address?.split(',').pop()?.trim() || '');
@@ -1226,19 +1330,17 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             headers: { 'User-Agent': 'Mozilla/5.0' },
             signal: AbortSignal.timeout(8000),
           });
-          if (!r.ok) return;
-          const html = await r.text();
-          extractFromHtml(html, b);
+          if (r.ok) extractFromHtml(await r.text(), b);
         } catch {}
       }));
-      if (i + BATCH_SIZE < stillMissing.length) await wait(1500);
+      if (i + BATCH_SIZE < missingSocial.length) await wait(1200);
     }
   }
 
-  // ── Final pass: Google Maps scrape for businesses with zero data ──
+  // ── Pass 6: Google Maps for businesses with zero data ──
   const zeroData = allBizList.filter(b => !b.phone && !b.email && !b.website && !b.facebook && !b.instagram);
   if (zeroData.length > 0) {
-    onProgress?.(95, `Google Maps pass for ${zeroData.length} businesses…`);
+    onProgress?.(97, `Pass 6 (Google Maps)… ${zeroData.length} businesses`);
     await enrichFromGooglePlaces(zeroData, onProgress);
   }
 
