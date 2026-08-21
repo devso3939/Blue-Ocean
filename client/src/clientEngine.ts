@@ -1303,10 +1303,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     for (const b of bizs) allBizList.push(b);
   }
 
-  // English city name for enrichment passes
-  const selectedCityEn = allBizList.length > 0 ? getEnglishCityName((allBizList[0].address || '').split(',').pop()?.trim() || '') : '';
-
-    onProgress?.(80, `Found ${totalBiz} businesses - quick scan...`);
+  onProgress?.(80, `Found ${totalBiz} businesses - quick scan...`);
   // FAST MODE: Nominatim only. Deep enrichment in enrichCategory().
   const BATCH = 10;
   const maxEnrich = Math.min(allBizList.length, 200);
