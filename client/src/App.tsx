@@ -411,6 +411,28 @@ export default function App() {
     }
   }, [selectedCity, selectedCategory]);
 
+  // Detail-mode enrichment: called when user clicks Enrich Contacts
+  const enrichSelectedCategory = useCallback(async () => {
+    if (!selectedOppCategory || !selectedCity) return;
+    const catBizs = businesses.get(selectedOppCategory) || [];
+    if (catBizs.length === 0) return;
+    setEnrichingCat(selectedOppCategory);
+    setEnrichProgress(0);
+    setEnrichStage('Starting deep enrichment...');
+    try {
+      const enriched = await enrichCategory(
+        catBizs,
+        (pct, msg) => { setEnrichProgress(pct); setEnrichStage(msg); },
+      );
+      const newBiz = new Map(businesses);
+      newBiz.set(selectedOppCategory, enriched);
+      setBusinesses(newBiz);
+    } catch {}
+    setEnrichingCat(null);
+    setEnrichProgress(0);
+    setEnrichStage('');
+  }, [selectedOppCategory, selectedCity, businesses]);
+
   const allBizCount = Array.from(businesses.values()).reduce((s, a) => s + a.length, 0);
   const displayOpps = showAllOpps ? opportunities : opportunities.slice(0, 25);
   const selectedCatInfo = selectedOppCategory ? demandSignals.get(selectedOppCategory) : null;
