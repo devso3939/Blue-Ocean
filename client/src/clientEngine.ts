@@ -111,6 +111,15 @@ export const CATEGORY_QUERIES: Record<string, { label: string }> = {
   marketplace: { label: 'Marketplace' },
   wedding: { label: 'Wedding Venue' },
   fuel: { label: 'Gas Station' },
+  web_agency: { label: 'Web Agency' }, software: { label: 'Software Company' },
+  it_consulting: { label: 'IT Consulting' }, digital_marketing: { label: 'Digital Marketing' },
+  lawyer: { label: 'Law Firm' }, accountant: { label: 'Accounting' },
+  real_estate: { label: 'Real Estate' }, insurance: { label: 'Insurance' },
+  travel_agency: { label: 'Travel Agency' }, printing: { label: 'Printing Shop' },
+  nail_salon: { label: 'Nail Salon' }, tattoo: { label: 'Tattoo Parlor' },
+  car_wash: { label: 'Car Wash' }, market: { label: 'Local Market' },
+  dance: { label: 'Dance Studio' }, music_school: { label: 'Music School' },
+  cleaning: { label: 'Cleaning Service' }, courier: { label: 'Courier Service' },
 };
 
 export function getCategoryLabel(id: string): string {
