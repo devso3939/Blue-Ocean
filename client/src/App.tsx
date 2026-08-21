@@ -84,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '3.3.2';
+const APP_VERSION = '3.4.0';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -105,12 +105,22 @@ export default function App() {
   const [selectedOppCategory, setSelectedOppCategory] = useState<string | null>(null);
   const [showAllOpps, setShowAllOpps] = useState(false);
   const [aiInsights, setAiInsights] = useState('');
+  const [selectedBiz, setSelectedBiz] = useState<{name:string;category:string;categoryLabel:string;color:string;phone:string;email:string;website:string;address:string;facebook:string;instagram:string;lat:number;lon:number}|null>(null);
 
   const mapRef = useRef<HTMLDivElement>(null);
-  const popupRef = useRef<any>(null);
   const mapInstanceRef = useRef<any>(null);
   const maplibreRef = useRef<any>(null);
   const mapReadyRef = useRef(false);
+
+  // Listen for map pin clicks
+  useEffect(() => {
+    const handler = () => {
+      const b = (window as any).__selectedBiz;
+      if (b) setSelectedBiz(b);
+    };
+    window.addEventListener('biz-click', handler);
+    return () => window.removeEventListener('biz-click', handler);
+  }, []);
 
   // Search cities
   useEffect(() => {
@@ -194,43 +204,23 @@ export default function App() {
         map.on('mouseenter', 'biz-labels', () => { map.getCanvas().style.cursor = 'pointer'; });
         map.on('mouseleave', 'biz-labels', () => { map.getCanvas().style.cursor = ''; });
         // Click handler on either layer
-        const showPopup = (e: any) => {
-          if (popupRef.current) { popupRef.current.remove(); popupRef.current = null; }
+        const handleBizClick = (e: any) => {
+          if (e.defaultPrevented) return;
+          e.preventDefault();
           const f = e.features?.[0];
           if (!f) return;
           const p = f.properties;
           const coords = f.geometry.coordinates;
-          const gmapsUrl = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent((p.name || '') + ' ' + (p.address || ''));
-          const osmUrl = 'https://www.openstreetmap.org/?mlat=' + coords[1] + '&mlon=' + coords[0] + '#map=17/' + coords[1] + '/' + coords[0];
-          // Build compact contact info
-          const info: string[] = [];
-          if (p.phone) info.push('<a href="tel:' + p.phone + '" style="color:#93c5fd;text-decoration:none;font-size:10px">📞 ' + String(p.phone).slice(0, 18) + '</a>');
-          if (p.email) info.push('<span style="color:#94a3b8;font-size:10px;word-break:break-all">✉️ ' + String(p.email).slice(0, 30) + '</span>');
-          if (p.website) info.push('<a href="' + p.website + '" target="_blank" style="color:#93c5fd;text-decoration:none;font-size:10px">🌐 ' + String(p.website).replace(/^https?:\/\//, '').slice(0, 20) + '</a>');
-          if (p.address) info.push('<span style="color:#64748b;font-size:9px">📍 ' + String(p.address).slice(0, 40) + '</span>');
-          // Social badges
-          const socials: string[] = [];
-          if (p.facebook) socials.push('<a href="' + p.facebook + '" target="_blank" style="color:#60a5fa;font-size:8px;text-decoration:none;background:rgba(96,165,250,0.12);padding:1px 4px;border-radius:3px">FB</a>');
-          if (p.instagram) socials.push('<a href="' + p.instagram + '" target="_blank" style="color:#e879f9;font-size:8px;text-decoration:none;background:rgba(232,121,249,0.12);padding:1px 4px;border-radius:3px">IG</a>');
-
-          const html = '<div style="padding:8px 10px;max-width:220px;font-family:system-ui,sans-serif;line-height:1.3">'
-            + '<div style="font-weight:700;font-size:11px;color:#f1f5f9;margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (p.name || '') + '</div>'
-            + '<div style="display:inline-block;background:' + (p.color || '#64748b') + '25;color:' + (p.color || '#64748b') + ';font-size:8px;padding:1px 5px;border-radius:99px;margin-bottom:4px">' + (p.categoryLabel || '') + '</div>'
-            + info.map(s => '<div style="margin:2px 0">' + s + '</div>').join('')
-            + (socials.length ? '<div style="display:flex;gap:3px;margin-top:3px">' + socials.join(' ') + '</div>' : '')
-            + '<div style="margin-top:5px;padding-top:4px;border-top:1px solid #1e293b;display:flex;gap:3px">'
-            + '<a href="' + gmapsUrl + '" target="_blank" style="background:#1a73e8;color:white;padding:2px 6px;border-radius:3px;font-size:9px;font-weight:600;text-decoration:none">Maps</a>'
-            + '<a href="' + osmUrl + '" target="_blank" style="background:#1e293b;color:#94a3b8;padding:2px 6px;border-radius:3px;font-size:9px;font-weight:600;text-decoration:none">OSM</a>'
-            + '</div></div>';
-          const popup = new maplibregl.Popup({ maxWidth: '220px', offset: 8, closeButton: true, closeOnClick: true })
-            .setLngLat(coords)
-            .setHTML(html)
-            .addTo(map);
-          popupRef.current = popup;
-          popup.on("close", () => { popupRef.current = null; });
+          (window as any).__selectedBiz = {
+            name: p.name || '', category: p.category || '', categoryLabel: p.categoryLabel || '',
+            color: p.color || '#64748b', phone: p.phone || '', email: p.email || '',
+            website: p.website || '', address: p.address || '', facebook: p.facebook || '',
+            instagram: p.instagram || '', lat: coords[1], lon: coords[0],
+          };
+          window.dispatchEvent(new CustomEvent('biz-click'));
         };
-        map.on('click', 'biz-circles', showPopup);
-        map.on('click', 'biz-labels', showPopup);
+        map.on('click', 'biz-circles', handleBizClick);
+        map.on('click', 'biz-labels', handleBizClick);
         // If businesses already exist, render them        });
         // If businesses already exist, render them
         if (businesses.size > 0) {
@@ -767,6 +757,7 @@ export default function App() {
           )}
 
           {/* Map */}
+          {/* Map + Business Panel */}
           <div className="rounded-xl border border-border bg-card" style={{overflow: "visible"}}>
             <div className="px-5 py-3 border-b border-border flex items-center justify-between">
               <h3 className="text-sm font-semibold">
@@ -774,15 +765,70 @@ export default function App() {
                   ? `${getCategoryLabel(selectedOppCategory)} Map · ${categoryBusinesses.length} locations`
                   : `Competition Map · ${fmtNum(allBizCount)} businesses`}
               </h3>
-              <div className="flex gap-2 flex-wrap">
+              <div className="flex gap-2 flex-wrap items-center">
                 {selectedOppCategory && (
                   <span className="text-xs px-2 py-0.5 rounded-full" style={{background: (CAT_COLORS[selectedOppCategory] || '#94a3b8') + '22', color: CAT_COLORS[selectedOppCategory] || '#94a3b8'}}>
                     {getCategoryLabel(selectedOppCategory)}
                   </span>
                 )}
+                {selectedBiz && (
+                  <button onClick={() => setSelectedBiz(null)} className="text-xs text-muted-foreground hover:text-foreground transition-colors">✕ Close panel</button>
+                )}
               </div>
             </div>
-            <div ref={mapRef} className="h-[500px] w-full map-container" />
+            <div className="flex flex-col lg:flex-row">
+              <div ref={mapRef} className="h-[500px] w-full lg:flex-1 map-container" />
+              {selectedBiz && (
+                <div className="w-full lg:w-[300px] border-t lg:border-t-0 lg:border-l border-border bg-card p-4 overflow-y-auto" style={{maxHeight: '500px'}}>
+                  <div className="flex items-start justify-between mb-3">
+                    <div>
+                      <div className="font-bold text-sm text-foreground leading-tight">{selectedBiz.name}</div>
+                      <div className="mt-1 inline-block text-[10px] px-2 py-0.5 rounded-full" style={{background: selectedBiz.color + '22', color: selectedBiz.color}}>{selectedBiz.categoryLabel}</div>
+                    </div>
+                    <button onClick={() => setSelectedBiz(null)} className="text-muted-foreground hover:text-foreground text-lg leading-none">✕</button>
+                  </div>
+                  <div className="space-y-2.5 text-xs">
+                    {selectedBiz.phone && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-muted-foreground w-5 text-center">📞</span>
+                        <a href={'tel:' + selectedBiz.phone} className="text-blue-400 hover:underline font-medium">{selectedBiz.phone}</a>
+                      </div>
+                    )}
+                    {selectedBiz.email && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-muted-foreground w-5 text-center">✉️</span>
+                        <a href={'mailto:' + selectedBiz.email} className="text-blue-400 hover:underline break-all">{selectedBiz.email}</a>
+                      </div>
+                    )}
+                    {selectedBiz.website && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-muted-foreground w-5 text-center">🌐</span>
+                        <a href={selectedBiz.website} target="_blank" rel="noopener" className="text-blue-400 hover:underline truncate block max-w-[220px]">{selectedBiz.website.replace(/^https?:\/\//, '')}</a>
+                      </div>
+                    )}
+                    {selectedBiz.address && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-muted-foreground w-5 text-center">📍</span>
+                        <span className="text-muted-foreground">{selectedBiz.address}</span>
+                      </div>
+                    )}
+                    {(selectedBiz.facebook || selectedBiz.instagram) && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-muted-foreground w-5 text-center">📱</span>
+                        <div className="flex gap-1.5">
+                          {selectedBiz.facebook && <a href={selectedBiz.facebook} target="_blank" rel="noopener" className="text-[10px] px-2 py-0.5 rounded bg-blue-500/15 text-blue-400 hover:bg-blue-500/25">Facebook</a>}
+                          {selectedBiz.instagram && <a href={selectedBiz.instagram} target="_blank" rel="noopener" className="text-[10px] px-2 py-0.5 rounded bg-pink-500/15 text-pink-400 hover:bg-pink-500/25">Instagram</a>}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="mt-4 pt-3 border-t border-border flex gap-2">
+                    <a href={'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(selectedBiz.name + ' ' + selectedBiz.address)} target="_blank" rel="noopener" className="flex-1 text-center text-[10px] py-1.5 rounded bg-blue-600 text-white font-semibold hover:bg-blue-700 transition-colors">📍 Google Maps</a>
+                    <a href={'https://www.openstreetmap.org/?mlat=' + selectedBiz.lat + '&mlon=' + selectedBiz.lon + '#map=17/' + selectedBiz.lat + '/' + selectedBiz.lon} target="_blank" rel="noopener" className="flex-1 text-center text-[10px] py-1.5 rounded bg-muted text-muted-foreground font-semibold hover:bg-muted/80 transition-colors">OpenStreetMap</a>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Selected category detail */}

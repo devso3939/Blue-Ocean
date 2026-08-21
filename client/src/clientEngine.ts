@@ -796,6 +796,11 @@ function extractFromHtml(html: string, b: Business): void {
       if (geoM) b.phone = geoM[0].trim();
     }
     if (!b.phone) {
+      // Armenian format
+      const armM = html.match(/\+374\s?\d{2}\s?\d{2}\s?\d{2}\s?\d{2}/);
+      if (armM) b.phone = armM[0].trim();
+    }
+    if (!b.phone) {
       const phM = html.match(/(?:\+?\d[\d\s\-\.\(\)]{7,18})/g);
       if (phM) {
         for (const p of phM) {
@@ -803,6 +808,11 @@ function extractFromHtml(html: string, b: Business): void {
           if (digits.length >= 8 && digits.length <= 15 && !JUNK.test(p)) { b.phone = p.trim(); break; }
         }
       }
+    }
+    // Also look for labeled phone patterns
+    if (!b.phone) {
+      const labeledPh = html.match(/(?:phone|tel|telephone|mobile|cell|fax)\s*[:;]\s*([+\d][\d\s\-\.()]{7,18})/i);
+      if (labeledPh && labeledPh[1].replace(/[^\d]/g, '').length >= 8) b.phone = labeledPh[1].trim();
     }
   }
 
@@ -838,6 +848,16 @@ function extractFromHtml(html: string, b: Business): void {
     if (!b.email) {
       const labelM = html.match(/(?:email|e-mail|mail|contact)\s*[:;]\s*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
       if (labelM && !JUNK.test(labelM[1])) b.email = labelM[1];
+    }
+    // Extract from data-email attributes
+    if (!b.email) {
+      const dataEmailM = html.match(/data-email\s*=\s*["']([^"']+@[^"']+)/i);
+      if (dataEmailM && !JUNK.test(dataEmailM[1])) b.email = dataEmailM[1];
+    }
+    // Extract from JavaScript variables
+    if (!b.email) {
+      const jsEmailM = html.match(/['"](\w[\w._%+-]*@[\w.-]+\.[a-zA-Z]{2,})['"]/);
+      if (jsEmailM && !JUNK.test(jsEmailM[1]) && jsEmailM[1].length > 6) b.email = jsEmailM[1];
     }
   }
 
@@ -937,15 +957,22 @@ function getEnglishCityName(name: string): string {
 const EXCLUDE_DOMAINS = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com/i;
 
 // Build a smart search query for any language
-function buildSearchQuery(b: { name: string; address?: string; categoryLabel?: string }): string {
+function buildSearchQuery(b: { name: string; address?: string; categoryLabel?: string; category?: string }): string {
   const nameEn = getEnglishCityName(b.name);
   const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
   const category = b.categoryLabel || '';
-  // Use both original name AND English transliteration for better results
-  const parts = [`"${b.name}"`];
-  if (nameEn !== b.name) parts.push(`"${nameEn}"`);
-  if (cityEn) parts.push(cityEn);
-  if (category) parts.push(category);
+  const isLatin = /^[a-zA-Z\s\-'&.]+$/.test(b.name);
+  const parts: string[] = [];
+  if (isLatin) {
+    parts.push(`"${b.name}"`);
+    if (cityEn) parts.push(cityEn);
+  } else {
+    // Non-Latin: search with English transliteration + category
+    if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
+    if (cityEn) parts.push(cityEn);
+    if (category) parts.push(category);
+    parts.push(`"${b.name}"`);
+  }
   parts.push('phone email website contact');
   return encodeURIComponent(parts.join(' '));
 }
@@ -954,8 +981,14 @@ function buildSearchQuery(b: { name: string; address?: string; categoryLabel?: s
 function buildEmailQuery(b: Business): string {
   const nameEn = getEnglishCityName(b.name);
   const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
-  const parts = [`"${b.name}"`];
-  if (nameEn !== b.name) parts.push(`"${nameEn}"`);
+  const isLatin = /^[a-zA-Z\s\-'&.]+$/.test(b.name);
+  const parts: string[] = [];
+  if (isLatin) {
+    parts.push(`"${b.name}"`);
+  } else {
+    if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
+    parts.push(`"${b.name}"`);
+  }
   if (cityEn) parts.push(cityEn);
   parts.push('email address contact');
   return encodeURIComponent(parts.join(' '));
@@ -965,8 +998,14 @@ function buildEmailQuery(b: Business): string {
 function buildPhoneQuery(b: Business): string {
   const nameEn = getEnglishCityName(b.name);
   const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
-  const parts = [`"${b.name}"`];
-  if (nameEn !== b.name) parts.push(`"${nameEn}"`);
+  const isLatin = /^[a-zA-Z\s\-'&.]+$/.test(b.name);
+  const parts: string[] = [];
+  if (isLatin) {
+    parts.push(`"${b.name}"`);
+  } else {
+    if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
+    parts.push(`"${b.name}"`);
+  }
   if (cityEn) parts.push(cityEn);
   parts.push('phone number telephone call');
   return encodeURIComponent(parts.join(' '));
@@ -1271,6 +1310,64 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     }));
     if (i + BATCH_SIZE < maxEnrich) await wait(1200);
     onProgress?.(83, `Pass 1 (search)… ${Math.min(i + BATCH_SIZE, maxEnrich)}/${maxEnrich} (${enrichedCount} enriched)`);
+  }
+
+  // ── Pass 1b: Category-based search for businesses still missing ALL data ─
+  const stillMissing = allBizList.filter(b => !b.phone && !b.email && !b.website);
+  if (stillMissing.length > 0) {
+    const byCategory = new Map<string, Business[]>();
+    for (const b of stillMissing) {
+      const cat = b.categoryLabel || b.category;
+      if (!byCategory.has(cat)) byCategory.set(cat, []);
+      byCategory.get(cat)!.push(b);
+    }
+    for (const [catLabel, catBizs] of byCategory) {
+      const cityEn = catBizs[0].address ? getEnglishCityName(catBizs[0].address.split(',').pop()?.trim() || '') : '';
+      if (!cityEn) continue;
+      const catQuery = encodeURIComponent(catLabel + ' ' + cityEn + ' phone email contact');
+      try {
+        const r = await fetch('https://corsproxy.io/?' + encodeURIComponent('https://html.duckduckgo.com/html/?q=' + catQuery), {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (r.ok) {
+          const html = await r.text();
+          const resultBlocks = html.match(/class="result__body"[^>]*>[\s\S]*?(?=class="result__body"|$)/g) || [];
+          for (const block of resultBlocks) {
+            const blockText = block.replace(/<[^>]+>/g, ' ');
+            const blockLinks = block.match(/href="([^"]+)"/g) || [];
+            for (const b of catBizs) {
+              const nameEn2 = getEnglishCityName(b.name);
+              const nameLower = (nameEn2 || b.name).toLowerCase();
+              const blockLower = blockText.toLowerCase();
+              if (blockLower.includes(nameLower) || (nameLower.length > 3 && blockLower.includes(nameLower.substring(0, Math.min(nameLower.length, 6))))) {
+                if (!b.phone) {
+                  const phM = blockText.match(/\+?[\d][\d\s\-\.()]{7,18}/);
+                  if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
+                }
+                if (!b.email) {
+                  const emM = blockText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+                  if (emM && !emM[0].includes('example.com')) b.email = emM[0];
+                }
+                if (!b.website) {
+                  for (const link of blockLinks) {
+                    let url = link.replace(/href="/, '').replace(/"$/, '');
+                    const uddg = url.match(/uddg=([^&]+)/);
+                    if (uddg) url = decodeURIComponent(uddg[1]);
+                    if (url.startsWith('http') && !url.match(/google|facebook|instagram|yelp|wikipedia|duckduckgo/i)) {
+                      b.website = url; break;
+                    }
+                  }
+                }
+                if (b.phone || b.email || b.website) break;
+              }
+            }
+          }
+        }
+      } catch {}
+      await wait(1500);
+    }
+    onProgress?.(85, 'Category search complete');
   }
 
   // ── Pass 2: Targeted email search for businesses still missing email ──
