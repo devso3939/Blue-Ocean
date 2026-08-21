@@ -10,6 +10,7 @@ import {
   type Business,
   type DemandSignal,
   type OpportunityResult,
+  enrichCategory,
 } from './clientEngine';
 import CompareView from './CompareView';
 import CountryView from './CountryView';
@@ -84,7 +85,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '3.4.3';
+const APP_VERSION = '3.5.0';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -105,7 +106,10 @@ export default function App() {
   const [selectedOppCategory, setSelectedOppCategory] = useState<string | null>(null);
   const [showAllOpps, setShowAllOpps] = useState(false);
   const [aiInsights, setAiInsights] = useState('');
-  const [selectedBiz, setSelectedBiz] = useState<{name:string;category:string;categoryLabel:string;color:string;phone:string;email:string;website:string;address:string;facebook:string;instagram:string;lat:number;lon:number}|null>(null);
+  const [enrichingCat, setEnrichingCat] = useState<string | null>(null);
+  const [enrichProgress, setEnrichProgress] = useState(0);
+  const [enrichStage, setEnrichStage] = useState('');
+  const [selectedBiz, setSelectedBiz = useState<{name:string;category:string;categoryLabel:string;color:string;phone:string;email:string;website:string;address:string;facebook:string;instagram:string;lat:number;lon:number}|null>(null);
 
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
@@ -826,6 +830,16 @@ export default function App() {
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-bold">📊 {selectedOpp.categoryLabel} — Deep Analysis</h3>
                 <button onClick={() => setSelectedOppCategory(null)} className="text-xs text-muted-foreground hover:text-foreground">✕ Close</button>
+              {enrichingCat !== selectedOppCategory && (
+                <button onClick={enrichSelectedCategory} className="text-xs px-3 py-1 rounded-lg bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30 transition-colors font-semibold">⚡ Enrich Contacts</button>
+              )}
+              {enrichingCat === selectedOppCategory && (
+                <div className="flex items-center gap-2 text-xs text-emerald-400">
+                  <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  {enrichStage}
+                  <span className="font-mono">{enrichProgress}%</span>
+                </div>
+              )}
               </div>
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-4">
                 <div className="rounded-lg bg-muted/50 p-3">
