@@ -1012,16 +1012,20 @@ function buildSearchQuery(b: { name: string; address?: string; categoryLabel?: s
   const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
   const category = b.categoryLabel || '';
   const isLatin = /^[a-zA-Z\s\-'&.]+$/.test(b.name);
+  // Extract street from address (often in Latin or transliteratable)
+  const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
+  const streetEn = getEnglishCityName(street);
   const parts: string[] = [];
   if (isLatin) {
     parts.push(`"${b.name}"`);
     if (cityEn) parts.push(cityEn);
   } else {
-    // Non-Latin: search with English transliteration + category
-    if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
+    // Non-Latin: search by street + category + city (NOT by Georgian name)
+    if (streetEn && streetEn !== street) parts.push(`"${streetEn}"`);
     if (cityEn) parts.push(cityEn);
     if (category) parts.push(category);
-    parts.push(`"${b.name}"`);
+    // Also add transliterated name as fallback
+    if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
   }
   parts.push('phone email website contact');
   return encodeURIComponent(parts.join(' '));
@@ -1031,13 +1035,17 @@ function buildSearchQuery(b: { name: string; address?: string; categoryLabel?: s
 function buildEmailQuery(b: Business): string {
   const nameEn = getEnglishCityName(b.name);
   const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+  const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
+  const streetEn = getEnglishCityName(street);
+  const category = b.categoryLabel || '';
   const isLatin = /^[a-zA-Z\s\-'&.]+$/.test(b.name);
   const parts: string[] = [];
   if (isLatin) {
     parts.push(`"${b.name}"`);
   } else {
+    if (streetEn && streetEn !== street) parts.push(`"${streetEn}"`);
+    if (category) parts.push(category);
     if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
-    parts.push(`"${b.name}"`);
   }
   if (cityEn) parts.push(cityEn);
   parts.push('email address contact');
@@ -1048,13 +1056,17 @@ function buildEmailQuery(b: Business): string {
 function buildPhoneQuery(b: Business): string {
   const nameEn = getEnglishCityName(b.name);
   const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+  const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
+  const streetEn = getEnglishCityName(street);
+  const category = b.categoryLabel || '';
   const isLatin = /^[a-zA-Z\s\-'&.]+$/.test(b.name);
   const parts: string[] = [];
   if (isLatin) {
     parts.push(`"${b.name}"`);
   } else {
+    if (streetEn && streetEn !== street) parts.push(`"${streetEn}"`);
+    if (category) parts.push(category);
     if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
-    parts.push(`"${b.name}"`);
   }
   if (cityEn) parts.push(cityEn);
   parts.push('phone number telephone call');
@@ -1440,6 +1452,49 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       await wait(1500);
     }
     onProgress?.(85, 'Category search complete');
+  }
+
+  // ── Pass 1d: Address-based search for non-Latin businesses ─
+  const needAddressSearch = allBizList.filter(b => !b.phone && !b.email && !b.website && !/^[a-zA-Z]/.test(b.name));
+  if (needAddressSearch.length > 0) {
+    onProgress?.(86, `Pass 1d (address search)... ${needAddressSearch.length} businesses`);
+    for (let i = 0; i < Math.min(needAddressSearch.length, 50); i += BATCH_SIZE) {
+      const batch = needAddressSearch.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (b) => {
+        try {
+          const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
+          const streetEn = getEnglishCityName(street);
+          const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+          const category = b.categoryLabel || '';
+          if (!streetEn || streetEn === street) return;
+          const q = encodeURIComponent(streetEn + ' ' + cityEn + ' ' + category + ' phone email');
+          const ddgR = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: AbortSignal.timeout(8000),
+          });
+          if (ddgR.ok) extractFromHtml(await ddgR.text(), b);
+          if (!b.phone || !b.email) {
+            const bingResults = await searchBing(q);
+            for (const res of bingResults) {
+              const text = res.snippet + ' ' + res.title;
+              if (!b.phone) {
+                const phM = text.match(/\+?[\d][\d\s\-\.()]{7,18}/);
+                if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
+              }
+              if (!b.email) {
+                const emM = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+                if (emM && !emM[0].includes('example.com')) b.email = emM[0];
+              }
+              if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com')) {
+                b.website = res.url;
+              }
+              if (b.phone && b.email) break;
+            }
+          }
+        } catch {}
+      }));
+      if (i + BATCH_SIZE < needAddressSearch.length) await wait(1200);
+    }
   }
 
   // ── Pass 2: Targeted email search for businesses still missing email ──

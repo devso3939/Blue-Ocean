@@ -84,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '3.4.2';
+const APP_VERSION = '3.4.3';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -113,10 +113,17 @@ export default function App() {
   const mapReadyRef = useRef(false);
 
   // Listen for map pin clicks
+  const bizPanelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const handler = () => {
       const b = (window as any).__selectedBiz;
-      if (b) setSelectedBiz(b);
+      if (b) {
+        setSelectedBiz(b);
+        // Scroll panel into view after render
+        setTimeout(() => {
+          bizPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }, 100);
+      }
     };
     window.addEventListener('biz-click', handler);
     return () => window.removeEventListener('biz-click', handler);
@@ -204,9 +211,11 @@ export default function App() {
         map.on('mouseenter', 'biz-labels', () => { map.getCanvas().style.cursor = 'pointer'; });
         map.on('mouseleave', 'biz-labels', () => { map.getCanvas().style.cursor = ''; });
         // Click handler on either layer
+        let lastClickTime = 0;
         const handleBizClick = (e: any) => {
-          if (e.defaultPrevented) return;
-          e.preventDefault();
+          const now = Date.now();
+          if (now - lastClickTime < 100) return; // Debounce double-fire
+          lastClickTime = now;
           const f = e.features?.[0];
           if (!f) return;
           const p = f.properties;
@@ -779,7 +788,7 @@ export default function App() {
             <div className="flex flex-col">
               <div ref={mapRef} className="h-[420px] w-full map-container" />
               {selectedBiz && (
-                <div className="border-t border-border bg-card/80 backdrop-blur-sm p-3">
+                <div ref={bizPanelRef} className="border-t border-border bg-card/80 backdrop-blur-sm p-3">
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2 min-w-0">
                       <span className="inline-block w-2.5 h-2.5 rounded-full flex-shrink-0" style={{background: selectedBiz.color}} />
