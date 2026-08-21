@@ -1785,6 +1785,84 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
 }
 
 
+// ─── Detail-Mode Enrichment ─────────────────────────────────
+export async function enrichCategory(
+  businesses: Business[],
+  onProgress?: (pct: number, msg: string) => void,
+): Promise<Business[]> {
+  if (businesses.length === 0) return businesses;
+  const BATCH_SIZE = 8;
+  const total = businesses.length;
+  onProgress?.(0, 'Enriching ' + total + ' businesses...');
+  for (let i = 0; i < Math.min(total, 150); i += BATCH_SIZE) {
+    const batch = businesses.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map(async (b) => {
+      try {
+        const q = buildSearchQuery(b);
+        const ddgP = fetch('https://corsproxy.io/?' + encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q), {
+          headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(10000),
+        }).then(async r => { if (r.ok) extractFromHtml(await r.text(), b); }).catch(() => {});
+        const braveP = BRAVE_API_KEY ? fetch('https://api.search.brave.com/res/v1/web/search?q=' + q + '&count=3', {
+          headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
+          signal: AbortSignal.timeout(8000),
+        }).then(async r => {
+          if (!r.ok) return;
+          const data = await r.json();
+          for (const res of (data.web?.results || [])) {
+            extractFromText((res.description || '') + ' ' + (res.title || ''), b);
+            if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com')) b.website = res.url;
+          }
+        }).catch(() => {}) : Promise.resolve();
+        await Promise.all([ddgP, braveP]);
+      } catch {}
+    }));
+    if (i + BATCH_SIZE < total) await wait(1200);
+    onProgress?.(Math.min(40, Math.round((i + BATCH_SIZE) / total * 40)), 'Search... ' + Math.min(i + BATCH_SIZE, total) + '/' + total);
+  }
+  const withWebsite = businesses.filter(b => b.website && (!b.email || !b.phone || !b.facebook));
+  if (withWebsite.length > 0) {
+    onProgress?.(45, 'Scraping ' + withWebsite.length + ' websites...');
+    for (let i = 0; i < Math.min(withWebsite.length, 80); i += BATCH_SIZE) {
+      const batch = withWebsite.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (b) => { await enrichFromWebsiteDeep(b); if (!b.email) await scrapeContactPageForEmail(b); }));
+      if (i + BATCH_SIZE < withWebsite.length) await wait(800);
+    }
+  }
+  const needAddress = businesses.filter(b => !b.phone && !b.email && !b.website && !/^[a-zA-Z]/.test(b.name));
+  if (needAddress.length > 0) {
+    onProgress?.(60, 'Address search... ' + needAddress.length);
+    for (let i = 0; i < Math.min(needAddress.length, 50); i += BATCH_SIZE) {
+      const batch = needAddress.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (b) => {
+        try {
+          const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
+          const streetEn = getEnglishCityName(street);
+          const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+          if (!streetEn || streetEn === street) return;
+          const q = encodeURIComponent(streetEn + ' ' + cityEn + ' ' + (b.categoryLabel || '') + ' phone email');
+          const r = await fetch('https://corsproxy.io/?' + encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q), {
+            headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(8000),
+          });
+          if (r.ok) extractFromHtml(await r.text(), b);
+        } catch {}
+      }));
+      if (i + BATCH_SIZE < needAddress.length) await wait(1200);
+    }
+  }
+  const noWebsite = businesses.filter(b => !b.website);
+  for (let i = 0; i < Math.min(noWebsite.length, 30); i += BATCH_SIZE) {
+    const batch = noWebsite.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map(b => probeDomains(b)));
+    if (i + BATCH_SIZE < noWebsite.length) await wait(500);
+  }
+  for (const b of businesses.filter(b => b.website && !b.email)) {
+    const guesses = guessEmailsFromDomain(b.website);
+    if (guesses.length > 0) b.email = guesses[0];
+  }
+  onProgress?.(100, 'Enrichment complete!');
+  return businesses;
+}
+
 // ─── AI-Powered Opportunity Analysis ───────────────────────────
 // Uses Hugging Face free inference API for market analysis
 export async function getAIAnalysis(
