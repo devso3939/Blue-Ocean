@@ -1371,8 +1371,6 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   }
 
   // English city name for enrichment passes
-    }
-  }
 
   onProgress?.(80, `Found ${totalBiz} businesses \u2014 quick scan...`);
   // FAST MODE: Nominatim only. Deep enrichment in enrichCategory().
