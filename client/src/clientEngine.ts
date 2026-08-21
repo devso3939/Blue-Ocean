@@ -1228,52 +1228,6 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     }
   }
 
-// ─── Wikidata Enrichment (free, high-quality structured data) ──────
-// Queries Wikidata SPARQL for business contact info
-async function enrichFromWikidata(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
-  const NEEDS = businesses.filter(b => !b.phone || !b.email || !b.website);
-  if (NEEDS.length === 0) return;
-  const BATCH = 5;
-  const max = Math.min(NEEDS.length, 100);
-  let found = 0;
-  for (let i = 0; i < max; i += BATCH) {
-    const batch = NEEDS.slice(i, i + BATCH);
-    await Promise.all(batch.map(async (b) => {
-      try {
-        // Search Wikidata for the business by name
-        const query = `SELECT ?item ?itemLabel ?phone ?email ?website ?facebook ?instagram WHERE {
-          ?item rdfs:label "${b.name}"@en .
-          OPTIONAL { ?item wdt:P1329 ?phone . }
-          OPTIONAL { ?item wdt:P968 ?email . }
-          OPTIONAL { ?item wdt:P856 ?website . }
-          OPTIONAL { ?item wdt:P2013 ?facebook . }
-          OPTIONAL { ?item wdt:P2003 ?instagram . }
-          SERVICE wikibase:label { bd:serviceParam wikibase:language "en" . }
-        } LIMIT 3`;
-        const url = `https://query.wikidata.org/sparql?query=${encodeURIComponent(query)}&format=json`;
-        const r = await fetch(url, {
-          headers: { 'Accept': 'application/json', 'User-Agent': 'BlueOcean/3.3' },
-          signal: AbortSignal.timeout(8000),
-        });
-        if (!r.ok) return;
-        const data = await r.json();
-        const bindings = data.results?.bindings || [];
-        for (const bind of bindings) {
-          if (!b.phone && bind.phone?.value) { b.phone = bind.phone.value; found++; }
-          if (!b.email && bind.email?.value) { b.email = bind.email.value; found++; }
-          if (!b.website && bind.website?.value) { b.website = bind.website.value; found++; }
-          if (!b.facebook && bind.facebook?.value) { b.facebook = bind.facebook.value; found++; }
-          if (!b.instagram && bind.instagram?.value) { b.instagram = bind.instagram.value; found++; }
-        }
-      } catch {}
-    }));
-    if (i + BATCH < max) await wait(1500);
-    onProgress?.(82, `Wikidata enrichment… ${Math.min(i + BATCH, max)}/${max} (${found} found)`);
-  }
-}
-
-  // ── Enrichment Layer 1.5: Wikidata structured data ──
-  await enrichFromWikidata(allBizList, onProgress);
 
   onProgress?.(80, `Found ${totalBiz} businesses — enriching data in parallel…`);
 
