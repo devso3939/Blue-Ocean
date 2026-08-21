@@ -1785,43 +1785,6 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
 }
 
 
-// ─── Detail-Mode Enrichment ─────────────────────────────────
-export async function deepEnrichCategory(
-  businesses: Business[],
-  onProgress?: (pct: number, msg: string) => void,
-): Promise<Business[]> {
-  if (businesses.length === 0) return businesses;
-  const BATCH_SIZE = 8;
-  const total = businesses.length;
-  onProgress?.(0, 'Enriching ' + total + ' businesses...');
-  for (let i = 0; i < Math.min(total, 150); i += BATCH_SIZE) {
-    const batch = businesses.slice(i, i + BATCH_SIZE);
-    await Promise.all(batch.map(async (b) => {
-      try {
-        const q = buildSearchQuery(b);
-        const ddgP = fetch('https://corsproxy.io/?' + encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q), {
-          headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(10000),
-        }).then(async r => { if (r.ok) extractFromHtml(await r.text(), b); }).catch(() => {});
-        const braveP = BRAVE_API_KEY ? fetch('https://api.search.brave.com/res/v1/web/search?q=' + q + '&count=3', {
-          headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
-          signal: AbortSignal.timeout(8000),
-        }).then(async r => {
-          if (!r.ok) return;
-          const data = await r.json();
-          for (const res of (data.web?.results || [])) {
-            extractFromText((res.description || '') + ' ' + (res.title || ''), b);
-            if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com')) b.website = res.url;
-          }
-        }).catch(() => {}) : Promise.resolve();
-        await Promise.all([ddgP, braveP]);
-      } catch {}
-    }));
-    if (i + BATCH_SIZE < total) await wait(1200);
-  }
-  onProgress?.(100, 'Done!');
-  return businesses;
-}
-
 // ─── AI-Powered Opportunity Analysis ───────────────────────────
 // Uses Hugging Face free inference API for market analysis
 export async function getAIAnalysis(

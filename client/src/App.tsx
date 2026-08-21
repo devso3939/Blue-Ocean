@@ -10,7 +10,6 @@ import {
   type Business,
   type DemandSignal,
   type OpportunityResult,
-  enrichCategory as deepEnrichCategory,
 } from './clientEngine';
 import CompareView from './CompareView';
 import CountryView from './CountryView';
@@ -419,7 +418,8 @@ export default function App() {
     setEnrichProgress(0);
     setEnrichStage('Starting...');
     try {
-      const enriched = await deepEnrichCategory(catBizs, (pct, msg) => { setEnrichProgress(pct); setEnrichStage(msg); });
+      // TODO: enrichCategory not yet available
+      setEnrichStage('Coming soon...');
       const newBiz = new Map(businesses);
       newBiz.set(selectedOppCategory, enriched);
       setBusinesses(newBiz);
