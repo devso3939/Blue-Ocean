@@ -1306,41 +1306,6 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   // English city name for enrichment passes
   const selectedCityEn = allBizList.length > 0 ? getEnglishCityName((allBizList[0].address || '').split(',').pop()?.trim() || '') : '';
 
-  if (allBizList.length > 0) {
-    const BATCH = 10;
-    const maxEnrich = Math.min(allBizList.length, 200);
-    for (let i = 0; i < maxEnrich; i += BATCH) {
-      const batch = allBizList.slice(i, i + BATCH);
-      const promises = batch.map(async (b) => {
-        try {
-          const nominatimRevUrl = `https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=json&zoom=18&addressdetails=1&extratags=1&accept-language=en`;
-          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(nominatimRevUrl)}`, {
-            headers: { 'Accept': 'application/json' }
-          });
-          if (r.ok) {
-            const d = await r.json();
-            // Fill address if missing
-            if (!b.address && d.address) {
-              const a = d.address;
-              const parts = [a.road || a.pedestrian, a.house_number, a.suburb || a.neighbourhood || a.city_district, a.city || a.town || a.village].filter(Boolean);
-              b.address = parts.join(', ') || d.display_name?.split(',').slice(0, 3).join(',') || '';
-            }
-            // Always try to fill contact data from extratags
-            if (!b.phone) b.phone = d.extratags?.phone || d.extratags?.['contact:phone'] || d.extratags?.['contact:mobile'] || '';
-            if (!b.email) b.email = d.extratags?.email || d.extratags?.['contact:email'] || '';
-            if (!b.website) b.website = d.extratags?.website || d.extratags?.['contact:website'] || d.extratags?.url || '';
-            if (!b.facebook) b.facebook = d.extratags?.['contact:facebook'] || d.extratags?.facebook || '';
-            if (!b.instagram) b.instagram = d.extratags?.['contact:instagram'] || d.extratags?.instagram || '';
-          }
-        } catch {}
-      });
-      await Promise.all(promises);
-      // Nominatim rate limit: 1 req/sec
-      if (i + BATCH < maxEnrich) await wait(1100);
-      onProgress?.(75, `Enriching contact data… ${Math.min(i + BATCH, maxEnrich)}/${maxEnrich}`);
-    }
-  }
-
     onProgress?.(80, `Found ${totalBiz} businesses - quick scan...`);
   // FAST MODE: Nominatim only. Deep enrichment in enrichCategory().
   const BATCH = 10;
