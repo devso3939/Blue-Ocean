@@ -84,7 +84,7 @@ const CAT_COLORS: Record<string, string> = {
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
 };
 
-const APP_VERSION = '3.3.1';
+const APP_VERSION = '3.3.2';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -107,6 +107,7 @@ export default function App() {
   const [aiInsights, setAiInsights] = useState('');
 
   const mapRef = useRef<HTMLDivElement>(null);
+  const popupRef = useRef<any>(null);
   const mapInstanceRef = useRef<any>(null);
   const maplibreRef = useRef<any>(null);
   const mapReadyRef = useRef(false);
@@ -194,6 +195,8 @@ export default function App() {
         map.on('mouseleave', 'biz-labels', () => { map.getCanvas().style.cursor = ''; });
         // Click handler on either layer
         const showPopup = (e: any) => {
+          // Close any existing popup first
+          if (popupRef.current) { popupRef.current.remove(); popupRef.current = null; }
           const f = e.features?.[0];
           if (!f) return;
           const p = f.properties;
@@ -211,19 +214,35 @@ export default function App() {
           if (p.facebook) socials.push('<a href="' + p.facebook + '" target="_blank" style="color:#60a5fa;font-size:8px;text-decoration:none;background:rgba(96,165,250,0.12);padding:1px 4px;border-radius:3px">FB</a>');
           if (p.instagram) socials.push('<a href="' + p.instagram + '" target="_blank" style="color:#e879f9;font-size:8px;text-decoration:none;background:rgba(232,121,249,0.12);padding:1px 4px;border-radius:3px">IG</a>');
 
-          const html = '<div style="padding:8px 10px;max-width:220px;font-family:system-ui,sans-serif;line-height:1.3">'
-            + '<div style="font-weight:700;font-size:11px;color:#f1f5f9;margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (p.name || '') + '</div>'
-            + '<div style="display:inline-block;background:' + (p.color || '#64748b') + '25;color:' + (p.color || '#64748b') + ';font-size:8px;padding:1px 5px;border-radius:99px;margin-bottom:4px">' + (p.categoryLabel || '') + '</div>'
-            + info.map(s => '<div style="margin:2px 0">' + s + '</div>').join('')
-            + (socials.length ? '<div style="display:flex;gap:3px;margin-top:3px">' + socials.join(' ') + '</div>' : '')
-            + '<div style="margin-top:5px;padding-top:4px;border-top:1px solid #1e293b;display:flex;gap:3px">'
-            + '<a href="' + gmapsUrl + '" target="_blank" style="background:#1a73e8;color:white;padding:2px 6px;border-radius:3px;font-size:9px;font-weight:600;text-decoration:none">Maps</a>'
-            + '<a href="' + osmUrl + '" target="_blank" style="background:#1e293b;color:#94a3b8;padding:2px 6px;border-radius:3px;font-size:9px;font-weight:600;text-decoration:none">OSM</a>'
+          // Build compact popup — proportional, all data visible
+          const truncate = (s: string, n: number) => s.length > n ? s.slice(0, n) + '…' : s;
+          const catColor = p.color || '#64748b';
+          const html = '<div style="padding:6px 8px;max-width:200px;font-family:system-ui,-apple-system,sans-serif;line-height:1.35">'
+            // Name — always visible, truncated if too long
+            + '<div style="font-weight:700;font-size:11px;color:#f1f5f9;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' + (p.name || '') + '">' + truncate(p.name || '', 28) + '</div>'
+            // Category badge
+            + '<div style="display:inline-block;background:' + catColor + '22;color:' + catColor + ';font-size:8px;padding:1px 5px;border-radius:99px;margin-bottom:3px;font-weight:600">' + (p.categoryLabel || '') + '</div>'
+            // Phone — clickable, compact
+            + (p.phone ? '<div style="margin:1px 0"><a href="tel:' + p.phone + '" style="color:#93c5fd;text-decoration:none;font-size:10px">📞 ' + truncate(String(p.phone), 18) + '</a></div>' : '')
+            // Email — compact
+            + (p.email ? '<div style="margin:1px 0;color:#94a3b8;font-size:9px;word-break:break-all">✉️ ' + truncate(String(p.email), 30) + '</div>' : '')
+            // Website — clickable, truncated
+            + (p.website ? '<div style="margin:1px 0"><a href="' + p.website + '" target="_blank" style="color:#93c5fd;text-decoration:none;font-size:9px">🌐 ' + truncate(String(p.website).replace(/^https?:\/\//, ''), 22) + '</a></div>' : '')
+            // Address — compact
+            + (p.address ? '<div style="margin:1px 0;color:#64748b;font-size:8px">📍 ' + truncate(String(p.address), 35) + '</div>' : '')
+            // Social badges — inline
+            + (socials.length ? '<div style="display:flex;gap:3px;margin-top:2px">' + socials.join(' ') + '</div>' : '')
+            // Action buttons — compact row
+            + '<div style="margin-top:4px;padding-top:3px;border-top:1px solid rgba(30,41,59,0.6);display:flex;gap:3px">'
+            + '<a href="' + gmapsUrl + '" target="_blank" style="background:#1a73e8;color:white;padding:2px 5px;border-radius:3px;font-size:8px;font-weight:600;text-decoration:none">📍 Maps</a>'
+            + '<a href="' + osmUrl + '" target="_blank" style="background:#1e293b;color:#94a3b8;padding:2px 5px;border-radius:3px;font-size:8px;font-weight:600;text-decoration:none">OSM</a>'
             + '</div></div>';
-          new maplibregl.Popup({ maxWidth: '240px', offset: 10, closeButton: true, closeOnClick: true })
+          const popup = new maplibregl.Popup({ maxWidth: '220px', offset: 8, closeButton: true, closeOnClick: true, className: 'blue-ocean-popup' })
             .setLngLat(coords)
             .setHTML(html)
             .addTo(map);
+          popupRef.current = popup;
+          popup.on('close', () => { popupRef.current = null; });
         };
         map.on('click', 'biz-circles', showPopup);
         map.on('click', 'biz-labels', showPopup);
@@ -588,7 +607,7 @@ export default function App() {
       </header>
 
       {/* Hero */}
-      <section className="relative overflow-hidden">
+      <section className="relative">
         <div className="pointer-events-none absolute inset-0 opacity-30" style={{backgroundImage:'radial-gradient(circle at 50% 0%, hsl(250 80% 70% / 0.15), transparent 60%)'}} />
         <div className="relative mx-auto max-w-3xl px-4 pb-8 pt-12 text-center">
           <h1 className="text-4xl font-extrabold tracking-tight sm:text-5xl">
@@ -763,7 +782,7 @@ export default function App() {
           )}
 
           {/* Map */}
-          <div className="rounded-xl border border-border bg-card overflow-hidden">
+          <div className="rounded-xl border border-border bg-card" style={{overflow: "visible"}}>
             <div className="px-5 py-3 border-b border-border flex items-center justify-between">
               <h3 className="text-sm font-semibold">
                 {selectedOppCategory
@@ -833,7 +852,7 @@ export default function App() {
 
           {/* Business List — only in single-category mode */}
           {selectedOppCategory && categoryBusinesses.length > 0 && (
-            <div className="rounded-xl border border-border bg-card overflow-hidden">
+            <div className="rounded-xl border border-border bg-card" style={{overflow: "visible"}}>
               <div className="px-5 py-3 border-b border-border flex items-center justify-between gap-4">
                 <h3 className="text-sm font-semibold">
                   {getCategoryLabel(selectedOppCategory)} Businesses · {categoryBusinesses.length} found
