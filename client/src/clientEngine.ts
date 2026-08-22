@@ -361,7 +361,8 @@ export async function queryBusinesses(
   lon: number,
   radiusMeters: number = 10000,
   onProgress?: (pct: number, msg: string) => void,
-  categoryFilter?: string
+  categoryFilter?: string,
+  skipEnrichment?: boolean
 ): Promise<Map<string, Business[]>> {
   const results = new Map<string, Business[]>();
   const south = lat - radiusMeters / 111000;
@@ -1297,7 +1298,13 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   }
 }
 
-// ── Enrichment: reverse-geocode ALL businesses for contact data ──
+// ── Skip enrichment in discovery mode (fast count only) ──
+  if (skipEnrichment) {
+    onProgress?.(100, `Found ${totalBiz} businesses`);
+    return results;
+  }
+
+  // ── Enrichment: reverse-geocode ALL businesses for contact data ──
   const allBizList: Business[] = [];
   for (const bizs of results.values()) {
     for (const b of bizs) allBizList.push(b);
@@ -1782,6 +1789,208 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   }
 
   return results;
+}
+
+
+// ─── Enrich a subset of businesses (for detail mode) ────────────
+export async function enrichBusinesses(
+  businesses: Map<string, Business[]>,
+  onProgress?: (pct: number, msg: string) => void
+): Promise<void> {
+  const allBizList: Business[] = [];
+  for (const bizs of businesses.values()) {
+    for (const b of bizs) allBizList.push(b);
+  }
+  if (allBizList.length === 0) return;
+
+  const BATCH_SIZE = 8;
+  const selectedCityEn = allBizList.length > 0 ? getEnglishCityName((allBizList[0].address || '').split(',').pop()?.trim() || '') : '';
+
+  // Phase 1: Nominatim reverse-geocode for addresses + contact data
+  const BATCH = 10;
+  const maxEnrich = Math.min(allBizList.length, 200);
+  for (let i = 0; i < maxEnrich; i += BATCH) {
+    const batch = allBizList.slice(i, i + BATCH);
+    const promises = batch.map(async (b) => {
+      try {
+        const nominatimRevUrl = `https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=json&zoom=18&addressdetails=1&extratags=1&accept-language=en`;
+        const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(nominatimRevUrl)}`, {
+          headers: { 'Accept': 'application/json' }
+        });
+        if (r.ok) {
+          const d = await r.json();
+          if (!b.address && d.address) {
+            const a = d.address;
+            const parts = [a.road || a.pedestrian, a.house_number, a.suburb || a.neighbourhood || a.city_district, a.city || a.town || a.village].filter(Boolean);
+            b.address = parts.join(', ') || d.display_name?.split(',').slice(0, 3).join(',') || '';
+          }
+          if (!b.phone) b.phone = d.extratags?.phone || d.extratags?.['contact:phone'] || d.extratags?.['contact:mobile'] || '';
+          if (!b.email) b.email = d.extratags?.email || d.extratags?.['contact:email'] || '';
+          if (!b.website) b.website = d.extratags?.website || d.extratags?.['contact:website'] || d.extratags?.url || '';
+          if (!b.facebook) b.facebook = d.extratags?.['contact:facebook'] || d.extratags?.facebook || '';
+          if (!b.instagram) b.instagram = d.extratags?.['contact:instagram'] || d.extratags?.instagram || '';
+        }
+      } catch {}
+    });
+    await Promise.all(promises);
+    if (i + BATCH < maxEnrich) await wait(1100);
+    onProgress?.(20, `Enriching contact data… ${Math.min(i + BATCH, maxEnrich)}/${maxEnrich}`);
+  }
+
+  // Phase 2: DDG + Brave + Bing in parallel
+  const NEEDS = allBizList.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
+  const maxSearch = Math.min(NEEDS.length, 200);
+  for (let i = 0; i < maxSearch; i += BATCH_SIZE) {
+    const batch = NEEDS.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map(async (b) => {
+      try {
+        const q = buildSearchQuery(b);
+        const ddgP = fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          signal: AbortSignal.timeout(10000),
+        }).then(async r => { if (r.ok) extractFromHtml(await r.text(), b); }).catch(() => {});
+        const braveP = BRAVE_API_KEY ? fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=3`, {
+          headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
+          signal: AbortSignal.timeout(8000),
+        }).then(async r => {
+          if (!r.ok) return;
+          const data = await r.json();
+          for (const res of (data.web?.results || [])) {
+            extractFromText((res.description || '') + ' ' + (res.title || ''), b);
+            if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com')) b.website = res.url;
+          }
+        }).catch(() => {}) : Promise.resolve();
+        const bingP = searchBing(q).then(results => {
+          for (const res of results) {
+            if (!b.phone) {
+              const phM = (res.snippet + ' ' + res.title).match(/\+?[\d][\d\s\-\.()]{7,18}/);
+              if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
+            }
+            if (!b.email) {
+              const emM = (res.snippet + ' ' + res.title).match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+              if (emM && !emM[0].includes('example.com')) b.email = emM[0];
+            }
+            if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com')) b.website = res.url;
+          }
+        }).catch(() => {});
+        await Promise.all([ddgP, braveP, bingP]);
+        if (!b.website) await probeDomains(b);
+        if (b.website && (!b.email || !b.phone || !b.facebook)) await enrichFromWebsiteDeep(b);
+      } catch {}
+    }));
+    if (i + BATCH_SIZE < maxSearch) await wait(1200);
+    onProgress?.(50, `Search enrichment… ${Math.min(i + BATCH_SIZE, maxSearch)}/${maxSearch}`);
+  }
+
+  // Phase 3: Contact page scraping
+  const needContact = allBizList.filter(b => !b.email && b.website);
+  if (needContact.length > 0) {
+    for (let i = 0; i < Math.min(needContact.length, 60); i += BATCH_SIZE) {
+      const batch = needContact.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(b => scrapeContactPageForEmail(b)));
+      if (i + BATCH_SIZE < needContact.length) await wait(800);
+    }
+  }
+  onProgress?.(70, 'Scraping contact pages…');
+
+  // Phase 4: Targeted email + phone search
+  const missingEmail = allBizList.filter(b => !b.email);
+  if (missingEmail.length > 0) {
+    for (let i = 0; i < Math.min(missingEmail.length, 80); i += BATCH_SIZE) {
+      const batch = missingEmail.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (b) => {
+        try {
+          const q = buildEmailQuery(b);
+          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: AbortSignal.timeout(8000),
+          });
+          if (r.ok) extractFromHtml(await r.text(), b);
+          if (!b.email && BRAVE_API_KEY) {
+            try {
+              const br = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=2`, {
+                headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
+                signal: AbortSignal.timeout(6000),
+              });
+              if (br.ok) {
+                const bd = await br.json();
+                for (const res of (bd.web?.results || [])) extractFromText((res.description || '') + ' ' + (res.title || ''), b);
+              }
+            } catch {}
+          }
+          if (!b.email && b.website) {
+            const guesses = guessEmailsFromDomain(b.website);
+            if (guesses.length > 0) b.email = guesses[0];
+          }
+        } catch {}
+      }));
+      if (i + BATCH_SIZE < missingEmail.length) await wait(1200);
+    }
+  }
+  onProgress?.(80, 'Email search complete');
+
+  // Phase 5: 2GIS + Yandex for remaining
+  const need2GIS = allBizList.filter(b => !b.phone && !b.email && !b.website);
+  if (need2GIS.length > 0) {
+    for (let i = 0; i < Math.min(need2GIS.length, 40); i += BATCH_SIZE) {
+      const batch = need2GIS.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (b) => {
+        try {
+          const nameEn = getEnglishCityName(b.name);
+          const q = encodeURIComponent((nameEn || b.name) + ' ' + (b.address?.split(',').pop() || ''));
+          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://catalog.api.2gis.com/3.0/items?q=' + q + '&key=rurbbn3446&fields=items.contact_groups')}`,
+            { signal: AbortSignal.timeout(8000) });
+          if (r.ok) {
+            const data = await r.json();
+            for (const item of (data.result?.items || [])) {
+              const itemName = (item.name || '').toLowerCase();
+              const bizName = (nameEn || b.name).toLowerCase();
+              if (itemName.includes(bizName.substring(0, 5)) || bizName.includes(itemName.substring(0, 5))) {
+                if (!b.phone && item.contact_groups) {
+                  for (const grp of item.contact_groups) {
+                    for (const c of (grp.contacts || [])) {
+                      if (c.type === 'phone' && c.value) b.phone = c.value;
+                    }
+                  }
+                }
+                if (!b.website && item.contact_groups) {
+                  for (const grp of item.contact_groups) {
+                    for (const c of (grp.contacts || [])) {
+                      if (c.type === 'website' && c.value && !c.value.includes('2gis.com')) b.website = c.value.startsWith('http') ? c.value : 'https://' + c.value;
+                    }
+                  }
+                }
+                break;
+              }
+            }
+          }
+        } catch {}
+      }));
+      if (i + BATCH_SIZE < need2GIS.length) await wait(1000);
+    }
+  }
+  onProgress?.(90, 'Regional search complete');
+
+  // Phase 6: Social media search
+  const missingSocial = allBizList.filter(b => !b.facebook && !b.instagram && !b.website);
+  if (missingSocial.length > 0) {
+    for (let i = 0; i < Math.min(missingSocial.length, 50); i += BATCH_SIZE) {
+      const batch = missingSocial.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (b) => {
+        try {
+          const cityEn = getEnglishCityName(b.address?.split(',').pop()?.trim() || '');
+          const socialQ = encodeURIComponent(`"${b.name}" ${cityEn} facebook instagram`);
+          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + socialQ)}`, {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: AbortSignal.timeout(8000),
+          });
+          if (r.ok) extractFromHtml(await r.text(), b);
+        } catch {}
+      }));
+      if (i + BATCH_SIZE < missingSocial.length) await wait(1200);
+    }
+  }
+  onProgress?.(100, 'Enrichment complete');
 }
 
 

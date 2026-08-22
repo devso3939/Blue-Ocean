@@ -6,6 +6,7 @@ import {
   computeOpportunities,
   getCategoryLabel,
   getGoogleMapsUrl, getAIAnalysis,
+  enrichBusinesses,
   type CityResult,
   type Business,
   type DemandSignal,
@@ -72,6 +73,15 @@ const POPULAR_CATEGORIES = [
   { id: 'cinema', label: '🎬 Cinema' }, { id: 'car_repair', label: '🔧 Car Repair' },
   { id: 'pet_groomer', label: '🐕 Pet Groomer' }, { id: 'coworking', label: '💻 Coworking Space' },
   { id: 'spa', label: '🧖 Spa' }, { id: 'yoga', label: '🧘 Yoga Studio' },
+  { id: 'web_agency', label: '🌐 Web Agency' }, { id: 'software', label: '⚙️ Software Company' },
+  { id: 'it_consulting', label: '🖥️ IT Consulting' }, { id: 'digital_marketing', label: '📣 Digital Marketing' },
+  { id: 'lawyer', label: '⚖️ Law Firm' }, { id: 'accountant', label: '🧮 Accounting' },
+  { id: 'real_estate', label: '🏠 Real Estate' }, { id: 'insurance', label: '🛡️ Insurance' },
+  { id: 'travel_agency', label: '✈️ Travel Agency' }, { id: 'cleaning', label: '🧹 Cleaning Service' },
+  { id: 'car_wash', label: '🚿 Car Wash' }, { id: 'nail_salon', label: '💅 Nail Salon' },
+  { id: 'laundry', label: '👔 Laundry' }, { id: 'night_club', label: '🎶 Nightclub' },
+  { id: 'car_rental', label: '🚗 Car Rental' }, { id: 'veterinary', label: '🐾 Veterinary' },
+  { id: 'florist', label: '🌸 Florist' }, { id: 'marketplace', label: '🏪 Marketplace' },
 ];
 
 const CAT_COLORS: Record<string, string> = {
@@ -82,9 +92,15 @@ const CAT_COLORS: Record<string, string> = {
   cinema: '#e879f9', car_repair: '#f97316', pet_groomer: '#fb923c', coworking: '#38bdf8',
   spa: '#c084fc', yoga: '#34d399',
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
+  web_agency: '#06b6d4', software: '#3b82f6', it_consulting: '#6366f1',
+  digital_marketing: '#f43f5e', lawyer: '#78716c', accountant: '#a8a29e',
+  real_estate: '#84cc16', insurance: '#14b8a6', travel_agency: '#f59e0b',
+  cleaning: '#22d3ee', car_wash: '#38bdf8', nail_salon: '#f472b6',
+  laundry: '#94a3b8', night_club: '#a855f7', car_rental: '#fb923c',
+  veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '3.4.3';
+const APP_VERSION = '3.5.0';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -106,6 +122,8 @@ export default function App() {
   const [showAllOpps, setShowAllOpps] = useState(false);
   const [aiInsights, setAiInsights] = useState('');
   const [selectedBiz, setSelectedBiz] = useState<{name:string;category:string;categoryLabel:string;color:string;phone:string;email:string;website:string;address:string;facebook:string;instagram:string;lat:number;lon:number}|null>(null);
+  const [enriching, setEnriching] = useState(false);
+  const [enrichProgress, setEnrichProgress] = useState('');
 
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
@@ -311,7 +329,8 @@ export default function App() {
     try {
       const biz = await queryBusinesses(
         selectedCity.lat, selectedCity.lon, 10000,
-        (pct, msg) => { setProgress(pct); setLoadingStage(msg); }
+        (pct, msg) => { setProgress(pct); setLoadingStage(msg); },
+        undefined, true
       );
       setBusinesses(biz);
       setProgress(40);
@@ -406,6 +425,26 @@ export default function App() {
       setLoadingStage('');
     }
   }, [selectedCity, selectedCategory]);
+
+  // Enrich contacts for selected category
+  const enrichCategory = useCallback(async () => {
+    if (!selectedOppCategory || businesses.size === 0) return;
+    setEnriching(true);
+    setEnrichProgress('Starting enrichment…');
+    try {
+      const catBiz = new Map<string, Business[]>();
+      const bizs = businesses.get(selectedOppCategory);
+      if (bizs) catBiz.set(selectedOppCategory, bizs);
+      await enrichBusinesses(catBiz, (pct, msg) => setEnrichProgress(msg));
+      // Force re-render with updated data
+      setBusinesses(new Map(businesses));
+      setEnrichProgress('Done!');
+    } catch (e: any) {
+      setEnrichProgress('Enrichment failed: ' + (e.message || 'unknown'));
+    } finally {
+      setTimeout(() => { setEnriching(false); setEnrichProgress(''); }, 1500);
+    }
+  }, [selectedOppCategory, businesses]);
 
   const allBizCount = Array.from(businesses.values()).reduce((s, a) => s + a.length, 0);
   const displayOpps = showAllOpps ? opportunities : opportunities.slice(0, 25);
@@ -877,13 +916,20 @@ export default function App() {
                 <h3 className="text-sm font-semibold">
                   {getCategoryLabel(selectedOppCategory)} Businesses · {categoryBusinesses.length} found
                 </h3>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <input
                     value={bizSearch}
                     onChange={e => setBizSearch(e.target.value)}
                     placeholder="Search businesses…"
                     className="h-8 w-48 rounded-lg border border-border bg-background px-3 text-xs outline-none focus:ring-2 focus:ring-ring"
                   />
+                  <button
+                    onClick={enrichCategory}
+                    disabled={enriching}
+                    className="h-8 inline-flex items-center gap-1.5 rounded-lg bg-amber-600/20 px-3 text-xs font-medium text-amber-400 hover:bg-amber-600/30 disabled:opacity-40 transition-colors whitespace-nowrap"
+                  >
+                    {enriching ? '⏳ Enriching…' : '🔍 Enrich Contacts'}
+                  </button>
                   <button
                     onClick={downloadCSV}
                     className="h-8 inline-flex items-center gap-1.5 rounded-lg bg-emerald-600/20 px-3 text-xs font-medium text-emerald-400 hover:bg-emerald-600/30 transition-colors whitespace-nowrap"
@@ -892,6 +938,11 @@ export default function App() {
                   </button>
                 </div>
               </div>
+              {enriching && enrichProgress && (
+                <div className="px-5 py-2 border-b border-amber-500/20 bg-amber-500/5">
+                  <div className="text-xs text-amber-400">{enrichProgress}</div>
+                </div>
+              )}
               <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
                 <table className="w-full text-left text-sm">
                   <thead className="sticky top-0 bg-card z-10">
