@@ -101,7 +101,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '3.9.3';
+const APP_VERSION = '3.9.4';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -786,7 +786,7 @@ export default function App() {
               </div>
 
               {/* ── Real-time Enrichment Progress Panel ── */}
-              {enrichProgress && enrichProgress.passNumber > 0 && (
+              {enrichProgress && enrichProgress.percent > 0 && (
                 <div className="mt-3 rounded-lg border border-border bg-card/90 backdrop-blur-sm p-3">
                   {/* Pass progress bar */}
                   <div className="flex items-center justify-between mb-2">
