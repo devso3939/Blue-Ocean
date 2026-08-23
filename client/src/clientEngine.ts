@@ -340,31 +340,31 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
     if (r.ok) return r;
   } catch { /* CORS error or network — try proxies */ }
 
-  // 2) Race multiple CORS proxies — first OK wins, 8s max
+  // 2) Race multiple CORS proxies IN PARALLEL — first OK wins, 8s max
+  // (Promise.any needs ES2021, so we use Promise.race + resolve pattern)
   const proxySignal = AbortSignal.timeout(8000);
   const proxyUrls = [
     'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
     'https://api.allorigins.win/get?url=' + encodeURIComponent(url),
-    'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(url),
   ];
-  try {
-    const result = await Promise.any(
-      proxyUrls.map(async (proxyUrl) => {
-        const r = await fetch(proxyUrl, { headers, signal: proxySignal });
-        if (!r.ok) throw new Error(`${r.status}`);
-        // allorigins /get wraps in {contents: ...} — unwrap
-        if (proxyUrl.includes('/get?')) {
-          const json = await r.json();
-          return new Response(json.contents || '', { status: 200, headers: { 'Content-Type': 'text/html' } });
-        }
-        return r;
-      })
-    );
-    return result;
-  } catch {
-    // All proxies failed or timed out — return empty Response to avoid crashing
-    return new Response('', { status: 0, statusText: 'CORS proxy unavailable' });
-  }
+  return new Promise<Response>((resolve) => {
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; resolve(new Response('', { status: 0, statusText: 'CORS proxy unavailable' })); } };
+    proxySignal.addEventListener('abort', done, { once: true });
+    for (const proxyUrl of proxyUrls) {
+      fetch(proxyUrl, { headers, signal: proxySignal })
+        .then(async r => {
+          if (!r.ok) return;
+          let resp = r;
+          if (proxyUrl.includes('/get?')) {
+            const json = await r.json();
+            resp = new Response(json.contents || '', { status: 200, headers: { 'Content-Type': 'text/html' } });
+          }
+          if (!resolved) { resolved = true; proxySignal.abort(); resolve(resp); }
+        })
+        .catch(() => {});
+    }
+  });
 }
 
 // Direct fetch for services that support CORS (Nominatim, Overpass)
