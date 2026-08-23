@@ -381,7 +381,7 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
 
 // Direct fetch for services that support CORS (Nominatim, Overpass)
 async function directFetch(url: string, init?: RequestInit): Promise<Response> {
-  return fetch(url, { ...init, headers: { 'User-Agent': 'BlueOcean/1.0', ...init?.headers } });
+  return fetch(url, { ...init, headers: { 'User-Agent': 'BlueOcean/3.9.3 (https://devso3939.github.io/Blue-Ocean; contact@blueocean.app)', ...init?.headers } });
 }
 
 // Map category IDs to OSM tag filters for focused queries
@@ -1654,37 +1654,43 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
 
   _ep.activePass = 'Reverse geocoding addresses'; _ep.passNumber = 0; _ep.percent = 70; emitEP();
   if (allBizList.length > 0) {
-    const BATCH = 10;
     const maxEnrich = Math.min(allBizList.length, 200);
-    for (let i = 0; i < maxEnrich; i += BATCH) {
-      const batch = allBizList.slice(i, i + BATCH);
-      const promises = batch.map(async (b) => {
-        try {
-          const nominatimRevUrl = `https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=json&zoom=18&addressdetails=1&extratags=1&accept-language=en`;
-          const r = await directFetch(nominatimRevUrl, {
-            headers: { 'Accept': 'application/json' }
-          });
-          if (r.ok) {
-            const d = await r.json();
-            // Fill address if missing
-            if (!b.address && d.address) {
-              const a = d.address;
-              const parts = [a.road || a.pedestrian, a.house_number, a.suburb || a.neighbourhood || a.city_district, a.city || a.town || a.village].filter(Boolean);
-              b.address = parts.join(', ') || d.display_name?.split(',').slice(0, 3).join(',') || '';
-            }
-            // Always try to fill contact data from extratags
-            if (!b.phone) b.phone = d.extratags?.phone || d.extratags?.['contact:phone'] || d.extratags?.['contact:mobile'] || '';
-            if (!b.email) b.email = d.extratags?.email || d.extratags?.['contact:email'] || '';
-            if (!b.website) b.website = d.extratags?.website || d.extratags?.['contact:website'] || d.extratags?.url || '';
-            if (!b.facebook) b.facebook = d.extratags?.['contact:facebook'] || d.extratags?.facebook || '';
-            if (!b.instagram) b.instagram = d.extratags?.['contact:instagram'] || d.extratags?.instagram || '';
+    // Nominatim strict rate limit: 1 req/sec — send sequentially
+    for (let i = 0; i < maxEnrich; i++) {
+      if (isCancelled()) break;
+      const b = allBizList[i];
+      try {
+        const nominatimRevUrl = `https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=json&zoom=18&addressdetails=1&extratags=1&accept-language=en`;
+        const r = await directFetch(nominatimRevUrl, {
+          headers: { 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(5000),
+        });
+        if (r.ok) {
+          const d = await r.json();
+          if (!b.address && d.address) {
+            const a = d.address;
+            const parts = [a.road || a.pedestrian, a.house_number, a.suburb || a.neighbourhood || a.city_district, a.city || a.town || a.village].filter(Boolean);
+            b.address = parts.join(', ') || d.display_name?.split(',').slice(0, 3).join(',') || '';
           }
-        } catch {}
-      });
-      await Promise.all(promises);
-      // Nominatim rate limit: 1 req/sec
-      if (i + BATCH < maxEnrich) await wait(1100);
-      onProgress?.(75, `Enriching contact data… ${Math.min(i + BATCH, maxEnrich)}/${maxEnrich}`);
+          if (!b.phone) b.phone = d.extratags?.phone || d.extratags?.['contact:phone'] || d.extratags?.['contact:mobile'] || '';
+          if (!b.email) b.email = d.extratags?.email || d.extratags?.['contact:email'] || '';
+          if (!b.website) b.website = d.extratags?.website || d.extratags?.['contact:website'] || d.extratags?.url || '';
+          if (!b.facebook) b.facebook = d.extratags?.['contact:facebook'] || d.extratags?.facebook || '';
+          if (!b.instagram) b.instagram = d.extratags?.['contact:instagram'] || d.extratags?.instagram || '';
+        } else if (r.status === 429) {
+          // Rate limited — back off 2 seconds
+          await wait(2000);
+          i--; // retry this business
+          continue;
+        }
+      } catch {}
+      // 1.1s delay between requests (Nominatim: 1 req/sec)
+      if (i < maxEnrich - 1) await wait(1100);
+      if (i % 10 === 0) {
+        onProgress?.(75, `Enriching contact data… ${i + 1}/${maxEnrich}`);
+        _ep.businessesProcessed = i + 1;
+        emitEP();
+      }
     }
   }
 
