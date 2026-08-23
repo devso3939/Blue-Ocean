@@ -73,8 +73,7 @@ async function findTopCities(countryName: string, countryCode: string): Promise<
   
   // Use Nominatim with countrycodes filter — much more reliable than text search
   const url = `https://nominatim.openstreetmap.org/search?q=city&format=json&addressdetails=1&limit=20&extratags=1&countrycodes=${cc}`;
-  const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
-  const res = await fetch(proxyUrl, { headers: { 'Accept': 'language,en' } });
+  const res = await fetch(url, { headers: { 'Accept': 'language,en', 'User-Agent': 'BlueOcean/1.0' } });
   const data = await res.json();
 
   // Build city list from results
