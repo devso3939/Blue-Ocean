@@ -267,7 +267,38 @@ const OVERPASS_MIRRORS = [
   'https://overpass.openstreetmap.ru/api/interpreter',
 ];
 
-const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
+// Visibility-aware wait: when tab is hidden, browsers throttle setTimeout to 1s+.
+// This function uses shorter delays when hidden so enrichment keeps moving.
+function wait(ms: number): Promise<void> {
+  if (isCancelled()) throw new Error('Cancelled');
+  return new Promise((resolve, reject) => {
+    // If tab is visible, use normal delay
+    if (!document.hidden) {
+      const timer = setTimeout(() => {
+        if (isCancelled()) { reject(new Error('Cancelled')); return; }
+        resolve();
+      }, ms);
+      // Also listen for cancel during the wait
+      _cancelSignal?.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('Cancelled')); }, { once: true });
+      return;
+    }
+    // Tab is hidden: poll rapidly with short intervals so we don't get stuck
+    const interval = Math.min(ms, 100);
+    let elapsed = 0;
+    const poll = () => {
+      if (isCancelled()) { reject(new Error('Cancelled')); return; }
+      elapsed += interval;
+      if (elapsed >= ms || !document.hidden) { resolve(); return; }
+      setTimeout(poll, interval);
+    };
+    setTimeout(poll, interval);
+  });
+}
+
+// Global cancel signal — set by App.tsx, checked by all enrichment loops
+let _cancelSignal: AbortSignal | null = null;
+export function setCancelSignal(signal: AbortSignal | null) { _cancelSignal = signal; }
+function isCancelled(): boolean { return _cancelSignal?.aborted ?? false; }
 
 // Map category IDs to OSM tag filters for focused queries
 const CAT_OSM_FILTER: Record<string, string> = {
@@ -1537,6 +1568,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   onProgress?.(80, `Found ${totalBiz} businesses — enriching data in parallel…`);
 
   // ── TURBO ENRICHMENT: Multi-strategy parallel pass ──
+  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
   const BATCH_SIZE = 8;
   let enrichedCount = 0;
 
@@ -1615,6 +1647,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     onProgress?.(83, `Pass 1 (search)… ${Math.min(i + BATCH_SIZE, maxEnrich)}/${maxEnrich} (${enrichedCount} enriched)`);
   }
 
+  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
   // ── Pass 1b: Category-based search for businesses still missing ALL data ─
   const stillMissing = allBizList.filter(b => !b.phone && !b.email && !b.website);
   if (stillMissing.length > 0) {
@@ -1673,6 +1706,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     onProgress?.(85, 'Category search complete');
   }
 
+  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
   // ── Pass 1d: Address-based search for non-Latin businesses ─
   const needAddressSearch = allBizList.filter(b => !b.phone && !b.email && !b.website && !/^[a-zA-Z]/.test(b.name));
   if (needAddressSearch.length > 0) {
@@ -1716,6 +1750,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     }
   }
 
+  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
   // ── Pass 2: Targeted email search for businesses still missing email ──
   // Also try direct contact page scraping for businesses with websites
   const missingEmailWebsites = allBizList.filter(b => !b.email && b.website);
@@ -1777,6 +1812,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     }
   }
 
+  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
   // ── Pass 3: Targeted phone search for businesses still missing phone ──
   const missingPhone = allBizList.filter(b => !b.phone);
   if (missingPhone.length > 0) {
@@ -1810,6 +1846,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     }
   }
 
+  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
   // ── Pass 4: Website scraping for businesses that got website from search ──
   const needScrape = allBizList.filter(b => b.website && (!b.email || !b.phone || !b.facebook || !b.instagram));
   if (needScrape.length > 0) {
@@ -1824,6 +1861,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     }
   }
 
+  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
   // ── Pass 5: Social media search for businesses still missing social ──
   const missingSocial = allBizList.filter(b => !b.facebook && !b.instagram);
   if (missingSocial.length > 0) {
@@ -1852,6 +1890,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     }
   }
 
+  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
   // ── Pass 6b: 2GIS search for businesses still missing data ─
   // 2GIS is excellent for Georgia, Russia, CIS countries
   const need2GIS = allBizList.filter(b => !b.phone && !b.email && !b.website);
@@ -1906,6 +1945,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     }
   }
 
+  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
   // ── Pass 6c: Yandex search for businesses still missing data ─
   // Yandex is dominant in Georgia/Russia/CIS
   const needYandex = allBizList.filter(b => !b.phone && !b.email && !b.website);
@@ -1945,6 +1985,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     }
   }
 
+  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
   // ── Pass 6d: Wikipedia/Wikidata lookup for popular businesses ─
   const needWiki = allBizList.filter(b => !b.phone && !b.email && !b.website && !b.facebook);
   if (needWiki.length > 0) {
@@ -1991,6 +2032,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     }
   }
 
+  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
   // ── Pass 6: Google Maps for businesses with zero data ──
   const zeroData = allBizList.filter(b => !b.phone && !b.email && !b.website && !b.facebook && !b.instagram);
   if (zeroData.length > 0) {

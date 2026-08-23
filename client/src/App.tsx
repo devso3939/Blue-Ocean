@@ -6,6 +6,7 @@ import {
   computeOpportunities,
   getCategoryLabel,
   getGoogleMapsUrl, getAIAnalysis,
+  setCancelSignal,
   type CityResult,
   type Business,
   type DemandSignal,
@@ -99,7 +100,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '3.7.0';
+const APP_VERSION = '3.8.0';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -126,6 +127,17 @@ export default function App() {
   const mapInstanceRef = useRef<any>(null);
   const maplibreRef = useRef<any>(null);
   const mapReadyRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+
+  const cancelProcess = useCallback(() => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    setLoading(false);
+    setLoadingStage('');
+    setProgress(0);
+  }, []);
 
   // Listen for map pin clicks
   const bizPanelRef = useRef<HTMLDivElement>(null);
@@ -347,6 +359,9 @@ export default function App() {
   // Discover all opportunities
   const runAnalysis = useCallback(async () => {
     if (!selectedCity) return;
+    const ac = new AbortController();
+    abortRef.current = ac;
+    setCancelSignal(ac.signal);
     (window as any).__mapFitted = false;
     setLoading(true);
     setError('');
@@ -401,16 +416,21 @@ export default function App() {
       } catch {}
       setProgress(100);
     } catch (e: any) {
-      setError(e.message || 'Analysis failed');
+      if (e.message !== 'Cancelled') setError(e.message || 'Analysis failed');
     } finally {
       setLoading(false);
       setLoadingStage('');
+      abortRef.current = null;
+      setCancelSignal(null);
     }
   }, [selectedCity]);
 
   // Analyze single industry
   const startAnalyze = useCallback(async () => {
     if (!selectedCity || !selectedCategory) return;
+    const ac = new AbortController();
+    abortRef.current = ac;
+    setCancelSignal(ac.signal);
     (window as any).__mapFitted = false;
     setLoading(true);
     setError('');
@@ -450,10 +470,12 @@ export default function App() {
       setSelectedOppCategory(selectedCategory);
       setProgress(100);
     } catch (e: any) {
-      setError(e.message || 'Analysis failed');
+      if (e.message !== 'Cancelled') setError(e.message || 'Analysis failed');
     } finally {
       setLoading(false);
       setLoadingStage('');
+      abortRef.current = null;
+      setCancelSignal(null);
     }
   }, [selectedCity, selectedCategory]);
 
@@ -735,9 +757,17 @@ export default function App() {
 
           {loading && (
             <div className="mt-4">
-              <div className="mb-1 flex justify-between text-xs text-muted-foreground">
-                <span>{loadingStage}</span>
-                <span>{progress}%</span>
+              <div className="mb-1 flex justify-between items-center text-xs text-muted-foreground">
+                <span className="truncate flex-1 mr-2">{loadingStage}</span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span>{progress}%</span>
+                  <button
+                    onClick={cancelProcess}
+                    className="rounded-md bg-rose-500/15 px-2 py-0.5 text-[11px] font-medium text-rose-400 hover:bg-rose-500/25 transition-colors"
+                  >
+                    ✕ Cancel
+                  </button>
+                </div>
               </div>
               <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
                 <div className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 transition-all duration-500" style={{width: `${progress}%`}} />
@@ -938,6 +968,9 @@ export default function App() {
                         // Trigger full analysis with enrichment after state updates
                         setTimeout(() => {
                           if (selectedCity && selectedOppCategory) {
+                            const ac = new AbortController();
+                            abortRef.current = ac;
+                            setCancelSignal(ac.signal);
                             setLoading(true);
                             setError('');
                             setBusinesses(new Map());
@@ -967,9 +1000,12 @@ export default function App() {
                                 setLoadingStage('');
                               });
                             }).catch((e: any) => {
-                              setError(e.message || 'Enrichment failed');
+                              if (e.message !== 'Cancelled') setError(e.message || 'Enrichment failed');
                               setLoading(false);
                               setLoadingStage('');
+                            }).finally(() => {
+                              abortRef.current = null;
+                              setCancelSignal(null);
                             });
                           }
                         }, 100);
