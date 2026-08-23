@@ -307,8 +307,7 @@ export default function App() {
       web_agency: '🌐', software: '⚙️', it_consulting: '🖥️', digital_marketing: '📣',
       lawyer: '⚖️', accountant: '🧮', real_estate: '🏠', insurance: '🛡️',
       travel_agency: '✈️', cleaning: '🧹', car_wash: '🚿', nail_salon: '💅',
-      laundry: '👔', nightclub: '🎶', car_rental: '🚗', veterinary: '🐾',
-      florist: '🌸', marketplace: '🏪', optician: '👓', butcher: '🥩',
+      laundry: '👔',
     };
 
     const features = allBiz.slice(0, 500).map(b => ({
