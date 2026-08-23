@@ -325,46 +325,45 @@ export function setCancelSignal(signal: AbortSignal | null) { _cancelSignal = si
 function isCancelled(): boolean { return _cancelSignal?.aborted ?? false; }
 
 // ─── CORS Fetch Helper ────────────────────────────────────────────
-// corsproxy.io now requires an API key. This helper tries:
-// 1. Direct fetch (works for Nominatim, Overpass, Brave API, Wikipedia)
-// 2. allorigins.win proxy (for DDG, Bing, Startpage, etc.)
-// 3. Direct fetch as final fallback
-const CORS_SOURCES = [
-  'https://api.allorigins.win/raw?url=',
-  'https://api.allorigins.win/get?url=',
-];
-let _corsIdx = 0;
+// ─── CORS Fetch Helper ────────────────────────────────────────────
+// corsproxy.io now requires an API key. We use a fast multi-source strategy:
+// 1. Direct fetch (instant for CORS-enabled sites: Nominatim, Overpass, Brave)
+// 2. Try multiple CORS proxies IN PARALLEL, take the first OK response
 async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
-  const timeout = init?.signal ? undefined : { signal: AbortSignal.timeout(12000) };
-  const headers = { 'User-Agent': 'Mozilla/5.0 (BlueOcean/1.0)', ...init?.headers };
-  const opts = { ...init, headers, ...timeout };
-  // 1) Try direct fetch (works for Nominatim, Overpass, Brave, Wikipedia)
+  const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', ...init?.headers };
+  const signal = init?.signal || AbortSignal.timeout(10000);
+  const opts = { ...init, headers, signal };
+
+  // 1) Try direct fetch — fast for CORS-enabled sites, instant error for others
   try {
     const r = await fetch(url, opts);
     if (r.ok) return r;
-  } catch {}
-  // 2) Try allorigins proxy
-  for (let i = 0; i < CORS_SOURCES.length; i++) {
-    const src = CORS_SOURCES[(_corsIdx + i) % CORS_SOURCES.length];
-    try {
-      const proxyUrl = src + encodeURIComponent(url);
-      const r = await fetch(proxyUrl, { ...opts, signal: AbortSignal.timeout(10000) });
-      if (r.ok) {
-        // allorigins /get wraps in {contents: ...} — unwrap if needed
-        if (src.includes('/get?')) {
+  } catch { /* CORS error or network — try proxies */ }
+
+  // 2) Race multiple CORS proxies — first OK wins, 8s max
+  const proxySignal = AbortSignal.timeout(8000);
+  const proxyUrls = [
+    'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
+    'https://api.allorigins.win/get?url=' + encodeURIComponent(url),
+    'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(url),
+  ];
+  try {
+    const result = await Promise.any(
+      proxyUrls.map(async (proxyUrl) => {
+        const r = await fetch(proxyUrl, { headers, signal: proxySignal });
+        if (!r.ok) throw new Error(`${r.status}`);
+        // allorigins /get wraps in {contents: ...} — unwrap
+        if (proxyUrl.includes('/get?')) {
           const json = await r.json();
           return new Response(json.contents || '', { status: 200, headers: { 'Content-Type': 'text/html' } });
         }
         return r;
-      }
-    } catch {}
-  }
-  // 3) Final fallback: direct fetch without timeout
-  try {
-    const r = await fetch(url, { ...init, headers: { 'User-Agent': 'Mozilla/5.0 (BlueOcean/1.0)', ...init?.headers } });
-    return r;
-  } catch (e: any) {
-    throw new Error(`CORS fetch failed for ${url.substring(0, 60)}: ${e.message}`);
+      })
+    );
+    return result;
+  } catch {
+    // All proxies failed or timed out — return empty Response to avoid crashing
+    return new Response('', { status: 0, statusText: 'CORS proxy unavailable' });
   }
 }
 
