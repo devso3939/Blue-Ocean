@@ -326,45 +326,41 @@ function isCancelled(): boolean { return _cancelSignal?.aborted ?? false; }
 
 // ─── CORS Fetch Helper ────────────────────────────────────────────
 // ─── CORS Fetch Helper ────────────────────────────────────────────
-// corsproxy.io now requires an API key. We use a fast multi-source strategy:
-// 1. Direct fetch (instant for CORS-enabled sites: Nominatim, Overpass, Brave)
-// 2. Try multiple CORS proxies IN PARALLEL, take the first OK response
+// corsproxy.io now requires an API key. This helper:
+// 1. Tries direct fetch first (instant for CORS-enabled: Nominatim, Overpass, Brave)
+// 2. Falls back to allorigins.win proxy with short timeout
 async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', ...init?.headers };
-  const signal = init?.signal || AbortSignal.timeout(10000);
-  const opts = { ...init, headers, signal };
+  const callerSignal = init?.signal;
 
   // 1) Try direct fetch — fast for CORS-enabled sites, instant error for others
   try {
-    const r = await fetch(url, opts);
+    const r = await fetch(url, { ...init, headers });
     if (r.ok) return r;
-  } catch { /* CORS error or network — try proxies */ }
+  } catch { /* CORS error or network — try proxy */ }
 
-  // 2) Race multiple CORS proxies IN PARALLEL — first OK wins, 8s max
-  // (Promise.any needs ES2021, so we use Promise.race + resolve pattern)
-  const proxySignal = AbortSignal.timeout(8000);
-  const proxyUrls = [
-    'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
-    'https://api.allorigins.win/get?url=' + encodeURIComponent(url),
-  ];
-  return new Promise<Response>((resolve) => {
-    let resolved = false;
-    const done = () => { if (!resolved) { resolved = true; resolve(new Response('', { status: 0, statusText: 'CORS proxy unavailable' })); } };
-    proxySignal.addEventListener('abort', done, { once: true });
-    for (const proxyUrl of proxyUrls) {
-      fetch(proxyUrl, { headers, signal: proxySignal })
-        .then(async r => {
-          if (!r.ok) return;
-          let resp = r;
-          if (proxyUrl.includes('/get?')) {
-            const json = await r.json();
-            resp = new Response(json.contents || '', { status: 200, headers: { 'Content-Type': 'text/html' } });
-          }
-          if (!resolved) { resolved = true; proxySignal.abort(); resolve(resp); }
-        })
-        .catch(() => {});
+  // If caller already aborted, don't waste time on proxy
+  if (callerSignal?.aborted) throw new Error('Cancelled');
+
+  // 2) Try allorigins proxy with 6s timeout
+  try {
+    const proxyUrl = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url);
+    const r = await fetch(proxyUrl, { headers, signal: AbortSignal.timeout(6000) });
+    if (r.ok) return r;
+  } catch {}
+
+  // 3) Try allorigins /get (JSON wrapper) with 6s timeout
+  try {
+    const proxyUrl = 'https://api.allorigins.win/get?url=' + encodeURIComponent(url);
+    const r = await fetch(proxyUrl, { headers, signal: AbortSignal.timeout(6000) });
+    if (r.ok) {
+      const json = await r.json();
+      return new Response(json.contents || '', { status: 200, headers: { 'Content-Type': 'text/html' } });
     }
-  });
+  } catch {}
+
+  // All failed — return empty Response (callers check r.ok)
+  return new Response('', { status: 0, statusText: 'CORS unavailable' });
 }
 
 // Direct fetch for services that support CORS (Nominatim, Overpass)
