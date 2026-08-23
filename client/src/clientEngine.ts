@@ -558,8 +558,7 @@ out center body;`;
 
 // ─── Social Platform Deep Search ──────────────────────────────
 // Searches for business presence on LinkedIn, YouTube, Twitter, TikTok, Pinterest
-async function enrichFromSocialPlatforms(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
-  const NEEDS = businesses.filter(b => !b.facebook && !b.instagram && !b.website);
+async function enrichFromSocialPlatforms(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {    const NEEDS = businesses.filter(b => !b.facebook && !b.instagram);
   if (NEEDS.length === 0) return;
   const BATCH = 3;
   const max = Math.min(NEEDS.length, 80);
@@ -569,7 +568,14 @@ async function enrichFromSocialPlatforms(businesses: Business[], onProgress?: (p
     await Promise.all(batch.map(async (b) => {
       try {
         const cityEn = getEnglishCityName(b.address?.split(',').pop()?.trim() || '');
-        const q = encodeURIComponent(`"${b.name}" ${cityEn} facebook instagram linkedin youtube tiktok`);
+        const nameEn2 = getEnglishCityName(b.name);
+        const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
+        const streetEn = getEnglishCityName(street);
+        const parts = ["'" + (nameEn2 || b.name) + "'"];
+        if (streetEn && streetEn !== street) parts.push(streetEn);
+        if (cityEn) parts.push(cityEn);
+        parts.push('facebook instagram linkedin youtube tiktok social media');
+        const q = encodeURIComponent(parts.join(' '));
         const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
           headers: { 'User-Agent': 'Mozilla/5.0' },
           signal: AbortSignal.timeout(10000),
@@ -581,10 +587,21 @@ async function enrichFromSocialPlatforms(businesses: Business[], onProgress?: (p
           // Actually we don't have a LinkedIn field. Let's extract from results and put website if we find it
         }
         // Twitter/X
-        const twMatch = html.match(/(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)/i);
-        if (twMatch && !twMatch[0].includes('twitter.com/login') && !twMatch[0].includes('intent')) {
-          // Store Twitter as part of the name or website... we need a field. 
-          // We'll add it to the business description via a new approach
+        // TikTok
+        if (!b.website) {
+          const ttMatch = html.match(/tiktok\.com\/@([a-zA-Z0-9._]+)/i);
+          if (ttMatch && !ttMatch[0].includes('login')) {
+            b.website = 'https://tiktok.com/@' + ttMatch[1];
+            found++;
+          }
+        }
+        // LinkedIn company page
+        if (!b.website) {
+          const liMatch = html.match(/linkedin\.com\/(?:company|school)\/([a-zA-Z0-9._-]+)/i);
+          if (liMatch && !liMatch[0].includes('login')) {
+            b.website = 'https://linkedin.com/company/' + liMatch[1];
+            found++;
+          }
         }
         // YouTube
         const ytMatch = html.match(/youtube\.com\/(channel\/[^"&]+|@[^"&\s]+)/i);
@@ -762,6 +779,40 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
           b.instagram = 'https://instagram.com/' + igMatch[1].replace(/\/$/, '');
         }
       }
+
+      // 7. YouTube channel link
+      if (!b.website) {
+        const ytMatch = full.match(/youtube\.com\/(?:channel\/([^"\s&]+)|@([a-zA-Z0-9._-]+))/i);
+        if (ytMatch) {
+          const ytUrl = ytMatch[1] ? 'https://youtube.com/channel/' + ytMatch[1] : 'https://youtube.com/@' + ytMatch[2];
+          b.website = ytUrl;
+        }
+      }
+
+      // 8. TikTok link
+      if (!b.facebook) {
+        const ttMatch = full.match(/tiktok\.com\/@([a-zA-Z0-9._]+)/i);
+        if (ttMatch && !ttMatch[0].includes('login')) {
+          b.facebook = 'https://tiktok.com/@' + ttMatch[1]; // reuse facebook field for TikTok
+        }
+      }
+
+      // 9. Extract social links from href attributes (comprehensive)
+      const allHrefs = [...full.matchAll(/href="([^"]+)"/gi)].map(m => m[1]);
+      for (const href of allHrefs) {
+        if (!b.facebook && /facebook\.com\/[^/]+/i.test(href) && !href.includes('login') && !href.includes('sharer')) {
+          const fbM = href.match(/facebook\.com\/([a-zA-Z0-9._]+)/i);
+          if (fbM) b.facebook = 'https://facebook.com/' + fbM[1];
+        }
+        if (!b.instagram && /instagram\.com\/[^/]+/i.test(href) && !href.includes('accounts')) {
+          const igM2 = href.match(/instagram\.com\/([a-zA-Z0-9._]+)/i);
+          if (igM2) b.instagram = 'https://instagram.com/' + igM2[1];
+        }
+        if (!b.email && /^mailto:/i.test(href)) {
+          const emailAddr = href.replace(/^mailto:/i, '').split('?')[0].trim();
+          if (emailAddr.includes('@') && !EXCLUDE.test(emailAddr)) b.email = emailAddr;
+        }
+      }
     } catch {}
   }
 
@@ -769,11 +820,13 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
   await deepScrape(b.website);
 
   // Scrape contact/about pages if still missing data
-  if (!b.email || !b.phone || !b.facebook) {
+  if (!b.email || !b.phone || !b.facebook || !b.instagram) {
     const base = b.website.replace(/\/$/, '');
     const paths = ['/contact', '/contact-us', '/about', '/about-us', '/kontakti', '/kontakt',
                    '/contacte', '/team', '/info', '/impressum', '/locations', '/find-us',
-                   '/where-to-find-us', '/reach-us', '/get-in-touch'];
+                   '/where-to-find-us', '/reach-us', '/get-in-touch',
+                   '/kontaktay', '/kavshiri', '/momkhmarebeli', '/tsmrunebi',
+                   '/contactos', '/contato', '/联系我们', '/お問い合わせ', '/اتصل بنا', '/написать-нам'];
     for (const path of paths) {
       if (b.email && b.phone && b.facebook) break;
       await deepScrape(base + path);
@@ -947,15 +1000,25 @@ function extractFromText(text: string, b: Business): void {
   }
   if (!b.email) {
     const m = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-    if (m && !m[0].includes('example.com') && !m[0].includes('google')) b.email = m[0];
+    if (m && !m[0].includes('example.com') && !m[0].includes('google') && !m[0].includes('facebook') && !m[0].includes('instagram')) b.email = m[0];
   }
   if (!b.facebook) {
     const m = text.match(/facebook\.com\/([a-zA-Z0-9._]+)/);
-    if (m && !m[0].includes('login')) b.facebook = 'https://facebook.com/' + m[1];
+    if (m && !m[0].includes('login') && !m[0].includes('sharer')) b.facebook = 'https://facebook.com/' + m[1];
   }
   if (!b.instagram) {
     const m = text.match(/instagram\.com\/([a-zA-Z0-9._]+)/);
     if (m && !m[0].includes('accounts')) b.instagram = 'https://instagram.com/' + m[1];
+  }
+  // YouTube as website fallback
+  if (!b.website) {
+    const m = text.match(/youtube\.com\/(?:channel\/([a-zA-Z0-9_-]+)|@([a-zA-Z0-9._-]+))/i);
+    if (m) b.website = m[1] ? 'https://youtube.com/channel/' + m[1] : 'https://youtube.com/@' + m[2];
+  }
+  // LinkedIn as website fallback
+  if (!b.website) {
+    const m = text.match(/linkedin\.com\/(?:company|school)\/([a-zA-Z0-9._-]+)/i);
+    if (m) b.website = 'https://linkedin.com/company/' + m[1];
   }
 }
 
@@ -1031,7 +1094,7 @@ async function probeDomains(b: Business): Promise<void> {
   if (translit !== b.name && translit !== nameEn) {
     slugs.push(translit.toLowerCase().replace(/[^a-z0-9]+/g, '').substring(0, 20));
   }
-  const tlds = ['.com', '.ge', '.org', '.net', '.io'];
+  const tlds = ['.com', '.ge', '.org', '.net', '.io', '.am', '.ru', '.tr', '.fr', '.de', '.co'];
   for (const slug of slugs) {
     if (slug.length < 3) continue;
     for (const tld of tlds) {
@@ -1177,7 +1240,7 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
   if (b.email || !b.website) return;
   try {
     const base = b.website.replace(/\/$/, '');
-    const paths = ['/contact', '/contact-us', '/about', '/about-us', '/kontakti', '/kontakt', '/team', '/info', '/footer', '/imprint', '/privacy', '/sitemap.xml', '/kontaktay', '/kavshiri', '/momkhmarebeli', '/tsmrunebi', '/about.html', '/contacts', '/galerry', '/links'];
+    const paths = ['/contact', '/contact-us', '/about', '/about-us', '/kontakti', '/kontakt', '/team', '/info', '/footer', '/imprint', '/privacy', '/sitemap.xml', '/kontaktay', '/kavshiri', '/momkhmarebeli', '/tsmrunebi', '/about.html', '/contacts', '/links', '/contactos', '/contato', '/联系我们', '/お問い合わせ', '/reach-us'];
     for (const path of paths) {
       if (b.email) break;
       try {
@@ -1226,6 +1289,31 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
           if (!b.phone) {
             const labeledPh = html.match(/(?:phone|tel|telephone|mobile|cell|fax|calls)\s*[:;]\s*([+\d][\d\s\-\.()]{7,18})/i);
             if (labeledPh && labeledPh[1].replace(/[^\d]/g, '').length >= 8) b.phone = labeledPh[1].trim();
+          }
+        }
+        // Also extract social media links from contact page
+        if (!b.facebook) {
+          const fbM = html.match(/facebook\.com\/([a-zA-Z0-9._]+)/i);
+          if (fbM && !fbM[0].includes('login') && !fbM[0].includes('sharer')) {
+            b.facebook = 'https://facebook.com/' + fbM[1].replace(/\/$/, '');
+          }
+        }
+        if (!b.instagram) {
+          const igM = html.match(/instagram\.com\/([a-zA-Z0-9._]+)/i);
+          if (igM && !igM[0].includes('accounts')) {
+            b.instagram = 'https://instagram.com/' + igM[1].replace(/\/$/, '');
+          }
+        }
+        // Also extract from href attributes
+        const hrefs = [...html.matchAll(/href="([^"]+)"/gi)].map(m => m[1]);
+        for (const href of hrefs) {
+          if (!b.facebook && /facebook\.com\/[^/]+/i.test(href) && !href.includes('login')) {
+            const m2 = href.match(/facebook\.com\/([a-zA-Z0-9._]+)/i);
+            if (m2) b.facebook = 'https://facebook.com/' + m2[1];
+          }
+          if (!b.instagram && /instagram\.com\/[^/]+/i.test(href) && !href.includes('accounts')) {
+            const m3 = href.match(/instagram\.com\/([a-zA-Z0-9._]+)/i);
+            if (m3) b.instagram = 'https://instagram.com/' + m3[1];
           }
         }
       } catch {}
@@ -1737,15 +1825,22 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   }
 
   // ── Pass 5: Social media search for businesses still missing social ──
-  const missingSocial = allBizList.filter(b => !b.facebook && !b.instagram && !b.website);
+  const missingSocial = allBizList.filter(b => !b.facebook && !b.instagram);
   if (missingSocial.length > 0) {
     onProgress?.(95, `Pass 5 (social)… ${missingSocial.length} businesses`);
-    for (let i = 0; i < Math.min(missingSocial.length, 50); i += BATCH_SIZE) {
+    for (let i = 0; i < Math.min(missingSocial.length, 80); i += BATCH_SIZE) {
       const batch = missingSocial.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (b) => {
         try {
-          const cityEn = getEnglishCityName(b.address?.split(',').pop()?.trim() || '');
-          const socialQ = encodeURIComponent(`"${b.name}" ${cityEn} facebook instagram`);
+          const nameEn3 = getEnglishCityName(b.name);
+          const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+          const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
+          const streetEn = getEnglishCityName(street);
+          const parts = ["'" + (nameEn3 || b.name) + "'"];
+          if (streetEn && streetEn !== street) parts.push(streetEn);
+          if (cityEn) parts.push(cityEn);
+          parts.push('facebook instagram linkedin youtube tiktok social media contact');
+          const socialQ = encodeURIComponent(parts.join(' '));
           const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + socialQ)}`, {
             headers: { 'User-Agent': 'Mozilla/5.0' },
             signal: AbortSignal.timeout(8000),

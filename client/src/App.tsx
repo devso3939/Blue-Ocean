@@ -99,7 +99,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '3.6.0';
+const APP_VERSION = '3.7.0';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -840,13 +840,27 @@ export default function App() {
               <div ref={mapRef} className="h-[420px] w-full map-container" />
               {selectedBiz && (
                 <div ref={bizPanelRef} className="border-t border-border bg-card/80 backdrop-blur-sm px-3 py-2">
-                  <div className="flex items-center gap-3 text-xs">
+                  {/* Desktop: single row */}
+                  <div className="hidden sm:flex items-center gap-3 text-xs">
                     <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{background: selectedBiz.color}} />
                     <span className="font-semibold text-foreground truncate">{selectedBiz.name}</span>
                     {selectedBiz.phone && <a href={'tel:' + selectedBiz.phone} className="text-blue-400 hover:underline flex-shrink-0">📞 {selectedBiz.phone}</a>}
                     {selectedBiz.email && <a href={'mailto:' + selectedBiz.email} className="text-blue-400 hover:underline flex-shrink-0 truncate max-w-[160px]">✉️ {selectedBiz.email}</a>}
                     {selectedBiz.website && <a href={selectedBiz.website} target="_blank" className="text-blue-400 hover:underline flex-shrink-0 truncate max-w-[160px]">🌐 {selectedBiz.website.replace(/^https?:\/\//, '').substring(0, 25)}</a>}
                     <button onClick={() => setSelectedBiz(null)} className="ml-auto text-muted-foreground hover:text-foreground flex-shrink-0">✕</button>
+                  </div>
+                  {/* Mobile: stacked rows */}
+                  <div className="sm:hidden">
+                    <div className="flex items-center gap-2 text-xs mb-1">
+                      <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{background: selectedBiz.color}} />
+                      <span className="font-semibold text-foreground truncate flex-1">{selectedBiz.name}</span>
+                      <button onClick={() => setSelectedBiz(null)} className="text-muted-foreground hover:text-foreground flex-shrink-0 text-sm">✕</button>
+                    </div>
+                    <div className="flex flex-col gap-1 text-xs pl-4">
+                      {selectedBiz.phone && <a href={'tel:' + selectedBiz.phone} className="text-blue-400 hover:underline">📞 {selectedBiz.phone}</a>}
+                      {selectedBiz.email && <a href={'mailto:' + selectedBiz.email} className="text-blue-400 hover:underline truncate">✉️ {selectedBiz.email}</a>}
+                      {selectedBiz.website && <a href={selectedBiz.website} target="_blank" className="text-blue-400 hover:underline truncate">🌐 {selectedBiz.website.replace(/^https?:\/\//, '').substring(0, 35)}</a>}
+                    </div>
                   </div>
                 </div>
               )}
