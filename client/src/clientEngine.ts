@@ -326,41 +326,49 @@ function isCancelled(): boolean { return _cancelSignal?.aborted ?? false; }
 
 // ─── CORS Fetch Helper ────────────────────────────────────────────
 // ─── CORS Fetch Helper ────────────────────────────────────────────
-// corsproxy.io now requires an API key. This helper:
-// 1. Tries direct fetch first (instant for CORS-enabled: Nominatim, Overpass, Brave)
-// 2. Falls back to allorigins.win proxy with short timeout
+// corsproxy.io is dead. This helper:
+// 1. Tries direct fetch (instant for CORS-enabled: Nominatim, Overpass, Brave)
+// 2. Falls back to allorigins.win with 3s timeout (races raw + get)
+// Total max wait: ~4 seconds (not 12+)
+let _proxyReachable: boolean | null = null; // cached proxy test result
 async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', ...init?.headers };
   const callerSignal = init?.signal;
 
-  // 1) Try direct fetch — fast for CORS-enabled sites, instant error for others
+  // 1) Try direct fetch — instant for CORS-enabled, instant error for others
   try {
     const r = await fetch(url, { ...init, headers });
     if (r.ok) return r;
-  } catch { /* CORS error or network — try proxy */ }
-
-  // If caller already aborted, don't waste time on proxy
+  } catch { /* CORS error */ }
   if (callerSignal?.aborted) throw new Error('Cancelled');
 
-  // 2) Try allorigins proxy with 6s timeout
-  try {
-    const proxyUrl = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url);
-    const r = await fetch(proxyUrl, { headers, signal: AbortSignal.timeout(6000) });
-    if (r.ok) return r;
-  } catch {}
+  // 2) If proxy was unreachable before, don't waste time trying again
+  if (_proxyReachable === false) {
+    return new Response('', { status: 0, statusText: 'CORS unavailable' });
+  }
 
-  // 3) Try allorigins /get (JSON wrapper) with 6s timeout
+  // 3) Try allorigins proxy — race raw vs get, 3s max
   try {
-    const proxyUrl = 'https://api.allorigins.win/get?url=' + encodeURIComponent(url);
-    const r = await fetch(proxyUrl, { headers, signal: AbortSignal.timeout(6000) });
-    if (r.ok) {
-      const json = await r.json();
-      return new Response(json.contents || '', { status: 200, headers: { 'Content-Type': 'text/html' } });
-    }
-  } catch {}
-
-  // All failed — return empty Response (callers check r.ok)
-  return new Response('', { status: 0, statusText: 'CORS unavailable' });
+    const rawUrl = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url);
+    const getUrl = 'https://api.allorigins.win/get?url=' + encodeURIComponent(url);
+    const result = await Promise.race([
+      fetch(rawUrl, { headers, signal: AbortSignal.timeout(3000) }).then(async r => {
+        if (!r.ok) throw new Error('not ok');
+        return r;
+      }),
+      fetch(getUrl, { headers, signal: AbortSignal.timeout(3000) }).then(async r => {
+        if (!r.ok) throw new Error('not ok');
+        const json = await r.json();
+        return new Response(json.contents || '', { status: 200, headers: { 'Content-Type': 'text/html' } });
+      }),
+    ]);
+    _proxyReachable = true;
+    return result;
+  } catch {
+    // Mark proxy as unreachable if this is the first failure
+    if (_proxyReachable === null) _proxyReachable = false;
+    return new Response('', { status: 0, statusText: 'CORS unavailable' });
+  }
 }
 
 // Direct fetch for services that support CORS (Nominatim, Overpass)
@@ -1672,7 +1680,12 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   let enrichedCount = 0;
 
   // ── Pass 1: DDG + Brave + Bing + Startpage in parallel ──
-  _ep.activePass = 'Pass 1: Multi-engine search'; _ep.passNumber = 1; _ep.percent = 80; emitEP();
+  _ep.activePass = 'Pass 1: Multi-engine search'; _ep.passNumber = 1; _ep.percent = 80;
+  _ep.engines.find(e => e.name === 'DuckDuckGo')!.status = 'active';
+  _ep.engines.find(e => e.name === 'Brave')!.status = 'active';
+  _ep.engines.find(e => e.name === 'Bing')!.status = 'active';
+  _ep.engines.find(e => e.name === 'Startpage')!.status = 'active';
+  emitEP();
   const NEEDS_ENRICHMENT = allBizList.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
   const maxEnrich = Math.min(NEEDS_ENRICHMENT.length, 200);
 
@@ -1742,13 +1755,15 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         // Scrape website if found
         if (b.website && (!b.email || !b.phone || !b.facebook)) await enrichFromWebsiteDeep(b);
       } catch {}
+      // Per-business progress update so UI moves in real time
+      _ep.businessesProcessed++;
+      _ep.engines.find(e => e.name === 'DuckDuckGo')!.found = _ep.contacts.emails;
+      _ep.engines.find(e => e.name === 'Brave')!.found = _ep.contacts.phones;
+      _ep.engines.find(e => e.name === 'Bing')!.found = _ep.contacts.websites;
+      emitEP();
     }));
     if (i + BATCH_SIZE < maxEnrich) await wait(1200);
     onProgress?.(83, `Pass 1 (search)… ${Math.min(i + BATCH_SIZE, maxEnrich)}/${maxEnrich} (${enrichedCount} enriched)`);
-    _ep.businessesProcessed = Math.min(i + BATCH_SIZE, maxEnrich);
-    _ep.engines.find(e => e.name === 'DuckDuckGo')!.found = _ep.contacts.emails;
-    _ep.engines.find(e => e.name === 'Bing')!.found = _ep.contacts.phones;
-    emitEP();
   }
   _ep.engines.find(e => e.name === 'DuckDuckGo')!.status = 'done';
   _ep.engines.find(e => e.name === 'Brave')!.status = 'done';
