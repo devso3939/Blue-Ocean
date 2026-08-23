@@ -24,7 +24,7 @@ export async function resolveCity(query: string): Promise<CityResult[]> {
   const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&addressdetails=1&limit=5&extratags=1`;
   // Retry up to 3 times on rate limit (429) with backoff
   for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await directFetch(url, { headers: { 'Accept': 'language,en' } });
+    const res = await directFetch(url, { headers: { 'Accept': 'language,en' }, signal: AbortSignal.timeout(8000) });
     if (res.status === 429) {
       await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
       continue;
@@ -1652,44 +1652,33 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     onEnrichProgress?.({ ..._ep, engines: _ep.engines.map(e => ({ ...e })) });
   }
 
-  _ep.activePass = 'Reverse geocoding addresses'; _ep.passNumber = 0; _ep.percent = 70; emitEP();
+  _ep.activePass = 'Filling missing addresses'; _ep.passNumber = 0; _ep.percent = 70; emitEP();
   if (allBizList.length > 0) {
-    // Cap at 100 businesses to keep this phase under ~90 seconds
-    const maxEnrich = Math.min(allBizList.length, 100);
-    const CONCURRENCY = 3;
-    let rateLimitHits = 0;
+    // Use Photon (separate infrastructure from Nominatim) for address filling
+    // This NEVER conflicts with city search rate limits
+    const maxEnrich = Math.min(allBizList.length, 150);
+    const CONCURRENCY = 5; // Photon allows more parallel requests
     for (let i = 0; i < maxEnrich; i += CONCURRENCY) {
       if (isCancelled()) break;
-      // If rate limited 3+ times, skip remaining reverse geocoding
-      if (rateLimitHits >= 3) { onProgress?.(78, 'Nominatim busy — skipping remaining reverse geocoding'); break; }
       const batch = allBizList.slice(i, i + CONCURRENCY);
       await Promise.allSettled(batch.map(async (b) => {
+        if (b.address) return; // already has address
         try {
-          const nominatimRevUrl = `https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=json&zoom=18&addressdetails=1&extratags=1&accept-language=en`;
-          const r = await directFetch(nominatimRevUrl, {
-            headers: { 'Accept': 'application/json' },
-            signal: AbortSignal.timeout(4000),
+          const r = await fetch(`https://photon.komoot.io/reverse?lat=${b.lat}&lon=${b.lon}&lang=en`, {
+            signal: AbortSignal.timeout(3000),
           });
           if (r.ok) {
             const d = await r.json();
-            if (!b.address && d.address) {
-              const a = d.address;
-              const parts = [a.road || a.pedestrian, a.house_number, a.suburb || a.neighbourhood || a.city_district, a.city || a.town || a.village].filter(Boolean);
-              b.address = parts.join(', ') || d.display_name?.split(',').slice(0, 3).join(',') || '';
+            const f = d.features?.[0]?.properties;
+            if (f) {
+              const parts = [f.name, f.housenumber, f.district || f.locality, f.city].filter(Boolean);
+              b.address = parts.join(', ') || '';
             }
-            if (!b.phone) b.phone = d.extratags?.phone || d.extratags?.['contact:phone'] || d.extratags?.['contact:mobile'] || '';
-            if (!b.email) b.email = d.extratags?.email || d.extratags?.['contact:email'] || '';
-            if (!b.website) b.website = d.extratags?.website || d.extratags?.['contact:website'] || d.extratags?.url || '';
-            if (!b.facebook) b.facebook = d.extratags?.['contact:facebook'] || d.extratags?.facebook || '';
-            if (!b.instagram) b.instagram = d.extratags?.['contact:instagram'] || d.extratags?.instagram || '';
-          } else if (r.status === 429) {
-            rateLimitHits++;
           }
         } catch {}
       }));
-      // Adaptive delay: normal 1.5s, or 3s if we've hit rate limits
-      if (i + CONCURRENCY < maxEnrich) await wait(rateLimitHits > 0 ? 3000 : 1500);
-      onProgress?.(75, `Enriching contact data… ${Math.min(i + CONCURRENCY, maxEnrich)}/${maxEnrich}`);
+      if (i + CONCURRENCY < maxEnrich) await wait(500);
+      onProgress?.(75, `Filling addresses… ${Math.min(i + CONCURRENCY, maxEnrich)}/${maxEnrich}`);
       _ep.businessesProcessed = Math.min(i + CONCURRENCY, maxEnrich);
       emitEP();
     }
