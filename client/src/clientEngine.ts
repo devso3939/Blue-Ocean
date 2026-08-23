@@ -21,9 +21,8 @@ export interface CityResult {
 }
 
 export async function resolveCity(query: string): Promise<CityResult[]> {
-  const nominatimUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&addressdetails=1&limit=5&extratags=1`;
-  const url = `https://corsproxy.io/?${encodeURIComponent(nominatimUrl)}`;
-  const res = await fetch(url, { headers: { 'Accept': 'language,en' } });
+  const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&addressdetails=1&limit=5&extratags=1`;
+  const res = await directFetch(url, { headers: { 'Accept': 'language,en' } });
   if (!res.ok) throw new Error(`Nominatim returned ${res.status}`);
   const data = await res.json();
   if (!data.length) throw new Error(`No results found for "${query}"`);
@@ -325,6 +324,55 @@ let _cancelSignal: AbortSignal | null = null;
 export function setCancelSignal(signal: AbortSignal | null) { _cancelSignal = signal; }
 function isCancelled(): boolean { return _cancelSignal?.aborted ?? false; }
 
+// ─── CORS Fetch Helper ────────────────────────────────────────────
+// corsproxy.io now requires an API key. This helper tries:
+// 1. Direct fetch (works for Nominatim, Overpass, Brave API, Wikipedia)
+// 2. allorigins.win proxy (for DDG, Bing, Startpage, etc.)
+// 3. Direct fetch as final fallback
+const CORS_SOURCES = [
+  'https://api.allorigins.win/raw?url=',
+  'https://api.allorigins.win/get?url=',
+];
+let _corsIdx = 0;
+async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
+  const timeout = init?.signal ? undefined : { signal: AbortSignal.timeout(12000) };
+  const headers = { 'User-Agent': 'Mozilla/5.0 (BlueOcean/1.0)', ...init?.headers };
+  const opts = { ...init, headers, ...timeout };
+  // 1) Try direct fetch (works for Nominatim, Overpass, Brave, Wikipedia)
+  try {
+    const r = await fetch(url, opts);
+    if (r.ok) return r;
+  } catch {}
+  // 2) Try allorigins proxy
+  for (let i = 0; i < CORS_SOURCES.length; i++) {
+    const src = CORS_SOURCES[(_corsIdx + i) % CORS_SOURCES.length];
+    try {
+      const proxyUrl = src + encodeURIComponent(url);
+      const r = await fetch(proxyUrl, { ...opts, signal: AbortSignal.timeout(10000) });
+      if (r.ok) {
+        // allorigins /get wraps in {contents: ...} — unwrap if needed
+        if (src.includes('/get?')) {
+          const json = await r.json();
+          return new Response(json.contents || '', { status: 200, headers: { 'Content-Type': 'text/html' } });
+        }
+        return r;
+      }
+    } catch {}
+  }
+  // 3) Final fallback: direct fetch without timeout
+  try {
+    const r = await fetch(url, { ...init, headers: { 'User-Agent': 'Mozilla/5.0 (BlueOcean/1.0)', ...init?.headers } });
+    return r;
+  } catch (e: any) {
+    throw new Error(`CORS fetch failed for ${url.substring(0, 60)}: ${e.message}`);
+  }
+}
+
+// Direct fetch for services that support CORS (Nominatim, Overpass)
+async function directFetch(url: string, init?: RequestInit): Promise<Response> {
+  return fetch(url, { ...init, headers: { 'User-Agent': 'BlueOcean/1.0', ...init?.headers } });
+}
+
 // Map category IDs to OSM tag filters for focused queries
 const CAT_OSM_FILTER: Record<string, string> = {
   cafe: '["amenity"="cafe"]',
@@ -426,12 +474,11 @@ async function fetchOverpass(query: string, timeoutSec = 60): Promise<any> {
     // Wait between mirrors
     if (mi < OVERPASS_MIRRORS.length - 1) await wait(2000);
   }
-  // ── Last resort: CORS proxy ──
+  // ── Last resort: try Overpass directly (CORS supported) ──
   try {
-    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(OVERPASS_MIRRORS[0])}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 75000);
-    const res = await fetch(proxyUrl, {
+    const res = await directFetch(OVERPASS_MIRRORS[0], {
       method: 'POST',
       body: `data=${encodeURIComponent(query)}`,
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -633,7 +680,7 @@ async function enrichFromSocialPlatforms(businesses: Business[], onProgress?: (p
         if (cityEn) parts.push(cityEn);
         parts.push('facebook instagram linkedin youtube tiktok social media');
         const q = encodeURIComponent(parts.join(' '));
-        const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+        const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
           headers: { 'User-Agent': 'Mozilla/5.0' },
           signal: AbortSignal.timeout(10000),
         });
@@ -711,7 +758,7 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
 
   async function deepScrape(url: string): Promise<void> {
     try {
-      const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`, {
+      const r = await corsFetch(url, {
         signal: AbortSignal.timeout(8000),
       });
       if (!r.ok) return;
@@ -903,7 +950,7 @@ async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct:
     await Promise.all(batch.map(async (b) => {
       try {
         const q = encodeURIComponent(b.name + ' ' + (b.address || ''));
-        const r = await fetch('https://corsproxy.io/?' + encodeURIComponent('https://www.google.com/maps/search/' + q), {
+        const r = await corsFetch('https://www.google.com/maps/search/' + q, {
           headers: { 'User-Agent': 'Mozilla/5.0' },
           signal: AbortSignal.timeout(10000),
         });
@@ -1083,7 +1130,7 @@ function extractFromText(text: string, b: Business): void {
 // Bing Search (free scraping, no API key needed)
 async function searchBing(query: string): Promise<{title: string; url: string; snippet: string}[]> {
   try {
-    const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://www.bing.com/search?q=' + query + '&count=5')}`, {
+    const r = await corsFetch('https://www.bing.com/search?q=' + query + '&count=5', {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
       signal: AbortSignal.timeout(8000),
     });
@@ -1110,7 +1157,7 @@ async function searchBing(query: string): Promise<{title: string; url: string; s
 // Startpage search - uses Google results, different from DDG/Bing
 async function searchStartpage(query: string): Promise<{title: string; url: string; snippet: string}[]> {
   try {
-    const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://www.startpage.com/sp/search?query=' + query + '&cat=web&language=english')}`, {
+    const r = await corsFetch('https://www.startpage.com/sp/search?query=' + query + '&cat=web&language=english', {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
       signal: AbortSignal.timeout(8000),
     });
@@ -1157,7 +1204,7 @@ async function probeDomains(b: Business): Promise<void> {
     for (const tld of tlds) {
       try {
         const domain = 'https://' + slug + tld;
-        const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(domain)}`, {
+        const r = await corsFetch(domain, {
           method: 'HEAD',
           signal: AbortSignal.timeout(4000),
         });
@@ -1301,7 +1348,7 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
     for (const path of paths) {
       if (b.email) break;
       try {
-        const r = await fetch('https://corsproxy.io/?' + encodeURIComponent(base + path), {
+        const r = await corsFetch(base + path, {
           signal: AbortSignal.timeout(6000),
         });
         if (!r.ok) continue;
@@ -1453,7 +1500,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         // Build multilingual query: original name + English transliteration
         const query = buildSearchQuery(b);
         const url = `https://html.duckduckgo.com/html/?q=${query}`;
-        const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`, {
+        const r = await corsFetch(url, {
           headers: { 'User-Agent': 'Mozilla/5.0' },
           signal: AbortSignal.timeout(12000),
         });
@@ -1595,7 +1642,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       const promises = batch.map(async (b) => {
         try {
           const nominatimRevUrl = `https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=json&zoom=18&addressdetails=1&extratags=1&accept-language=en`;
-          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(nominatimRevUrl)}`, {
+          const r = await directFetch(nominatimRevUrl, {
             headers: { 'Accept': 'application/json' }
           });
           if (r.ok) {
@@ -1640,7 +1687,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       try {
         const q = buildSearchQuery(b);
         // DDG + Brave in parallel
-        const ddgP = fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+        const ddgP = corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
           headers: { 'User-Agent': 'Mozilla/5.0' },
           signal: AbortSignal.timeout(10000),
         }).then(async r => {
@@ -1728,7 +1775,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       if (!cityEn) continue;
       const catQuery = encodeURIComponent(catLabel + ' ' + cityEn + ' phone email contact');
       try {
-        const r = await fetch('https://corsproxy.io/?' + encodeURIComponent('https://html.duckduckgo.com/html/?q=' + catQuery), {
+        const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + catQuery, {
           headers: { 'User-Agent': 'Mozilla/5.0' },
           signal: AbortSignal.timeout(10000),
         });
@@ -1787,7 +1834,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           const category = b.categoryLabel || '';
           if (!streetEn || streetEn === street) return;
           const q = encodeURIComponent(streetEn + ' ' + cityEn + ' ' + category + ' phone email');
-          const ddgR = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+          const ddgR = await corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
             headers: { 'User-Agent': 'Mozilla/5.0' },
             signal: AbortSignal.timeout(8000),
           });
@@ -1846,7 +1893,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       await Promise.all(batch.map(async (b) => {
         try {
           const q = buildEmailQuery(b);
-          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+          const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
             headers: { 'User-Agent': 'Mozilla/5.0' },
             signal: AbortSignal.timeout(8000),
           });
@@ -1890,7 +1937,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       await Promise.all(batch.map(async (b) => {
         try {
           const q = buildPhoneQuery(b);
-          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+          const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
             headers: { 'User-Agent': 'Mozilla/5.0' },
             signal: AbortSignal.timeout(8000),
           });
@@ -1949,7 +1996,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           if (cityEn) parts.push(cityEn);
           parts.push('facebook instagram linkedin youtube tiktok social media contact');
           const socialQ = encodeURIComponent(parts.join(' '));
-          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + socialQ)}`, {
+          const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + socialQ, {
             headers: { 'User-Agent': 'Mozilla/5.0' },
             signal: AbortSignal.timeout(8000),
           });
@@ -1974,7 +2021,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           const nameEn = getEnglishCityName(b.name);
           const q = encodeURIComponent((nameEn || b.name) + ' ' + (b.address?.split(',').pop() || ''));
           // Search 2GIS catalog API
-          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://catalog.api.2gis.com/3.0/items?q=' + q + '&key=rurbbn3446&fields=items.contact_groups,items.reviews')}`, {
+          const r = await corsFetch('https://catalog.api.2gis.com/3.0/items?q=' + q + '&key=rurbbn3446&fields=items.contact_groups,items.reviews', {
             signal: AbortSignal.timeout(8000),
           });
           if (r.ok) {
@@ -2030,7 +2077,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           const nameEn = getEnglishCityName(b.name);
           const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
           const q = encodeURIComponent(`site:yandex.* ${nameEn || b.name} ${cityEn || ''} phone`);
-          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+          const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
             headers: { 'User-Agent': 'Mozilla/5.0' },
             signal: AbortSignal.timeout(8000),
           });
@@ -2068,7 +2115,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         try {
           const nameEn = getEnglishCityName(b.name);
           const q = encodeURIComponent(`"${nameEn || b.name}" Wikipedia`);
-          const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://html.duckduckgo.com/html/?q=' + q)}`, {
+          const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
             headers: { 'User-Agent': 'Mozilla/5.0' },
             signal: AbortSignal.timeout(6000),
           });
@@ -2081,7 +2128,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               if (!b.website) b.website = wikiUrl;
               // Try to get info from Wikipedia page
               try {
-                const wr = await fetch(`https://corsproxy.io/?${encodeURIComponent(wikiUrl)}`, {
+                const wr = await corsFetch(wikiUrl, {
                   signal: AbortSignal.timeout(6000),
                 });
                 if (wr.ok) {
