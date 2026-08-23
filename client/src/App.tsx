@@ -11,6 +11,7 @@ import {
   type Business,
   type DemandSignal,
   type OpportunityResult,
+  type EnrichmentProgress,
 } from './clientEngine';
 import CompareView from './CompareView';
 import CountryView from './CountryView';
@@ -100,7 +101,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '3.8.0';
+const APP_VERSION = '3.9.0';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -122,6 +123,7 @@ export default function App() {
   const [showAllOpps, setShowAllOpps] = useState(false);
   const [aiInsights, setAiInsights] = useState('');
   const [selectedBiz, setSelectedBiz] = useState<{name:string;category:string;categoryLabel:string;color:string;phone:string;email:string;website:string;address:string;facebook:string;instagram:string;lat:number;lon:number}|null>(null);
+  const [enrichProgress, setEnrichProgress] = useState<EnrichmentProgress | null>(null);
 
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
@@ -370,6 +372,7 @@ export default function App() {
     setDemandSignals(new Map());
     setSelectedOppCategory(null);
     setShowAllOpps(false);
+    setEnrichProgress(null);
 
     try {
       const biz = await queryBusinesses(
@@ -437,6 +440,7 @@ export default function App() {
     setBusinesses(new Map());
     setOpportunities([]);
     setDemandSignals(new Map());
+    setEnrichProgress(null);
 
     try {
       setLoadingStage(`Scanning ${getCategoryLabel(selectedCategory)}…`);
@@ -445,7 +449,9 @@ export default function App() {
       const biz = await queryBusinesses(
         selectedCity.lat, selectedCity.lon, 10000,
         (pct, msg) => { setProgress(Math.max(pct, 5)); setLoadingStage(msg); },
-        selectedCategory
+        selectedCategory,
+        false,
+        (ep) => setEnrichProgress(ep)
       );
       setBusinesses(biz);
       setProgress(45);
@@ -772,6 +778,59 @@ export default function App() {
               <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
                 <div className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 transition-all duration-500" style={{width: `${progress}%`}} />
               </div>
+
+              {/* ── Real-time Enrichment Progress Panel ── */}
+              {enrichProgress && enrichProgress.passNumber > 0 && (
+                <div className="mt-3 rounded-lg border border-border bg-card/90 backdrop-blur-sm p-3">
+                  {/* Pass progress bar */}
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-semibold text-foreground">{enrichProgress.activePass}</span>
+                    <span className="text-[10px] text-muted-foreground">Pass {enrichProgress.passNumber}/{enrichProgress.totalPasses}</span>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary mb-3">
+                    <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-cyan-500 transition-all duration-300" style={{width: `${enrichProgress.percent}%`}} />
+                  </div>
+n                  {/* Search engines status */}
+                  <div className="flex flex-wrap gap-1.5 mb-3">
+                    {enrichProgress.engines.map((eng) => (
+                      <span
+                        key={eng.name}
+                        className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium transition-all duration-300
+                          ${eng.status === 'active' ? 'bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/40 animate-pulse' :
+                            eng.status === 'done' ? 'bg-muted/50 text-muted-foreground' :
+                            eng.status === 'error' ? 'bg-rose-500/20 text-rose-400' :
+                            'bg-muted/30 text-muted-foreground/50'}`}
+                      >
+                        <span>{eng.icon}</span>
+                        <span>{eng.name}</span>
+                        {eng.status === 'active' && <span className="ml-0.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />}
+                      </span>
+                    ))}
+                  </div>
+n                  {/* Live contact counters */}
+                  <div className="flex items-center gap-3 text-[11px]">
+                    <span className="flex items-center gap-1">
+                      <span className="text-muted-foreground">📧</span>
+                      <span className={`font-bold tabular-nums ${enrichProgress.contacts.emails > 0 ? 'text-emerald-400' : 'text-muted-foreground'}`}>{enrichProgress.contacts.emails}</span>
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="text-muted-foreground">📞</span>
+                      <span className={`font-bold tabular-nums ${enrichProgress.contacts.phones > 0 ? 'text-emerald-400' : 'text-muted-foreground'}`}>{enrichProgress.contacts.phones}</span>
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="text-muted-foreground">🌐</span>
+                      <span className={`font-bold tabular-nums ${enrichProgress.contacts.websites > 0 ? 'text-emerald-400' : 'text-muted-foreground'}`}>{enrichProgress.contacts.websites}</span>
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="text-muted-foreground">👤</span>
+                      <span className={`font-bold tabular-nums ${enrichProgress.contacts.social > 0 ? 'text-emerald-400' : 'text-muted-foreground'}`}>{enrichProgress.contacts.social}</span>
+                    </span>
+                    <span className="ml-auto text-muted-foreground/60">
+                      {enrichProgress.businessesProcessed}/{enrichProgress.businessesTotal} processed
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -976,12 +1035,14 @@ export default function App() {
                             setBusinesses(new Map());
                             setOpportunities([]);
                             setDemandSignals(new Map());
+                            setEnrichProgress(null);
                             setLoadingStage(`Enriching ${getCategoryLabel(selectedOppCategory)}…`);
                             setProgress(5);
                             queryBusinesses(
                               selectedCity.lat, selectedCity.lon, 10000,
                               (pct, msg) => { setProgress(Math.max(pct, 5)); setLoadingStage(msg); },
-                              selectedOppCategory, false
+                              selectedOppCategory, false,
+                              (ep) => setEnrichProgress(ep)
                             ).then(biz => {
                               setBusinesses(biz);
                               setProgress(45);

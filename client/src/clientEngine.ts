@@ -61,6 +61,31 @@ export interface Business {
   instagram: string;
 }
 
+// ─── Enrichment Progress (real-time panel) ──────────────────────
+export interface EngineStatus {
+  name: string;       // e.g. 'DuckDuckGo', 'Brave', 'Bing'
+  icon: string;       // e.g. '🦆', '🦁'
+  status: 'idle' | 'active' | 'done' | 'error';
+  found: number;      // contacts found by this engine
+}
+
+export interface EnrichmentProgress {
+  activePass: string;                  // e.g. 'Pass 1: Multi-engine search'
+  passNumber: number;                  // 1-7
+  totalPasses: number;                 // 7
+  engines: EngineStatus[];             // all engines with status
+  contacts: {                          // live counters
+    emails: number;
+    phones: number;
+    websites: number;
+    social: number;
+    total: number;
+  };
+  businessesProcessed: number;
+  businessesTotal: number;
+  percent: number;
+}
+
 export const CATEGORY_QUERIES: Record<string, { label: string }> = {
   cafe: { label: 'Cafe' },
   restaurant: { label: 'Restaurant' },
@@ -431,7 +456,8 @@ export async function queryBusinesses(
   radiusMeters: number = 10000,
   onProgress?: (pct: number, msg: string) => void,
   categoryFilter?: string,
-  skipEnrichment?: boolean
+  skipEnrichment?: boolean,
+  onEnrichProgress?: (ep: EnrichmentProgress) => void
 ): Promise<Map<string, Business[]>> {
   const results = new Map<string, Business[]>();
   const south = lat - radiusMeters / 111000;
@@ -1530,6 +1556,37 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   // English city name for enrichment passes
   const selectedCityEn = allBizList.length > 0 ? getEnglishCityName((allBizList[0].address || '').split(',').pop()?.trim() || '') : '';
 
+  // ── Enrichment progress tracker ──
+  const _ep: EnrichmentProgress = {
+    activePass: 'Initializing…',
+    passNumber: 0,
+    totalPasses: 7,
+    engines: [
+      { name: 'DuckDuckGo', icon: '🦆', status: 'idle', found: 0 },
+      { name: 'Brave', icon: '🦁', status: 'idle', found: 0 },
+      { name: 'Bing', icon: '🔍', status: 'idle', found: 0 },
+      { name: 'Startpage', icon: '🌐', status: 'idle', found: 0 },
+      { name: '2GIS', icon: '📍', status: 'idle', found: 0 },
+      { name: 'Yandex', icon: '🔴', status: 'idle', found: 0 },
+      { name: 'Google Maps', icon: '🗺️', status: 'idle', found: 0 },
+      { name: 'Website Scraper', icon: '🕸️', status: 'idle', found: 0 },
+    ],
+    contacts: { emails: 0, phones: 0, websites: 0, social: 0, total: 0 },
+    businessesProcessed: 0,
+    businessesTotal: allBizList.length,
+    percent: 0,
+  };
+  function emitEP() {
+    // Recount contacts from live data
+    _ep.contacts.emails = allBizList.filter(b => b.email).length;
+    _ep.contacts.phones = allBizList.filter(b => b.phone).length;
+    _ep.contacts.websites = allBizList.filter(b => b.website).length;
+    _ep.contacts.social = allBizList.filter(b => b.facebook || b.instagram).length;
+    _ep.contacts.total = _ep.contacts.emails + _ep.contacts.phones + _ep.contacts.websites + _ep.contacts.social;
+    onEnrichProgress?.({ ..._ep, engines: _ep.engines.map(e => ({ ...e })) });
+  }
+
+  _ep.activePass = 'Reverse geocoding addresses'; _ep.passNumber = 0; _ep.percent = 70; emitEP();
   if (allBizList.length > 0) {
     const BATCH = 10;
     const maxEnrich = Math.min(allBizList.length, 200);
@@ -1572,7 +1629,8 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   const BATCH_SIZE = 8;
   let enrichedCount = 0;
 
-  // ── Pass 1: DDG + Brave in parallel for every business ──
+  // ── Pass 1: DDG + Brave + Bing + Startpage in parallel ──
+  _ep.activePass = 'Pass 1: Multi-engine search'; _ep.passNumber = 1; _ep.percent = 80; emitEP();
   const NEEDS_ENRICHMENT = allBizList.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
   const maxEnrich = Math.min(NEEDS_ENRICHMENT.length, 200);
 
@@ -1645,7 +1703,15 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     }));
     if (i + BATCH_SIZE < maxEnrich) await wait(1200);
     onProgress?.(83, `Pass 1 (search)… ${Math.min(i + BATCH_SIZE, maxEnrich)}/${maxEnrich} (${enrichedCount} enriched)`);
+    _ep.businessesProcessed = Math.min(i + BATCH_SIZE, maxEnrich);
+    _ep.engines.find(e => e.name === 'DuckDuckGo')!.found = _ep.contacts.emails;
+    _ep.engines.find(e => e.name === 'Bing')!.found = _ep.contacts.phones;
+    emitEP();
   }
+  _ep.engines.find(e => e.name === 'DuckDuckGo')!.status = 'done';
+  _ep.engines.find(e => e.name === 'Brave')!.status = 'done';
+  _ep.engines.find(e => e.name === 'Bing')!.status = 'done';
+  _ep.engines.find(e => e.name === 'Startpage')!.status = 'done';
 
   if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
   // ── Pass 1b: Category-based search for businesses still missing ALL data ─
@@ -1774,6 +1840,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   const missingEmail = allBizList.filter(b => !b.email);
   if (missingEmail.length > 0) {
     onProgress?.(87, `Pass 2 (email)… searching ${missingEmail.length} businesses`);
+    _ep.activePass = 'Pass 2: Email search'; _ep.passNumber = 2; _ep.percent = 87; _ep.engines.find(e => e.name === 'DuckDuckGo')!.status = 'active'; emitEP();
     for (let i = 0; i < Math.min(missingEmail.length, 80); i += BATCH_SIZE) {
       const batch = missingEmail.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (b) => {
@@ -1817,6 +1884,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   const missingPhone = allBizList.filter(b => !b.phone);
   if (missingPhone.length > 0) {
     onProgress?.(90, `Pass 3 (phone)… searching ${missingPhone.length} businesses`);
+    _ep.activePass = 'Pass 3: Phone search'; _ep.passNumber = 3; _ep.percent = 90; _ep.engines.find(e => e.name === 'DuckDuckGo')!.status = 'active'; emitEP();
     for (let i = 0; i < Math.min(missingPhone.length, 80); i += BATCH_SIZE) {
       const batch = missingPhone.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (b) => {
@@ -1851,6 +1919,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   const needScrape = allBizList.filter(b => b.website && (!b.email || !b.phone || !b.facebook || !b.instagram));
   if (needScrape.length > 0) {
     onProgress?.(93, `Pass 4 (website scraping)… ${needScrape.length} sites`);
+    _ep.activePass = 'Pass 4: Website scraping'; _ep.passNumber = 4; _ep.percent = 93; _ep.engines.find(e => e.name === 'Website Scraper')!.status = 'active'; emitEP();
     for (let i = 0; i < Math.min(needScrape.length, 80); i += BATCH_SIZE) {
       const batch = needScrape.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (b) => {
@@ -1866,6 +1935,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   const missingSocial = allBizList.filter(b => !b.facebook && !b.instagram);
   if (missingSocial.length > 0) {
     onProgress?.(95, `Pass 5 (social)… ${missingSocial.length} businesses`);
+    _ep.activePass = 'Pass 5: Social media'; _ep.passNumber = 5; _ep.percent = 95; _ep.engines.find(e => e.name === 'DuckDuckGo')!.status = 'active'; emitEP();
     for (let i = 0; i < Math.min(missingSocial.length, 80); i += BATCH_SIZE) {
       const batch = missingSocial.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (b) => {
@@ -1896,6 +1966,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   const need2GIS = allBizList.filter(b => !b.phone && !b.email && !b.website);
   if (need2GIS.length > 0) {
     onProgress?.(94, `Pass 6b (2GIS)... ${need2GIS.length} businesses`);
+    _ep.activePass = 'Pass 6: Regional search'; _ep.passNumber = 6; _ep.percent = 94; _ep.engines.find(e => e.name === '2GIS')!.status = 'active'; emitEP();
     for (let i = 0; i < Math.min(need2GIS.length, 40); i += BATCH_SIZE) {
       const batch = need2GIS.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (b) => {
@@ -1951,6 +2022,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   const needYandex = allBizList.filter(b => !b.phone && !b.email && !b.website);
   if (needYandex.length > 0) {
     onProgress?.(95, `Pass 6c (Yandex)... ${needYandex.length} businesses`);
+    _ep.engines.find(e => e.name === '2GIS')!.status = 'done'; _ep.engines.find(e => e.name === 'Yandex')!.status = 'active'; emitEP();
     for (let i = 0; i < Math.min(needYandex.length, 30); i += BATCH_SIZE) {
       const batch = needYandex.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (b) => {
@@ -2037,9 +2109,18 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   const zeroData = allBizList.filter(b => !b.phone && !b.email && !b.website && !b.facebook && !b.instagram);
   if (zeroData.length > 0) {
     onProgress?.(97, `Pass 6 (Google Maps)… ${zeroData.length} businesses`);
+    _ep.activePass = 'Pass 7: Google Maps'; _ep.passNumber = 7; _ep.percent = 97;
+    _ep.engines.find(e => e.name === 'Yandex')!.status = 'done';
+    _ep.engines.find(e => e.name === 'Google Maps')!.status = 'active';
+    emitEP();
     await enrichFromGooglePlaces(zeroData, onProgress);
+    _ep.engines.find(e => e.name === 'Google Maps')!.status = 'done';
   }
 
+  _ep.activePass = 'Complete'; _ep.percent = 100;
+  _ep.engines.forEach(e => { if (e.status === 'active') e.status = 'done'; });
+  _ep.engines.find(e => e.name === 'Website Scraper')!.status = 'done';
+  emitEP();
   return results;
 }
 
