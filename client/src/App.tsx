@@ -101,7 +101,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '3.9.1';
+const APP_VERSION = '3.9.2';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -167,7 +167,12 @@ export default function App() {
         const searchQ = selectedCountry ? `${cityQuery}, ${selectedCountry}` : cityQuery;
         const results = await resolveCity(searchQ);
         setCityResults(results.slice(0, 8));
-      } catch {}
+        setError('');
+      } catch (e: any) {
+        setCityResults([]);
+        if (e.message?.includes('rate limit')) setError('Search servers are busy — wait a few seconds and try again');
+        else if (e.message?.includes('No results')) setError(''); // silent for no results
+      }
       setCitySearching(false);
     }, 400);
     return () => clearTimeout(timer);

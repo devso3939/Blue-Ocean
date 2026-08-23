@@ -22,23 +22,31 @@ export interface CityResult {
 
 export async function resolveCity(query: string): Promise<CityResult[]> {
   const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&addressdetails=1&limit=5&extratags=1`;
-  const res = await directFetch(url, { headers: { 'Accept': 'language,en' } });
-  if (!res.ok) throw new Error(`Nominatim returned ${res.status}`);
-  const data = await res.json();
-  if (!data.length) throw new Error(`No results found for "${query}"`);
-  return data.map((r: any) => {
-    const bbox = r.boundingbox.map(Number);
-    const pop = r.extratags?.population ? parseInt(r.extratags.population) : null;
-    return {
-      name: r.address?.city || r.address?.town || r.address?.village || r.address?.municipality || r.display_name.split(',')[0],
-      country: r.address?.country || '',
-      countryCode: r.address?.country_code?.toUpperCase() || '',
-      lat: parseFloat(r.lat),
-      lon: parseFloat(r.lon),
-      population: pop,
-      bbox: [bbox[0], bbox[2], bbox[1], bbox[3]],
-    };
-  });
+  // Retry up to 3 times on rate limit (429) with backoff
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = await directFetch(url, { headers: { 'Accept': 'language,en' } });
+    if (res.status === 429) {
+      await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
+      continue;
+    }
+    if (!res.ok) throw new Error(`Nominatim returned ${res.status}`);
+    const data = await res.json();
+    if (!data.length) throw new Error(`No results found for "${query}"`);
+    return data.map((r: any) => {
+      const bbox = r.boundingbox.map(Number);
+      const pop = r.extratags?.population ? parseInt(r.extratags.population) : null;
+      return {
+        name: r.address?.city || r.address?.town || r.address?.village || r.address?.municipality || r.display_name.split(',')[0],
+        country: r.address?.country || '',
+        countryCode: r.address?.country_code?.toUpperCase() || '',
+        lat: parseFloat(r.lat),
+        lon: parseFloat(r.lon),
+        population: pop,
+        bbox: [bbox[0], bbox[2], bbox[1], bbox[3]],
+      };
+    });
+  }
+  throw new Error('Nominatim rate limit — try again in a few seconds');
 }
 
 // ─── Business Data ─────────────────────────────────────────────────
