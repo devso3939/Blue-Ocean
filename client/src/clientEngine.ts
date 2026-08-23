@@ -1654,18 +1654,21 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
 
   _ep.activePass = 'Reverse geocoding addresses'; _ep.passNumber = 0; _ep.percent = 70; emitEP();
   if (allBizList.length > 0) {
-    const maxEnrich = Math.min(allBizList.length, 200);
-    // Nominatim rate limit: send 3 at a time with 1.5s delay between groups (~2 req/sec)
+    // Cap at 100 businesses to keep this phase under ~90 seconds
+    const maxEnrich = Math.min(allBizList.length, 100);
     const CONCURRENCY = 3;
+    let rateLimitHits = 0;
     for (let i = 0; i < maxEnrich; i += CONCURRENCY) {
       if (isCancelled()) break;
+      // If rate limited 3+ times, skip remaining reverse geocoding
+      if (rateLimitHits >= 3) { onProgress?.(78, 'Nominatim busy — skipping remaining reverse geocoding'); break; }
       const batch = allBizList.slice(i, i + CONCURRENCY);
-      const results = await Promise.allSettled(batch.map(async (b) => {
+      await Promise.allSettled(batch.map(async (b) => {
         try {
           const nominatimRevUrl = `https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=json&zoom=18&addressdetails=1&extratags=1&accept-language=en`;
           const r = await directFetch(nominatimRevUrl, {
             headers: { 'Accept': 'application/json' },
-            signal: AbortSignal.timeout(5000),
+            signal: AbortSignal.timeout(4000),
           });
           if (r.ok) {
             const d = await r.json();
@@ -1680,18 +1683,15 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             if (!b.facebook) b.facebook = d.extratags?.['contact:facebook'] || d.extratags?.facebook || '';
             if (!b.instagram) b.instagram = d.extratags?.['contact:instagram'] || d.extratags?.instagram || '';
           } else if (r.status === 429) {
-            await wait(2000);
+            rateLimitHits++;
           }
         } catch {}
       }));
-      // Check if we got rate limited — if so, slow down
-      const rateLimited = results.some(r => r.status === 'rejected');
-      if (i + CONCURRENCY < maxEnrich) await wait(rateLimited ? 3000 : 1500);
-      if (i % 9 === 0) {
-        onProgress?.(75, `Enriching contact data… ${Math.min(i + CONCURRENCY, maxEnrich)}/${maxEnrich}`);
-        _ep.businessesProcessed = Math.min(i + CONCURRENCY, maxEnrich);
-        emitEP();
-      }
+      // Adaptive delay: normal 1.5s, or 3s if we've hit rate limits
+      if (i + CONCURRENCY < maxEnrich) await wait(rateLimitHits > 0 ? 3000 : 1500);
+      onProgress?.(75, `Enriching contact data… ${Math.min(i + CONCURRENCY, maxEnrich)}/${maxEnrich}`);
+      _ep.businessesProcessed = Math.min(i + CONCURRENCY, maxEnrich);
+      emitEP();
     }
   }
 
