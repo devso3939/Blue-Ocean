@@ -769,9 +769,13 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
 
   async function deepScrape(url: string): Promise<void> {
     try {
-      const r = await corsFetch(url, {
-        signal: AbortSignal.timeout(8000),
-      });
+      // Try direct fetch first (most websites work from browser)
+      let r: Response;
+      try {
+        r = await fetch(url, { signal: AbortSignal.timeout(5000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
+      } catch {
+        r = await corsFetch(url, { signal: AbortSignal.timeout(5000) });
+      }
       if (!r.ok) return;
       const html = await r.text();
       const full = html.substring(0, 80000);
@@ -1359,9 +1363,13 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
     for (const path of paths) {
       if (b.email) break;
       try {
-        const r = await corsFetch(base + path, {
-          signal: AbortSignal.timeout(6000),
-        });
+        // Try direct fetch first (most websites support CORS)
+        let r: Response;
+        try {
+          r = await fetch(base + path, { signal: AbortSignal.timeout(4000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
+        } catch {
+          r = await corsFetch(base + path, { signal: AbortSignal.timeout(4000) });
+        }
         if (!r.ok) continue;
         const html = await r.text();
         const junk = /example\.com|wixpress|sentry|googleapis|google\.com|cloudflare|schema\.org|duckduckgo/i;

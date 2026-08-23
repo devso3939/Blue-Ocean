@@ -101,7 +101,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '3.9.2';
+const APP_VERSION = '3.9.3';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -217,15 +217,16 @@ export default function App() {
           paint: {
             'circle-radius': [
               'interpolate', ['linear'], ['zoom'],
-              4, 10,
-              8, 14,
-              12, 18,
+              4, 8,
+              8, 12,
+              12, 16,
               16, 20,
             ],
             'circle-color': ['get', 'color'],
-            'circle-stroke-width': 3,
-            'circle-stroke-color': 'rgba(255,255,255,0.98)',
-            'circle-opacity': 0.95,
+            'circle-stroke-width': 2,
+            'circle-stroke-color': '#1e293b',
+            'circle-stroke-opacity': 0.8,
+            'circle-opacity': 0.9,
           },
         });
         // Text label layer: emoji or letter on each circle
@@ -912,7 +913,7 @@ export default function App() {
 
           {/* Map */}
           {/* Map + Business Panel */}
-          <div className="rounded-xl border border-border bg-card" style={{overflow: "visible"}}>
+          <div className="rounded-xl border border-border bg-card">
             <div className="px-5 py-3 border-b border-border flex items-center justify-between">
               <h3 className="text-sm font-semibold">
                 {selectedOppCategory
@@ -1013,7 +1014,7 @@ export default function App() {
 
           {/* Business List — only in single-category mode */}
           {selectedOppCategory && categoryBusinesses.length > 0 && (
-            <div className="rounded-xl border border-border bg-card" style={{overflow: "visible"}}>
+            <div className="rounded-xl border border-border bg-card">
               <div className="px-5 py-3 border-b border-border flex items-center justify-between gap-4">
                 <h3 className="text-sm font-semibold">
                   {getCategoryLabel(selectedOppCategory)} Businesses · {categoryBusinesses.length} found
