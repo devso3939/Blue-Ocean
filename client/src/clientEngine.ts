@@ -191,8 +191,33 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   // ─── Leisure ───
   if (l === 'fitness_centre' || l === 'sports_centre' || l === 'sports_hall' || l === 'swimming_pool') return 'gym';
 
-  // ─── Office ───
+  // ─── Amenity (car wash, etc) ───
+  if (a === 'car_wash') return 'car_wash';
+
+  // ─── Office-based businesses ───
   if (tags.office === 'coworking') return 'coworking';
+  if (tags.office === 'lawyer' || tags.office === 'attorney') return 'lawyer';
+  if (tags.office === 'accountant') return 'accountant';
+  if (tags.office === 'estate_agent' || tags.office === 'real_estate') return 'real_estate';
+  if (tags.office === 'insurance') return 'insurance';
+  if (tags.office === 'travel_agent') return 'travel_agency';
+  if (tags.office === 'it' || tags.office === 'software') return 'software';
+  if (tags.office === 'consulting') return 'it_consulting';
+  if (tags.office === 'marketing' || tags.office === 'advertising') return 'digital_marketing';
+  if (tags.office === 'telecommunication' || tags.office === 'it') return 'web_agency';
+
+  // ─── Name-based heuristics for new categories ───
+  const nameLower = (tags.name || tags['name:en'] || '').toLowerCase();
+  if (!tags.office && nameLower) {
+    if (/(law|legal|attorney|advo[ck]at)/.test(nameLower)) return 'lawyer';
+    if (/(account|buh|finance|audit)/.test(nameLower)) return 'accountant';
+    if (/(real.?estate|property|immobili)/.test(nameLower)) return 'real_estate';
+    if (/(insur|strakhov)/.test(nameLower)) return 'insurance';
+    if (/(travel|tur|tour|travel)/.test(nameLower)) return 'travel_agency';
+    if (/(clean|ubor|cleaning)/.test(nameLower)) return 'cleaning';
+    if (/(car.?wash|moyk[ae]|автомойк)/.test(nameLower)) return 'car_wash';
+    if (/(nail|manikюр|pedikюр)/.test(nameLower)) return 'nail_salon';
+  }
 
   return null;
 }
@@ -293,6 +318,19 @@ const CAT_OSM_FILTER: Record<string, string> = {
   bookstore: '["shop"~"books|stationery"]',
   library: '["amenity"="library"]',
   post_office: '["amenity"="post_office"]',
+  // ── v3.5.0 new categories ──
+  web_agency: '["office"~"it|design|consulting"]',
+  software: '["office"~"it|software"]',
+  it_consulting: '["office"~"it|consulting"]',
+  digital_marketing: '["office"~"it|marketing|advertising"]',
+  lawyer: '["office"="lawyer"]',
+  accountant: '["office"="accountant"]',
+  real_estate: '["office"~"estate_agent|real_estate"]',
+  insurance: '["office"="insurance"]',
+  travel_agency: '["office"~"travel_agent"]',
+  cleaning: '["shop"="cleaning"]',
+  car_wash: '["amenity"="car_wash"]',
+  nail_salon: '["shop"="beauty"]',
 };
 
 async function fetchOverpass(query: string, timeoutSec = 60): Promise<any> {
@@ -949,26 +987,66 @@ async function searchBing(query: string): Promise<{title: string; url: string; s
   } catch { return []; }
 }
 
+// Startpage search - uses Google results, different from DDG/Bing
+async function searchStartpage(query: string): Promise<{title: string; url: string; snippet: string}[]> {
+  try {
+    const r = await fetch(`https://corsproxy.io/?${encodeURIComponent('https://www.startpage.com/sp/search?query=' + query + '&cat=web&language=english')}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!r.ok) return [];
+    const html = await r.text();
+    const results: {title: string; url: string; snippet: string}[] = [];
+    // Extract from w-gl class result blocks
+    const blocks = html.match(/<div class="w-gl__result[^"]*">[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/gi) || [];
+    for (const block of blocks) {
+      const urlMatch = block.match(/href="(https?:\/\/[^"\s]+)"/);
+      const titleMatch = block.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
+      const snippetMatch = block.match(/<p class="w-gl__description[^"]*">([\s\S]*?)<\/p>/i);
+      if (urlMatch && !urlMatch[1].includes('startpage.com')) {
+        results.push({
+          url: urlMatch[1],
+          title: titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '') : '',
+          snippet: snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '') : '',
+        });
+      }
+    }
+    return results;
+  } catch { return []; }
+}
+
 // Domain probing - check if common domain patterns exist for a business
 async function probeDomains(b: Business): Promise<void> {
   if (b.website) return;
   const nameEn = getEnglishCityName(b.name);
-  if (!nameEn || nameEn === b.name) return; // Only probe for Latin names
-  const slug = nameEn.toLowerCase().replace(/[^a-z0-9]+/g, '').substring(0, 20);
-  if (slug.length < 3) return;
-  const tlds = ['.com', '.ge', '.org', '.net'];
-  for (const tld of tlds) {
-    try {
-      const domain = 'https://' + slug + tld;
-      const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(domain)}`, {
-        method: 'HEAD',
-        signal: AbortSignal.timeout(4000),
-      });
-      if (r.ok) {
-        b.website = domain;
-        return;
-      }
-    } catch {}
+  const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+  // Try multiple slug variants
+  const slugs: string[] = [];
+  if (nameEn && nameEn !== b.name) {
+    slugs.push(nameEn.toLowerCase().replace(/[^a-z0-9]+/g, '').substring(0, 20));
+    slugs.push(nameEn.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 25));
+  }
+  // Also try transliterated name
+  const translit = transliterateGeo(b.name);
+  if (translit !== b.name && translit !== nameEn) {
+    slugs.push(translit.toLowerCase().replace(/[^a-z0-9]+/g, '').substring(0, 20));
+  }
+  const tlds = ['.com', '.ge', '.org', '.net', '.io'];
+  for (const slug of slugs) {
+    if (slug.length < 3) continue;
+    for (const tld of tlds) {
+      try {
+        const domain = 'https://' + slug + tld;
+        const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(domain)}`, {
+          method: 'HEAD',
+          signal: AbortSignal.timeout(4000),
+        });
+        if (r.ok) {
+          b.website = domain;
+          return;
+        }
+      } catch {}
+    }
   }
 }
 
@@ -1030,12 +1108,14 @@ function buildSearchQuery(b: { name: string; address?: string; categoryLabel?: s
     parts.push(`"${b.name}"`);
     if (cityEn) parts.push(cityEn);
   } else {
-    // Non-Latin: search by street + category + city (NOT by Georgian name)
+    // Non-Latin: search by street + category + city + transliterated name
     if (streetEn && streetEn !== street) parts.push(`"${streetEn}"`);
     if (cityEn) parts.push(cityEn);
     if (category) parts.push(category);
-    // Also add transliterated name as fallback
+    // Add transliterated name
     if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
+    // Also add original non-Latin name (some engines handle it)
+    parts.push(`"${b.name}"`);
   }
   parts.push('phone email website contact');
   return encodeURIComponent(parts.join(' '));
@@ -1097,7 +1177,7 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
   if (b.email || !b.website) return;
   try {
     const base = b.website.replace(/\/$/, '');
-    const paths = ['/contact', '/contact-us', '/about', '/about-us', '/kontakti', '/kontakt', '/team', '/info', '/footer', '/imprint', '/privacy', '/sitemap.xml'];
+    const paths = ['/contact', '/contact-us', '/about', '/about-us', '/kontakti', '/kontakt', '/team', '/info', '/footer', '/imprint', '/privacy', '/sitemap.xml', '/kontaktay', '/kavshiri', '/momkhmarebeli', '/tsmrunebi', '/about.html', '/contacts', '/galerry', '/links'];
     for (const path of paths) {
       if (b.email) break;
       try {
@@ -1128,6 +1208,24 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
               const decoded = bytes.slice(1).map(x => x ^ key).map(x => String.fromCharCode(x)).join('');
               if (decoded.includes('@') && !junk.test(decoded)) b.email = decoded;
             } catch {}
+          }
+        }
+        // Also extract phone from contact page
+        if (!b.phone) {
+          const telM = html.match(/href="tel:([^"]+)"/);
+          if (telM) b.phone = telM[1].trim();
+          if (!b.phone) {
+            const phM = html.match(/\+?[\d][\d\s\-\.()]{7,18}/g);
+            if (phM) {
+              for (const p of phM) {
+                const digits = p.replace(/[^\d+]/g, '');
+                if (digits.length >= 8 && digits.length <= 15 && !junk.test(p)) { b.phone = p.trim(); break; }
+              }
+            }
+          }
+          if (!b.phone) {
+            const labeledPh = html.match(/(?:phone|tel|telephone|mobile|cell|fax|calls)\s*[:;]\s*([+\d][\d\s\-\.()]{7,18})/i);
+            if (labeledPh && labeledPh[1].replace(/[^\d]/g, '').length >= 8) b.phone = labeledPh[1].trim();
           }
         }
       } catch {}
@@ -1401,7 +1499,24 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           }
         }).catch(() => {});
 
-        await Promise.all([ddgP, braveP, bingP]);
+        // Startpage (uses Google results, different from DDG/Bing)
+        const startpageP = searchStartpage(decodeURIComponent(q)).then(results => {
+          for (const res of results) {
+            if (!b.phone) {
+              const phM = (res.snippet + ' ' + res.title).match(/\+?[\d][\d\s\-\.()]{7,18}/);
+              if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
+            }
+            if (!b.email) {
+              const emM = (res.snippet + ' ' + res.title).match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+              if (emM && !emM[0].includes('example.com')) b.email = emM[0];
+            }
+            if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com') && !res.url.includes('startpage.com')) {
+              b.website = res.url;
+            }
+          }
+        }).catch(() => {});
+
+        await Promise.all([ddgP, braveP, bingP, startpageP]);
         // Probe domains if still no website
         if (!b.website) await probeDomains(b);
         // Scrape website if found
