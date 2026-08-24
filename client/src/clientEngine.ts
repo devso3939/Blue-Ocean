@@ -1686,379 +1686,208 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
 
   onProgress?.(80, `Found ${totalBiz} businesses — enriching data in parallel…`);
 
-  // ── TURBO ENRICHMENT: Multi-strategy parallel pass ──
+  // ── Per-business enrichment pipeline ──
+  // Priority: Brave API → scrape website → DDG → scrape → Bing → Startpage → social → regional
+  // Each business follows the SAME priority chain, maximizing data per business
   if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
-  const BATCH_SIZE = 8;
-  let enrichedCount = 0;
 
-  // ── Pass 1: DDG + Brave + Bing + Startpage in parallel ──
-  _ep.activePass = 'Pass 1: Multi-engine search'; _ep.passNumber = 1; _ep.percent = 80;
-  _ep.engines.find(e => e.name === 'DuckDuckGo')!.status = 'active';
-  _ep.engines.find(e => e.name === 'Brave')!.status = 'active';
-  _ep.engines.find(e => e.name === 'Bing')!.status = 'active';
-  _ep.engines.find(e => e.name === 'Startpage')!.status = 'active';
-  emitEP();
   const NEEDS_ENRICHMENT = allBizList.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
   const maxEnrich = Math.min(NEEDS_ENRICHMENT.length, 200);
+  const _EXCLUDE = /example\.com|wixpress|sentry\.io|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com/i;
 
-  for (let i = 0; i < maxEnrich; i += BATCH_SIZE) {
-    const batch = NEEDS_ENRICHMENT.slice(i, i + BATCH_SIZE);
+  _ep.activePass = 'Enriching contacts (priority pipeline)'; _ep.passNumber = 1; _ep.percent = 80;
+  _ep.engines.forEach(e => { e.status = 'active'; e.found = 0; });
+  emitEP();
+
+  const _BATCH = 5;
+  let enrichedCount = 0;
+
+  for (let i = 0; i < maxEnrich; i += _BATCH) {
+    if (isCancelled()) break;
+    const batch = NEEDS_ENRICHMENT.slice(i, i + _BATCH);
     await Promise.all(batch.map(async (b) => {
       try {
-        const q = buildSearchQuery(b);
-        // DDG + Brave in parallel
-        const ddgP = corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-          signal: AbortSignal.timeout(10000),
-        }).then(async r => {
-          if (r.ok) { extractFromHtml(await r.text(), b); enrichedCount++; }
-        }).catch(() => {});
+        // ═══ Step 1: Brave API (fast, reliable, has API key) ═══
+        // Brave often has Google Maps business data in knowledge graph
+        if (!b.phone || !b.website || !b.email) {
+          try {
+            const q = buildSearchQuery(b);
+            const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=5`, {
+              headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
+              signal: AbortSignal.timeout(6000),
+            });
+            if (r.ok) {
+              const data = await r.json();
+              for (const res of (data.web?.results || [])) {
+                extractFromText((res.description || '') + ' ' + (res.title || ''), b);
+                if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('google.com/maps')) {
+                  b.website = res.url;
+                }
+              }
+              if (!b.website && data.knowledge_graph?.url && !_EXCLUDE.test(data.knowledge_graph.url)) {
+                b.website = data.knowledge_graph.url;
+              }
+            }
+          } catch {}
 
-        const braveP = BRAVE_API_KEY ? fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=3`, {
-          headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
-          signal: AbortSignal.timeout(8000),
-        }).then(async r => {
-          if (!r.ok) return;
-          const data = await r.json();
-          for (const res of (data.web?.results || [])) {
-            extractFromText((res.description || '') + ' ' + (res.title || ''), b);
-            if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com')) b.website = res.url;
+          // KEY STEP: If website found → immediately scrape it for email/phone/social
+          if (b.website && (!b.email || !b.phone || !b.facebook || !b.instagram)) {
+            try { await enrichFromWebsiteDeep(b); } catch {}
           }
-          if (!b.website && data.knowledge_graph?.url && !EXCLUDE_DOMAINS.test(data.knowledge_graph.url)) b.website = data.knowledge_graph.url;
-        }).catch(() => {}) : Promise.resolve();
-
-        // Bing search (different results than DDG/Brave)
-        const bingP = searchBing(q).then(results => {
-          for (const res of results) {
-            if (!b.phone) {
-              const phM = (res.snippet + ' ' + res.title).match(/\+?[\d][\d\s\-\.()]{7,18}/);
-              if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
-            }
-            if (!b.email) {
-              const emM = (res.snippet + ' ' + res.title).match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-              if (emM && !emM[0].includes('example.com')) b.email = emM[0];
-            }
-            if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com') && !res.url.includes('bing.com')) {
-              b.website = res.url;
-            }
+          if (!b.email && b.website) {
+            try { await scrapeContactPageForEmail(b); } catch {}
           }
-        }).catch(() => {});
+        }
 
-        // Startpage (uses Google results, different from DDG/Bing)
-        const startpageP = searchStartpage(decodeURIComponent(q)).then(results => {
-          for (const res of results) {
-            if (!b.phone) {
-              const phM = (res.snippet + ' ' + res.title).match(/\+?[\d][\d\s\-\.()]{7,18}/);
-              if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
+        // ═══ Step 2: DuckDuckGo search (different results than Brave) ═══
+        if (!b.phone || !b.website || !b.email) {
+          try {
+            const q = buildSearchQuery(b);
+            const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
+              headers: { 'User-Agent': 'Mozilla/5.0' },
+              signal: AbortSignal.timeout(8000),
+            });
+            if (r.ok) {
+              const html = await r.text();
+              extractFromHtml(html, b);
             }
-            if (!b.email) {
-              const emM = (res.snippet + ' ' + res.title).match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-              if (emM && !emM[0].includes('example.com')) b.email = emM[0];
-            }
-            if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com') && !res.url.includes('startpage.com')) {
-              b.website = res.url;
-            }
+          } catch {}
+
+          // Found website from DDG → scrape it immediately
+          if (b.website && (!b.email || !b.phone)) {
+            try { await enrichFromWebsiteDeep(b); } catch {}
           }
-        }).catch(() => {});
+          if (!b.email && b.website) {
+            try { await scrapeContactPageForEmail(b); } catch {}
+          }
+        }
 
-        await Promise.all([ddgP, braveP, bingP, startpageP]);
-        // Probe domains if still no website
-        if (!b.website) await probeDomains(b);
-        // Scrape website if found
-        if (b.website && (!b.email || !b.phone || !b.facebook)) await enrichFromWebsiteDeep(b);
+        // ═══ Step 3: Bing search (yet more different results) ═══
+        if (!b.phone || !b.website || !b.email) {
+          try {
+            const q = buildSearchQuery(b);
+            const bingResults = await searchBing(q);
+            for (const res of bingResults) {
+              extractFromText((res.snippet || '') + ' ' + (res.title || ''), b);
+              if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('bing.com')) {
+                b.website = res.url;
+              }
+            }
+          } catch {}
+
+          if (b.website && (!b.email || !b.phone)) {
+            try { await enrichFromWebsiteDeep(b); } catch {}
+          }
+        }
+
+        // ═══ Step 4: Startpage (uses Google results under the hood) ═══
+        if (!b.phone || !b.website || !b.email) {
+          try {
+            const q = decodeURIComponent(buildSearchQuery(b));
+            const spResults = await searchStartpage(q);
+            for (const res of spResults) {
+              extractFromText((res.snippet || '') + ' ' + (res.title || ''), b);
+              if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('startpage.com')) {
+                b.website = res.url;
+              }
+            }
+          } catch {}
+
+          if (b.website && (!b.email || !b.phone)) {
+            try { await enrichFromWebsiteDeep(b); } catch {}
+          }
+        }
+
+        // ═══ Step 5: Contact page scraping (last resort for email/phone) ═══
+        if (!b.email && b.website) {
+          try { await scrapeContactPageForEmail(b); } catch {}
+        }
+
+        // ═══ Step 6: Domain probing (guess website URL if none found) ═══
+        if (!b.website) {
+          try { await probeDomains(b); } catch {}
+          if (b.website && (!b.email || !b.phone)) {
+            try { await enrichFromWebsiteDeep(b); } catch {}
+          }
+        }
+
+        // ═══ Step 7: Social media search (for Facebook/Instagram) ═══
+        if (!b.facebook && !b.instagram) {
+          try {
+            const nameEn2 = getEnglishCityName(b.name);
+            const cityEn2 = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+            const street2 = b.address ? b.address.split(',')[0]?.trim() || '' : '';
+            const streetEn2 = getEnglishCityName(street2);
+            const parts2 = ["'" + (nameEn2 || b.name) + "'"];
+            if (streetEn2 && streetEn2 !== street2) parts2.push(streetEn2);
+            if (cityEn2) parts2.push(cityEn2);
+            parts2.push('facebook instagram linkedin social media');
+            const sq = encodeURIComponent(parts2.join(' '));
+            const sr = await corsFetch('https://html.duckduckgo.com/html/?q=' + sq, {
+              headers: { 'User-Agent': 'Mozilla/5.0' },
+              signal: AbortSignal.timeout(6000),
+            });
+            if (sr.ok) extractFromHtml(await sr.text(), b);
+          } catch {}
+        }
+
+        // ═══ Step 8: Guess email from domain (info@ is most common) ═══
+        if (!b.email && b.website) {
+          const guesses = guessEmailsFromDomain(b.website);
+          if (guesses.length > 0) b.email = guesses[0];
+        }
+
+        if (b.phone || b.email || b.website) enrichedCount++;
       } catch {}
-      // Per-business progress update so UI moves in real time
-      _ep.businessesProcessed++;
-      _ep.engines.find(e => e.name === 'DuckDuckGo')!.found = _ep.contacts.emails;
-      _ep.engines.find(e => e.name === 'Brave')!.found = _ep.contacts.phones;
-      _ep.engines.find(e => e.name === 'Bing')!.found = _ep.contacts.websites;
-      emitEP();
     }));
-    if (i + BATCH_SIZE < maxEnrich) await wait(1200);
-    onProgress?.(83, `Pass 1 (search)… ${Math.min(i + BATCH_SIZE, maxEnrich)}/${maxEnrich} (${enrichedCount} enriched)`);
+
+    if (i + _BATCH < maxEnrich) await wait(800);
+    _ep.businessesProcessed = Math.min(i + _BATCH, maxEnrich);
+    _ep.engines.find(e => e.name === 'DuckDuckGo')!.found = _ep.contacts.emails;
+    _ep.engines.find(e => e.name === 'Brave')!.found = _ep.contacts.phones;
+    _ep.engines.find(e => e.name === 'Bing')!.found = _ep.contacts.websites;
+    _ep.engines.find(e => e.name === 'Website Scraper')!.found = _ep.contacts.social;
+    emitEP();
+    onProgress?.(80 + Math.round(10 * Math.min(i + _BATCH, maxEnrich) / maxEnrich),
+      `Enriching… ${Math.min(i + _BATCH, maxEnrich)}/${maxEnrich} (📧${_ep.contacts.emails} 📞${_ep.contacts.phones} 🌐${_ep.contacts.websites} 👤${_ep.contacts.social})`);
   }
+
   _ep.engines.find(e => e.name === 'DuckDuckGo')!.status = 'done';
   _ep.engines.find(e => e.name === 'Brave')!.status = 'done';
   _ep.engines.find(e => e.name === 'Bing')!.status = 'done';
   _ep.engines.find(e => e.name === 'Startpage')!.status = 'done';
 
   if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
-  // ── Pass 1b: Category-based search for businesses still missing ALL data ─
-  const stillMissing = allBizList.filter(b => !b.phone && !b.email && !b.website);
-  if (stillMissing.length > 0) {
-    const byCategory = new Map<string, Business[]>();
-    for (const b of stillMissing) {
-      const cat = b.categoryLabel || b.category;
-      if (!byCategory.has(cat)) byCategory.set(cat, []);
-      byCategory.get(cat)!.push(b);
-    }
-    for (const [catLabel, catBizs] of byCategory) {
-      const cityEn = catBizs[0].address ? getEnglishCityName(catBizs[0].address.split(',').pop()?.trim() || '') : '';
-      if (!cityEn) continue;
-      const catQuery = encodeURIComponent(catLabel + ' ' + cityEn + ' phone email contact');
-      try {
-        const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + catQuery, {
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-          signal: AbortSignal.timeout(10000),
-        });
-        if (r.ok) {
-          const html = await r.text();
-          const resultBlocks = html.match(/class="result__body"[^>]*>[\s\S]*?(?=class="result__body"|$)/g) || [];
-          for (const block of resultBlocks) {
-            const blockText = block.replace(/<[^>]+>/g, ' ');
-            const blockLinks = block.match(/href="([^"]+)"/g) || [];
-            for (const b of catBizs) {
-              const nameEn2 = getEnglishCityName(b.name);
-              const nameLower = (nameEn2 || b.name).toLowerCase();
-              const blockLower = blockText.toLowerCase();
-              if (blockLower.includes(nameLower) || (nameLower.length > 3 && blockLower.includes(nameLower.substring(0, Math.min(nameLower.length, 6))))) {
-                if (!b.phone) {
-                  const phM = blockText.match(/\+?[\d][\d\s\-\.()]{7,18}/);
-                  if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
-                }
-                if (!b.email) {
-                  const emM = blockText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-                  if (emM && !emM[0].includes('example.com')) b.email = emM[0];
-                }
-                if (!b.website) {
-                  for (const link of blockLinks) {
-                    let url = link.replace(/href="/, '').replace(/"$/, '');
-                    const uddg = url.match(/uddg=([^&]+)/);
-                    if (uddg) url = decodeURIComponent(uddg[1]);
-                    if (url.startsWith('http') && !url.match(/google|facebook|instagram|yelp|wikipedia|duckduckgo/i)) {
-                      b.website = url; break;
-                    }
-                  }
-                }
-                if (b.phone || b.email || b.website) break;
-              }
-            }
-          }
-        }
-      } catch {}
-      await wait(1500);
-    }
-    onProgress?.(85, 'Category search complete');
-  }
 
-  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
-  // ── Pass 1d: Address-based search for non-Latin businesses ─
-  const needAddressSearch = allBizList.filter(b => !b.phone && !b.email && !b.website && !/^[a-zA-Z]/.test(b.name));
-  if (needAddressSearch.length > 0) {
-    onProgress?.(86, `Pass 1d (address search)... ${needAddressSearch.length} businesses`);
-    for (let i = 0; i < Math.min(needAddressSearch.length, 50); i += BATCH_SIZE) {
-      const batch = needAddressSearch.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (b) => {
-        try {
-          const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
-          const streetEn = getEnglishCityName(street);
-          const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
-          const category = b.categoryLabel || '';
-          if (!streetEn || streetEn === street) return;
-          const q = encodeURIComponent(streetEn + ' ' + cityEn + ' ' + category + ' phone email');
-          const ddgR = await corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal: AbortSignal.timeout(8000),
-          });
-          if (ddgR.ok) extractFromHtml(await ddgR.text(), b);
-          if (!b.phone || !b.email) {
-            const bingResults = await searchBing(q);
-            for (const res of bingResults) {
-              const text = res.snippet + ' ' + res.title;
-              if (!b.phone) {
-                const phM = text.match(/\+?[\d][\d\s\-\.()]{7,18}/);
-                if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
-              }
-              if (!b.email) {
-                const emM = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-                if (emM && !emM[0].includes('example.com')) b.email = emM[0];
-              }
-              if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com')) {
-                b.website = res.url;
-              }
-              if (b.phone && b.email) break;
-            }
-          }
-        } catch {}
-      }));
-      if (i + BATCH_SIZE < needAddressSearch.length) await wait(1200);
-    }
-  }
+  // ═══ Regional fallbacks for businesses with zero data ═══
 
-  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
-  // ── Pass 2: Targeted email search for businesses still missing email ──
-  // Also try direct contact page scraping for businesses with websites
-  const missingEmailWebsites = allBizList.filter(b => !b.email && b.website);
-  if (missingEmailWebsites.length > 0) {
-    for (let i = 0; i < Math.min(missingEmailWebsites.length, 60); i += BATCH_SIZE) {
-      const batch = missingEmailWebsites.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(b => scrapeContactPageForEmail(b)));
-      if (i + BATCH_SIZE < missingEmailWebsites.length) await wait(800);
-    }
-  }
-  // ── Pass 1c: Domain probing for businesses without websites ──
-  const noWebsite = allBizList.filter(b => !b.website);
-  if (noWebsite.length > 0) {
-    for (let i = 0; i < Math.min(noWebsite.length, 40); i += BATCH_SIZE) {
-      const batch = noWebsite.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(b => probeDomains(b)));
-      if (i + BATCH_SIZE < noWebsite.length) await wait(500);
-    }
-  }
-
-  const missingEmail = allBizList.filter(b => !b.email);
-  if (missingEmail.length > 0) {
-    onProgress?.(87, `Pass 2 (email)… searching ${missingEmail.length} businesses`);
-    _ep.activePass = 'Pass 2: Email search'; _ep.passNumber = 2; _ep.percent = 87; _ep.engines.find(e => e.name === 'DuckDuckGo')!.status = 'active'; emitEP();
-    for (let i = 0; i < Math.min(missingEmail.length, 80); i += BATCH_SIZE) {
-      const batch = missingEmail.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (b) => {
-        try {
-          const q = buildEmailQuery(b);
-          const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal: AbortSignal.timeout(8000),
-          });
-          if (r.ok) extractFromHtml(await r.text(), b);
-          // Also try Brave for email
-          if (!b.email && BRAVE_API_KEY) {
-            try {
-              const br = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=2`, {
-                headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
-                signal: AbortSignal.timeout(6000),
-              });
-              if (br.ok) {
-                const bd = await br.json();
-                for (const res of (bd.web?.results || [])) extractFromText((res.description || '') + ' ' + (res.title || ''), b);
-              }
-            } catch {}
-          }
-          // If still no email but we have a website, try guessing email patterns
-          if (!b.email && b.website) {
-            const guesses = guessEmailsFromDomain(b.website);
-            if (guesses.length > 0) {
-              // Quick HEAD request to check if common emails exist (won't work for most servers)
-              // Instead, just set info@ as fallback — most common business email
-              b.email = guesses[0]; // info@domain.com
-            }
-          }
-        } catch {}
-      }));
-      if (i + BATCH_SIZE < missingEmail.length) await wait(1200);
-    }
-  }
-
-  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
-  // ── Pass 3: Targeted phone search for businesses still missing phone ──
-  const missingPhone = allBizList.filter(b => !b.phone);
-  if (missingPhone.length > 0) {
-    onProgress?.(90, `Pass 3 (phone)… searching ${missingPhone.length} businesses`);
-    _ep.activePass = 'Pass 3: Phone search'; _ep.passNumber = 3; _ep.percent = 90; _ep.engines.find(e => e.name === 'DuckDuckGo')!.status = 'active'; emitEP();
-    for (let i = 0; i < Math.min(missingPhone.length, 80); i += BATCH_SIZE) {
-      const batch = missingPhone.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (b) => {
-        try {
-          const q = buildPhoneQuery(b);
-          const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal: AbortSignal.timeout(8000),
-          });
-          if (r.ok) extractFromHtml(await r.text(), b);
-          // Also try Brave
-          if (!b.phone && BRAVE_API_KEY) {
-            try {
-              const br = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=2`, {
-                headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
-                signal: AbortSignal.timeout(6000),
-              });
-              if (br.ok) {
-                const bd = await br.json();
-                for (const res of (bd.web?.results || [])) extractFromText((res.description || '') + ' ' + (res.title || ''), b);
-              }
-            } catch {}
-          }
-        } catch {}
-      }));
-      if (i + BATCH_SIZE < missingPhone.length) await wait(1200);
-    }
-  }
-
-  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
-  // ── Pass 4: Website scraping for businesses that got website from search ──
-  const needScrape = allBizList.filter(b => b.website && (!b.email || !b.phone || !b.facebook || !b.instagram));
-  if (needScrape.length > 0) {
-    onProgress?.(93, `Pass 4 (website scraping)… ${needScrape.length} sites`);
-    _ep.activePass = 'Pass 4: Website scraping'; _ep.passNumber = 4; _ep.percent = 93; _ep.engines.find(e => e.name === 'Website Scraper')!.status = 'active'; emitEP();
-    for (let i = 0; i < Math.min(needScrape.length, 80); i += BATCH_SIZE) {
-      const batch = needScrape.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (b) => {
-        await enrichFromWebsiteDeep(b);
-        if (!b.email) await scrapeContactPageForEmail(b);
-      }));
-      if (i + BATCH_SIZE < needScrape.length) await wait(1000);
-    }
-  }
-
-  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
-  // ── Pass 5: Social media search for businesses still missing social ──
-  const missingSocial = allBizList.filter(b => !b.facebook && !b.instagram);
-  if (missingSocial.length > 0) {
-    onProgress?.(95, `Pass 5 (social)… ${missingSocial.length} businesses`);
-    _ep.activePass = 'Pass 5: Social media'; _ep.passNumber = 5; _ep.percent = 95; _ep.engines.find(e => e.name === 'DuckDuckGo')!.status = 'active'; emitEP();
-    for (let i = 0; i < Math.min(missingSocial.length, 80); i += BATCH_SIZE) {
-      const batch = missingSocial.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (b) => {
-        try {
-          const nameEn3 = getEnglishCityName(b.name);
-          const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
-          const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
-          const streetEn = getEnglishCityName(street);
-          const parts = ["'" + (nameEn3 || b.name) + "'"];
-          if (streetEn && streetEn !== street) parts.push(streetEn);
-          if (cityEn) parts.push(cityEn);
-          parts.push('facebook instagram linkedin youtube tiktok social media contact');
-          const socialQ = encodeURIComponent(parts.join(' '));
-          const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + socialQ, {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal: AbortSignal.timeout(8000),
-          });
-          if (r.ok) extractFromHtml(await r.text(), b);
-        } catch {}
-      }));
-      if (i + BATCH_SIZE < missingSocial.length) await wait(1200);
-    }
-  }
-
-  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
-  // ── Pass 6b: 2GIS search for businesses still missing data ─
-  // 2GIS is excellent for Georgia, Russia, CIS countries
+  // ── 2GIS (excellent for Georgia, Russia, CIS countries) ──
   const need2GIS = allBizList.filter(b => !b.phone && !b.email && !b.website);
   if (need2GIS.length > 0) {
-    onProgress?.(94, `Pass 6b (2GIS)... ${need2GIS.length} businesses`);
-    _ep.activePass = 'Pass 6: Regional search'; _ep.passNumber = 6; _ep.percent = 94; _ep.engines.find(e => e.name === '2GIS')!.status = 'active'; emitEP();
-    for (let i = 0; i < Math.min(need2GIS.length, 40); i += BATCH_SIZE) {
-      const batch = need2GIS.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (b) => {
+    _ep.activePass = 'Pass 2: Regional (2GIS)'; _ep.passNumber = 2; _ep.percent = 92;
+    _ep.engines.find(e => e.name === '2GIS')!.status = 'active'; emitEP();
+    for (let i2 = 0; i2 < Math.min(need2GIS.length, 40); i2 += _BATCH) {
+      if (isCancelled()) break;
+      const batch2 = need2GIS.slice(i2, i2 + _BATCH);
+      await Promise.all(batch2.map(async (b) => {
         try {
-          const nameEn = getEnglishCityName(b.name);
-          const q = encodeURIComponent((nameEn || b.name) + ' ' + (b.address?.split(',').pop() || ''));
-          // Search 2GIS catalog API
-          const r = await corsFetch('https://catalog.api.2gis.com/3.0/items?q=' + q + '&key=rurbbn3446&fields=items.contact_groups,items.reviews', {
-            signal: AbortSignal.timeout(8000),
+          const nameEn3 = getEnglishCityName(b.name);
+          const q2 = encodeURIComponent((nameEn3 || b.name) + ' ' + (b.address?.split(',').pop() || ''));
+          const r2 = await corsFetch('https://catalog.api.2gis.com/3.0/items?q=' + q2 + '&key=rurbbn3446&fields=items.contact_groups,items.reviews', {
+            signal: AbortSignal.timeout(6000),
           });
-          if (r.ok) {
-            const data = await r.json();
-            const items = data.result?.items || [];
-            for (const item of items) {
+          if (r2.ok) {
+            const d2 = await r2.json();
+            const items2 = d2.result?.items || [];
+            for (const item of items2) {
               const itemName = (item.name || '').toLowerCase();
-              const bizName = (nameEn || b.name).toLowerCase();
+              const bizName = (nameEn3 || b.name).toLowerCase();
               if (itemName.includes(bizName.substring(0, 5)) || bizName.includes(itemName.substring(0, 5))) {
-                // Found match — extract contact info
                 if (!b.phone && item.contact_groups) {
                   for (const grp of item.contact_groups) {
                     for (const contact of (grp.contacts || [])) {
-                      if (contact.type === 'phone' && contact.value) {
-                        b.phone = contact.value.replace(/\D/g, '').length >= 8 ? contact.value : '';
+                      if (contact.type === 'phone' && contact.value && contact.value.replace(/\D/g, '').length >= 8) {
+                        b.phone = contact.value;
                       }
                     }
                   }
@@ -2072,118 +1901,44 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                     }
                   }
                 }
-                if (!b.address && item.address_name) {
-                  b.address = item.address_name;
-                }
+                if (!b.address && item.address_name) b.address = item.address_name;
                 break;
               }
             }
           }
         } catch {}
       }));
-      if (i + BATCH_SIZE < need2GIS.length) await wait(1000);
+      if (i2 + _BATCH < need2GIS.length) await wait(1000);
     }
+    _ep.engines.find(e => e.name === '2GIS')!.status = 'done'; emitEP();
   }
 
-  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
-  // ── Pass 6c: Yandex search for businesses still missing data ─
-  // Yandex is dominant in Georgia/Russia/CIS
+  // ── Yandex (dominant in Georgia/Russia/CIS) ──
   const needYandex = allBizList.filter(b => !b.phone && !b.email && !b.website);
   if (needYandex.length > 0) {
-    onProgress?.(95, `Pass 6c (Yandex)... ${needYandex.length} businesses`);
-    _ep.engines.find(e => e.name === '2GIS')!.status = 'done'; _ep.engines.find(e => e.name === 'Yandex')!.status = 'active'; emitEP();
-    for (let i = 0; i < Math.min(needYandex.length, 30); i += BATCH_SIZE) {
-      const batch = needYandex.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (b) => {
+    _ep.activePass = 'Pass 3: Regional (Yandex)'; _ep.passNumber = 3; _ep.percent = 94;
+    _ep.engines.find(e => e.name === 'Yandex')!.status = 'active'; emitEP();
+    for (let i3 = 0; i3 < Math.min(needYandex.length, 30); i3 += _BATCH) {
+      if (isCancelled()) break;
+      const batch3 = needYandex.slice(i3, i3 + _BATCH);
+      await Promise.all(batch3.map(async (b) => {
         try {
-          const nameEn = getEnglishCityName(b.name);
-          const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
-          const q = encodeURIComponent(`site:yandex.* ${nameEn || b.name} ${cityEn || ''} phone`);
-          const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal: AbortSignal.timeout(8000),
-          });
-          if (r.ok) {
-            const html = await r.text();
-            // Extract from Yandex search result snippets
-            const snippetBlocks = html.match(/class="result__snippet"[^>]*>[\s\S]*?(?=class="result__body"|$)/g) || [];
-            for (const block of snippetBlocks) {
-              const text = block.replace(/<[^>]+>/g, ' ');
-              if (!b.phone) {
-                const phM = text.match(/\+?[\d][\d\s\-\.()]{7,18}/);
-                if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
-              }
-              if (!b.email) {
-                const emM = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-                if (emM && !emM[0].includes('example.com')) b.email = emM[0];
-              }
-              if (b.phone || b.email) break;
-            }
-          }
-        } catch {}
-      }));
-      if (i + BATCH_SIZE < needYandex.length) await wait(1200);
-    }
-  }
-
-  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
-  // ── Pass 6d: Wikipedia/Wikidata lookup for popular businesses ─
-  const needWiki = allBizList.filter(b => !b.phone && !b.email && !b.website && !b.facebook);
-  if (needWiki.length > 0) {
-    const cityEn = selectedCityEn || '';
-    for (let i = 0; i < Math.min(needWiki.length, 30); i += BATCH_SIZE) {
-      const batch = needWiki.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (b) => {
-        try {
-          const nameEn = getEnglishCityName(b.name);
-          const q = encodeURIComponent(`"${nameEn || b.name}" Wikipedia`);
-          const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
+          const nameEn4 = getEnglishCityName(b.name);
+          const cityEn3 = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+          const q3 = encodeURIComponent(`site:yandex.* ${nameEn4 || b.name} ${cityEn3 || ''} phone`);
+          const r3 = await corsFetch('https://html.duckduckgo.com/html/?q=' + q3, {
             headers: { 'User-Agent': 'Mozilla/5.0' },
             signal: AbortSignal.timeout(6000),
           });
-          if (r.ok) {
-            const html = await r.text();
-            // Find Wikipedia links
-            const wikiMatch = html.match(/en\.wikipedia\.org\/wiki\/([\w%]+)/);
-            if (wikiMatch) {
-              const wikiUrl = 'https://en.wikipedia.org/wiki/' + wikiMatch[1];
-              if (!b.website) b.website = wikiUrl;
-              // Try to get info from Wikipedia page
-              try {
-                const wr = await corsFetch(wikiUrl, {
-                  signal: AbortSignal.timeout(6000),
-                });
-                if (wr.ok) {
-                  const wHtml = await wr.text();
-                  if (!b.phone) {
-                    const phM = wHtml.match(/\+?[\d][\d\s\-\.()]{7,18}/);
-                    if (phM && phM[0].replace(/[^\d]/g, '').length >= 8) b.phone = phM[0].trim();
-                  }
-                  if (!b.email) {
-                    const emM = wHtml.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-                    if (emM && !emM[0].includes('example.com') && !emM[0].includes('wikipedia')) b.email = emM[0];
-                  }
-                }
-              } catch {}
-            }
+          if (r3.ok) {
+            const html3 = await r3.text();
+            extractFromHtml(html3, b);
           }
         } catch {}
       }));
-      if (i + BATCH_SIZE < needWiki.length) await wait(800);
+      if (i3 + _BATCH < needYandex.length) await wait(1200);
     }
-  }
-
-  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
-  // ── Pass 6: Google Maps for businesses with zero data ──
-  const zeroData = allBizList.filter(b => !b.phone && !b.email && !b.website && !b.facebook && !b.instagram);
-  if (zeroData.length > 0) {
-    onProgress?.(97, `Pass 6 (Google Maps)… ${zeroData.length} businesses`);
-    _ep.activePass = 'Pass 7: Google Maps'; _ep.passNumber = 7; _ep.percent = 97;
-    _ep.engines.find(e => e.name === 'Yandex')!.status = 'done';
-    _ep.engines.find(e => e.name === 'Google Maps')!.status = 'active';
-    emitEP();
-    await enrichFromGooglePlaces(zeroData, onProgress);
-    _ep.engines.find(e => e.name === 'Google Maps')!.status = 'done';
+    _ep.engines.find(e => e.name === 'Yandex')!.status = 'done'; emitEP();
   }
 
   _ep.activePass = 'Complete'; _ep.percent = 100;
