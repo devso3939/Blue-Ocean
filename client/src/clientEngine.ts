@@ -69,6 +69,11 @@ export interface Business {
   linkedin: string;
   youtube: string;
   tiktok: string;
+  rating: number;
+  reviewCount: number;
+  hours: string;
+  twitter: string;
+  pinterest: string;
 }
 
 // ─── Enrichment Progress (real-time panel) ──────────────────────
@@ -414,7 +419,7 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
 
 // Direct fetch for services that support CORS (Nominatim, Overpass)
 async function directFetch(url: string, init?: RequestInit): Promise<Response> {
-  return fetch(url, { ...init, headers: { 'User-Agent': 'BlueOcean/4.0.0 (https://devso3939.github.io/Blue-Ocean; contact@blueocean.app)', ...init?.headers } });
+  return fetch(url, { ...init, headers: { 'User-Agent': 'BlueOcean/5.0.0 (https://devso3939.github.io/Blue-Ocean; contact@blueocean.app)', ...init?.headers } });
 }
 
 // Map category IDs to OSM tag filters for focused queries
@@ -696,6 +701,11 @@ out center body;`;
       linkedin: extractLinkedIn(tags),
       youtube: extractYouTube(tags),
       tiktok: extractTikTok(tags),
+      rating: 0,
+      reviewCount: 0,
+      hours: tags.opening_hours || '',
+      twitter: '',
+      pinterest: '',
     };
 
     if (!results.has(category)) results.set(category, []);
@@ -709,7 +719,8 @@ out center body;`;
 
 // ─── Social Platform Deep Search ──────────────────────────────
 // Searches for business presence on LinkedIn, YouTube, Twitter, TikTok, Pinterest
-async function enrichFromSocialPlatforms(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {    const NEEDS = businesses.filter(b => !b.facebook && !b.instagram);
+async function enrichFromSocialPlatforms(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
+  const NEEDS = businesses.filter(b => !b.facebook && !b.instagram);
   if (NEEDS.length === 0) return;
   const BATCH = 3;
   const max = Math.min(NEEDS.length, 80);
@@ -989,6 +1000,135 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
   }
 }
 
+// ─── WordPress REST API Scraper ────────────────────────────────
+// WordPress sites expose contact info via /wp-json/wp/v2/users and /wp-json/
+async function scrapeWordPressAPI(b: Business): Promise<void> {
+  if (!b.website || (b.email && b.phone)) return;
+  const base = b.website.replace(/\/$/, '');
+  const JUNK = /example\.com|wixpress|sentry|googleapis|google\.com|cloudflare|schema\.org/i;
+
+  const endpoints = ['/wp-json/', '/wp-json/wp/v2/users', '/wp-json/wp/v2/pages'];
+  for (const ep of endpoints) {
+    if (b.email && b.phone) break;
+    try {
+      const r = await corsFetch(base + ep, {
+        signal: AbortSignal.timeout(4000),
+        headers: { 'Accept': 'application/json' },
+      });
+      if (!r.ok) continue;
+      const text = await r.text();
+      // Extract emails
+      if (!b.email) {
+        const emails = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+        if (emails) {
+          for (const e of emails) {
+            const clean = e.replace(/[\s>);]+$/, '');
+            if (!JUNK.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
+          }
+        }
+      }
+      // Extract phones
+      if (!b.phone) {
+        const phones = text.match(/\+?[\d][\d\s\-\.()]{7,18}/g);
+        if (phones) {
+          for (const p of phones) {
+            if (p.replace(/[^\d+]/g, '').length >= 8 && p.replace(/[^\d+]/g, '').length <= 15) {
+              b.phone = p.trim(); break;
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+}
+
+// ─── Sitemap Scraper ────────────────────────────────────────────
+// Parse sitemap.xml to find contact/about pages, then scrape them
+async function scrapeSitemapForContacts(b: Business): Promise<void> {
+  if (!b.website || (b.email && b.phone)) return;
+  const base = b.website.replace(/\/$/, '');
+  const JUNK = /example\.com|wixpress|sentry|googleapis|google\.com|cloudflare/i;
+
+  try {
+    const r = await corsFetch(base + '/sitemap.xml', {
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!r.ok) return;
+    const xml = await r.text();
+    // Find contact/about URLs in sitemap
+    const urls = [...xml.matchAll(/<loc>([^<]+)<\/loc>/gi)].map(m => m[1]);
+    const contactUrls = urls.filter(u => /contact|about|team|info|impressum/i.test(u));
+
+    for (const url of contactUrls.slice(0, 3)) {
+      if (b.email && b.phone) break;
+      try {
+        const cr = await corsFetch(url, { signal: AbortSignal.timeout(3000) });
+        if (!cr.ok) continue;
+        const html = await cr.text();
+        // Extract emails
+        if (!b.email) {
+          const emails = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+          if (emails) {
+            for (const e of emails) {
+              const clean = e.replace(/[\s>);]+$/, '');
+              if (!JUNK.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
+            }
+          }
+        }
+        // Extract phones
+        if (!b.phone) {
+          const telM = html.match(/href="tel:([^"]+)"/);
+          if (telM) b.phone = telM[1].trim();
+          if (!b.phone) {
+            const phones = html.match(/\+?[\d][\d\s\-\.()]{7,18}/g);
+            if (phones) {
+              for (const p of phones) {
+                if (p.replace(/[^\d+]/g, '').length >= 8 && p.replace(/[^\d+]/g, '').length <= 15) {
+                  b.phone = p.trim(); break;
+                }
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+  } catch {}
+}
+
+// ─── vCard Scraper ──────────────────────────────────────────────
+// Some businesses link to .vcf files with full contact info
+async function scrapeVCard(b: Business): Promise<void> {
+  if (!b.website || (b.email && b.phone)) return;
+  const base = b.website.replace(/\/$/, '');
+
+  try {
+    // Check main page for .vcf links
+    const r = await corsFetch(base, { signal: AbortSignal.timeout(3000) });
+    if (!r.ok) return;
+    const html = await r.text();
+    const vcfLinks = [...html.matchAll(/href="([^"]*\.vcf[^"]*)"/gi)].map(m => m[1]);
+
+    for (const vcfUrl of vcfLinks.slice(0, 2)) {
+      if (b.email && b.phone) break;
+      const fullUrl = vcfUrl.startsWith('http') ? vcfUrl : base + '/' + vcfUrl.replace(/^\//, '');
+      try {
+        const vr = await corsFetch(fullUrl, { signal: AbortSignal.timeout(3000) });
+        if (!vr.ok) continue;
+        const vcf = await vr.text();
+        // Parse vCard format
+        if (!b.email) {
+          const emailM = vcf.match(/EMAIL[^:]*:([^\r\n]+)/i);
+          if (emailM) b.email = emailM[1].trim();
+        }
+        if (!b.phone) {
+          const telM = vcf.match(/TEL[^:]*:([^\r\n]+)/i);
+          if (telM) b.phone = telM[1].trim();
+        }
+      } catch {}
+    }
+  } catch {}
+}
+
 // ─── Google Maps Place Search Enrichment ────────────────────────
 async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
   const NEEDS = businesses.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
@@ -1172,6 +1312,41 @@ function extractFromHtml(html: string, b: Business): void {
       b.instagram = 'https://instagram.com/' + igM[1].replace(/\/$/, '');
     }
   }
+
+  // Twitter/X
+  if (!b.twitter) {
+    const twM = html.match(/(?:twitter|x)\.com\/([a-zA-Z0-9._]+)/i);
+    if (twM && !twM[0].includes('login') && !twM[0].includes('intent') && !twM[0].includes('share')) {
+      b.twitter = 'https://twitter.com/' + twM[1].replace(/\/$/, '');
+    }
+  }
+
+  // Pinterest
+  if (!b.pinterest) {
+    const pinM = html.match(/pinterest\.com\/([a-zA-Z0-9._]+)/i);
+    if (pinM && !pinM[0].includes('login')) {
+      b.pinterest = 'https://pinterest.com/' + pinM[1].replace(/\/$/, '');
+    }
+  }
+
+  // Rating from meta/structured data
+  if (!b.rating) {
+    const ratingM = html.match(/(?:ratingValue|rating)["\s:=]+(\d\.\d)/i)
+      || html.match(/(\d\.\d)\s*(?:out of|\/)\s*5/i);
+    if (ratingM) {
+      const val = parseFloat(ratingM[1]);
+      if (val >= 1 && val <= 5) b.rating = val;
+    }
+  }
+  // Review count
+  if (!b.reviewCount) {
+    const revM = html.match(/(?:reviewCount|ratingCount)["\s:=]+(\d+)/i)
+      || html.match(/(\d[\d,]*)\s*reviews?/i);
+    if (revM) {
+      const val = parseInt(revM[1].replace(/,/g, ''));
+      if (val > 0 && val < 100000) b.reviewCount = val;
+    }
+  }
 }
 
 // ── Extract from plain text (e.g. Brave search descriptions) ──
@@ -1191,6 +1366,24 @@ function extractFromText(text: string, b: Business): void {
   if (!b.instagram) {
     const m = text.match(/instagram\.com\/([a-zA-Z0-9._]+)/);
     if (m && !m[0].includes('accounts')) b.instagram = 'https://instagram.com/' + m[1];
+  }
+  // Extract rating (e.g. "4.5 stars" or "4.5/5" or "Rating: 4.5")
+  if (!b.rating) {
+    const ratingM = text.match(/(?:rating|stars|rated?)\s*[:=]?\s*(\d\.\d)\s*(?:\/\s*5)?/i)
+      || text.match(/(\d\.\d)\s*(?:stars?|\/\s*5|out\s*of\s*5)/i);
+    if (ratingM) {
+      const val = parseFloat(ratingM[1]);
+      if (val >= 1 && val <= 5) b.rating = val;
+    }
+  }
+  // Extract review count (e.g. "1,234 reviews" or "(1234)")
+  if (!b.reviewCount) {
+    const revM = text.match(/(\d[\d,]*)\s*(?:reviews?|ratings?)/i)
+      || text.match(/\((\d[\d,]*)\)/);
+    if (revM) {
+      const val = parseInt(revM[1].replace(/,/g, ''));
+      if (val > 0 && val < 100000) b.reviewCount = val;
+    }
   }
   // YouTube as website fallback
   if (!b.website) {
@@ -1390,6 +1583,42 @@ function buildSearchQuery(b: { name: string; address?: string; categoryLabel?: s
   // Add keywords that help find contact data in search snippets
   parts.push('phone email website contact');
   return encodeURIComponent(parts.join(' '));
+}
+
+// Generate multiple query variations for a business (inspired by omkarcloud approach)
+function buildSearchQueries(b: Business): string[] {
+  const queries: string[] = [];
+  const nameEn = getEnglishCityName(b.name);
+  const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+  const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
+  const streetEn = getEnglishCityName(street);
+  const isLatin = /^[a-zA-Z\s\-'&.]+$/.test(b.name);
+
+  // Query 1: Exact name + city (best for well-known businesses)
+  if (isLatin) {
+    queries.push(encodeURIComponent(`"${b.name}" ${cityEn || ''} phone email contact`));
+  } else {
+    if (nameEn && nameEn !== b.name) {
+      queries.push(encodeURIComponent(`"${nameEn}" ${cityEn || ''} phone email contact`));
+    }
+  }
+
+  // Query 2: Name + street + city (for local businesses)
+  if (streetEn && streetEn !== street) {
+    queries.push(encodeURIComponent(`"${b.name}" "${streetEn}" ${cityEn || ''} phone email`));
+  }
+
+  // Query 3: Transliterated name + category + city (for non-Latin businesses)
+  if (!isLatin && nameEn && nameEn !== b.name) {
+    queries.push(encodeURIComponent(`"${nameEn}" ${b.categoryLabel || ''} ${cityEn || ''} phone email website`));
+  }
+
+  // Query 4: Original name + city (for businesses that appear in local language)
+  if (!isLatin) {
+    queries.push(encodeURIComponent(`"${b.name}" ${cityEn || ''} phone email website contact`));
+  }
+
+  return queries.filter(q => q.length > 5);
 }
 
 // Build a targeted query specifically for finding contact pages
@@ -1803,7 +2032,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   const _ep: EnrichmentProgress = {
     activePass: 'Initializing…',
     passNumber: 0,
-    totalPasses: 7,
+    totalPasses: 8,
     engines: [
       { name: 'DuckDuckGo', icon: '🦆', status: 'idle', found: 0 },
       { name: 'Brave', icon: '🦁', status: 'idle', found: 0 },
@@ -1813,6 +2042,8 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       { name: 'Yandex', icon: '🔴', status: 'idle', found: 0 },
       { name: 'Google Maps', icon: '🗺️', status: 'idle', found: 0 },
       { name: 'Website Scraper', icon: '🕸️', status: 'idle', found: 0 },
+      { name: 'WordPress', icon: '📝', status: 'idle', found: 0 },
+      { name: 'Sitemap', icon: '🗺', status: 'idle', found: 0 },
     ],
     contacts: { emails: 0, phones: 0, websites: 0, social: 0, total: 0 },
     businessesProcessed: 0,
@@ -1886,10 +2117,16 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       try {
         // ═══ Step 1: Brave API (fast, reliable, has API key) ═══
         // Brave often has Google Maps business data in knowledge graph
+        // Try multiple query variations for maximum coverage
         if (!b.phone || !b.website || !b.email) {
-          try {
-            const q = buildSearchQuery(b);
-            const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=5`, {
+          const braveQueries = buildSearchQueries(b);
+          // Also use the original buildSearchQuery as fallback
+          if (braveQueries.length === 0) braveQueries.push(buildSearchQuery(b));
+
+          for (const bq of braveQueries.slice(0, 2)) {
+            if (b.phone && b.website && b.email) break;
+            try {
+            const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${bq}&count=5`, {
               headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
               signal: AbortSignal.timeout(6000),
             });
@@ -1906,6 +2143,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               }
             }
           } catch {}
+          } // end for braveQueries
 
           // KEY STEP: If website found → immediately scrape it for email/phone/social
           if (b.website && (!b.email || !b.phone || !b.facebook || !b.instagram)) {
@@ -1975,17 +2213,32 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           }
         }
 
-        // ═══ Step 5: Contact page scraping (last resort for email/phone) ═══
+        // ═══ Step 5: Contact page scraping ═══
         if (!b.email && b.website) {
           try { await scrapeContactPageForEmail(b); } catch {}
         }
 
-        // ═══ Step 5b: Google cache fallback (for blocked websites) ═══
+        // ═══ Step 5b: WordPress REST API (many sites expose contact data) ═══
+        if ((!b.email || !b.phone) && b.website) {
+          try { await scrapeWordPressAPI(b); } catch {}
+        }
+
+        // ═══ Step 5c: Sitemap contact page discovery ═══
+        if ((!b.email || !b.phone) && b.website) {
+          try { await scrapeSitemapForContacts(b); } catch {}
+        }
+
+        // ═══ Step 5d: vCard file discovery ═══
+        if ((!b.email || !b.phone) && b.website) {
+          try { await scrapeVCard(b); } catch {}
+        }
+
+        // ═══ Step 5e: Google cache fallback ═══
         if (!b.email || !b.phone) {
           try { await tryGoogleCache(b); } catch {}
         }
 
-        // ═══ Step 5c: AMP version fallback ═══
+        // ═══ Step 5f: AMP version fallback ═══
         if (!b.email || !b.phone) {
           try { await tryAMPVersion(b); } catch {}
         }

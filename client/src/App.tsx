@@ -122,7 +122,7 @@ export default function App() {
   const [selectedOppCategory, setSelectedOppCategory] = useState<string | null>(null);
   const [showAllOpps, setShowAllOpps] = useState(false);
   const [aiInsights, setAiInsights] = useState('');
-  const [selectedBiz, setSelectedBiz] = useState<{name:string;category:string;categoryLabel:string;color:string;phone:string;email:string;website:string;address:string;facebook:string;instagram:string;linkedin:string;youtube:string;tiktok:string;lat:number;lon:number}|null>(null);
+  const [selectedBiz, setSelectedBiz] = useState<{name:string;category:string;categoryLabel:string;color:string;phone:string;email:string;website:string;address:string;facebook:string;instagram:string;linkedin:string;youtube:string;tiktok:string;twitter:string;pinterest:string;rating:number;reviewCount:number;hours:string;lat:number;lon:number}|null>(null);
   const [enrichProgress, setEnrichProgress] = useState<EnrichmentProgress | null>(null);
 
   const mapRef = useRef<HTMLDivElement>(null);
@@ -269,6 +269,10 @@ export default function App() {
           if (p.linkedin) contactParts.push(`<a href="${p.linkedin}" target="_blank" style="color:#93c5fd;text-decoration:none">LI</a>`);
           if (p.youtube) contactParts.push(`<a href="${p.youtube}" target="_blank" style="color:#f87171;text-decoration:none">YT</a>`);
           if (p.tiktok) contactParts.push(`<a href="${p.tiktok}" target="_blank" style="color:#fff;text-decoration:none">TT</a>`);
+          if (p.twitter) contactParts.push(`<a href="${p.twitter}" target="_blank" style="color:#38bdf8;text-decoration:none">X</a>`);
+          if (p.pinterest) contactParts.push(`<a href="${p.pinterest}" target="_blank" style="color:#f87171;text-decoration:none">Pin</a>`);
+          if (p.rating > 0) contactParts.push(`<span style="color:#fbbf24;font-size:11px">★ ${p.rating.toFixed(1)}${p.reviewCount > 0 ? ` (${p.reviewCount})` : ''}</span>`);
+          if (p.hours) contactParts.push(`<span style="color:#94a3b8;font-size:11px">🕐 ${p.hours}</span>`);
           if (p.address) contactParts.push(`<span style="color:#94a3b8;font-size:11px">📍 ${p.address}</span>`);
           const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${coords[1]},${coords[0]}`;
           contactParts.push(`<a href="${mapsUrl}" target="_blank" style="color:#34d399;text-decoration:none;font-size:11px">📍 Open in Maps</a>`);
@@ -293,7 +297,9 @@ export default function App() {
             color: p.color || '#64748b', phone: p.phone || '', email: p.email || '',
             website: p.website || '', address: p.address || '', facebook: p.facebook || '',
             instagram: p.instagram || '', linkedin: p.linkedin || '', youtube: p.youtube || '',
-            tiktok: p.tiktok || '', lat: coords[1], lon: coords[0],
+            tiktok: p.tiktok || '', twitter: p.twitter || '', pinterest: p.pinterest || '',
+            rating: p.rating || 0, reviewCount: p.reviewCount || 0, hours: p.hours || '',
+            lat: coords[1], lon: coords[0],
           };
           window.dispatchEvent(new CustomEvent('biz-click'));
         };
@@ -355,6 +361,8 @@ export default function App() {
         linkedin: b.linkedin || '',
         youtube: b.youtube || '',
         tiktok: b.tiktok || '',
+        twitter: b.twitter || '', pinterest: b.pinterest || '',
+        rating: b.rating || 0, reviewCount: b.reviewCount || 0, hours: b.hours || '',
       },
     }));
 
@@ -805,7 +813,8 @@ export default function App() {
                   <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary mb-3">
                     <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-cyan-500 transition-all duration-300" style={{width: `${enrichProgress.percent}%`}} />
                   </div>
-n                  {/* Search engines status */}
+
+n                  {/* Search engines status */}
                   <div className="flex flex-wrap gap-1.5 mb-3">
                     {enrichProgress.engines.map((eng) => (
                       <span
@@ -822,7 +831,8 @@ export default function App() {
                       </span>
                     ))}
                   </div>
-n                  {/* Live contact counters */}
+
+n                  {/* Live contact counters */}
                   <div className="flex items-center gap-3 text-[11px]">
                     <span className="flex items-center gap-1">
                       <span className="text-muted-foreground">📧</span>
@@ -953,8 +963,10 @@ export default function App() {
                       <div className="flex items-center gap-2 mb-0.5">
                         <span className="font-semibold text-foreground truncate">{selectedBiz.name}</span>
                         <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{background: selectedBiz.color + '22', color: selectedBiz.color}}>{selectedBiz.categoryLabel}</span>
+                        {selectedBiz.rating > 0 && <span className="text-[10px] text-yellow-400">★ {selectedBiz.rating.toFixed(1)}{selectedBiz.reviewCount > 0 ? ` (${selectedBiz.reviewCount})` : ''}</span>}
                       </div>
                       {selectedBiz.address && <div className="text-muted-foreground truncate">📍 {selectedBiz.address}</div>}
+                      {selectedBiz.hours && <div className="text-[11px] text-muted-foreground truncate">🕐 {selectedBiz.hours}</div>}
                       <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1">
                         {selectedBiz.phone && <a href={'tel:' + selectedBiz.phone} className="text-blue-400 hover:underline">📞 {selectedBiz.phone}</a>}
                         {selectedBiz.email && <a href={'mailto:' + selectedBiz.email} className="text-blue-400 hover:underline truncate max-w-[180px]">✉️ {selectedBiz.email}</a>}
@@ -966,6 +978,8 @@ export default function App() {
                         {selectedBiz.linkedin && <a href={selectedBiz.linkedin} target="_blank" className="text-blue-300 hover:underline">LI</a>}
                         {selectedBiz.youtube && <a href={selectedBiz.youtube} target="_blank" className="text-red-400 hover:underline">YT</a>}
                         {selectedBiz.tiktok && <a href={selectedBiz.tiktok} target="_blank" className="text-white hover:underline">TT</a>}
+                        {selectedBiz.twitter && <a href={selectedBiz.twitter} target="_blank" className="text-sky-400 hover:underline">X</a>}
+                        {selectedBiz.pinterest && <a href={selectedBiz.pinterest} target="_blank" className="text-red-400 hover:underline">Pin</a>}
                         <a href={`https://www.google.com/maps/search/?api=1&query=${selectedBiz.lat},${selectedBiz.lon}`} target="_blank" className="text-emerald-400 hover:underline ml-auto">📍 Maps</a>
                       </div>
                     </div>
@@ -991,6 +1005,8 @@ export default function App() {
                       {selectedBiz.linkedin && <a href={selectedBiz.linkedin} target="_blank" className="text-blue-300 hover:underline">LI</a>}
                       {selectedBiz.youtube && <a href={selectedBiz.youtube} target="_blank" className="text-red-400 hover:underline">YT</a>}
                       {selectedBiz.tiktok && <a href={selectedBiz.tiktok} target="_blank" className="text-white hover:underline">TT</a>}
+                      {selectedBiz.twitter && <a href={selectedBiz.twitter} target="_blank" className="text-sky-400 hover:underline">X</a>}
+                      {selectedBiz.pinterest && <a href={selectedBiz.pinterest} target="_blank" className="text-red-400 hover:underline">Pin</a>}
                       <a href={`https://www.google.com/maps/search/?api=1&query=${selectedBiz.lat},${selectedBiz.lon}`} target="_blank" className="text-emerald-400 hover:underline ml-auto">📍 Maps</a>
                     </div>
                   </div>
