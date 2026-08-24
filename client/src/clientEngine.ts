@@ -1733,38 +1733,13 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
   try {
     const base = b.website.replace(/\/$/, '');
     // Extended contact page paths — covers most CMS platforms and languages
+    // Top 15 most common contact page paths (skip rare ones for speed)
     const paths = [
-      // English
-      '/contact', '/contact-us', '/contact-me', '/contact-me/',
-      '/about', '/about-us', '/about-me', '/about-me/',
-      '/team', '/our-team', '/staff', '/people', '/people/',
-      '/info', '/information', '/info/',
-      '/imprint', '/impressum', '/legal', '/legal/',
-      '/privacy', '/privacy-policy', '/terms',
-      '/sitemap.xml', // Often lists all pages
-      '/links', '/links/',
-      '/reach-us', '/get-in-touch', '/find-us', '/locations',
-      '/careers', '/jobs', // Sometimes have contact info
-      '/press', '/media', // Press contacts
-      // Georgian
-      '/kontakti', '/kontakt', '/kontaktay', '/kavshiri',
-      '/momkhmarebeli', '/tsmrunebi', '/shesruleba',
-      // Russian
-      '/контакты', '/контакт', '/о-нас', '/команда',
-      // Turkish
-      '/iletisim', '/hakkimizda', '/ekibimiz',
-      // Armenian
-      '/կապ', '/մեր-մասին',
-      // Spanish/Portuguese
-      '/contactos', '/contato', '/sobre-nos', '/sobre-nosotros',
-      // French
-      '/nous-contacter', '/a-propos', '/notre-equipe',
-      // German
-      '/kontakt', '/ueber-uns', '/team/',
-      // Italian
-      '/contattaci', '/chi-siamo',
-      // Chinese/Japanese/Arabic
-      '/联系我们', '/お問い合わせ', '/اتصل بنا', '/написать-нам',
+      '/contact', '/contact-us', '/about', '/about-us',
+      '/kontakti', '/kontakt', '/контакты', '/о-нас',
+      '/iletisim', '/contato', '/contactos',
+      '/nous-contacter', '/kontakt', '/contattaci',
+      '/联系我们',
     ];
     for (const path of paths) {
       if (b.email) break;
@@ -2115,20 +2090,17 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     const batch = NEEDS_ENRICHMENT.slice(i, i + _BATCH);
     await Promise.all(batch.map(async (b) => {
       try {
-        // ═══ Step 1: Brave API (fast, reliable, has API key) ═══
-        // Brave often has Google Maps business data in knowledge graph
-        // Try multiple query variations for maximum coverage
-        if (!b.phone || !b.website || !b.email) {
-          const braveQueries = buildSearchQueries(b);
-          // Also use the original buildSearchQuery as fallback
-          if (braveQueries.length === 0) braveQueries.push(buildSearchQuery(b));
+        // Helper: check if business has sufficient data (phone OR email + website)
+        const hasSufficientData = () => (b.phone || b.email) && b.website;
+        let websiteScraped = false; // dedup: only scrape website once per business
 
-          for (const bq of braveQueries.slice(0, 2)) {
-            if (b.phone && b.website && b.email) break;
-            try {
-            const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${bq}&count=5`, {
+        // ═══ Step 1: Brave API (fastest, has API key) ═══
+        if (!hasSufficientData()) {
+          try {
+            const q = buildSearchQuery(b);
+            const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=5`, {
               headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
-              signal: AbortSignal.timeout(6000),
+              signal: AbortSignal.timeout(4000),
             });
             if (r.ok) {
               const data = await r.json();
@@ -2143,42 +2115,40 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               }
             }
           } catch {}
-          } // end for braveQueries
 
-          // KEY STEP: If website found → immediately scrape it for email/phone/social
-          if (b.website && (!b.email || !b.phone || !b.facebook || !b.instagram)) {
-            try { await enrichFromWebsiteDeep(b); } catch {}
+          // Scrape website immediately if found (but only once!)
+          if (b.website && !websiteScraped && (!b.email || !b.phone || !b.facebook)) {
+            try { await enrichFromWebsiteDeep(b); websiteScraped = true; } catch {}
           }
-          if (!b.email && b.website) {
-            try { await scrapeContactPageForEmail(b); } catch {}
+          if (!b.email && b.website && !websiteScraped) {
+            try { await scrapeContactPageForEmail(b); websiteScraped = true; } catch {}
           }
         }
 
-        // ═══ Step 2: DuckDuckGo search (different results than Brave) ═══
-        if (!b.phone || !b.website || !b.email) {
+        // EARLY EXIT: skip remaining steps if we have enough
+        if (hasSufficientData() && b.facebook) { enrichedCount++; return; }
+
+        // ═══ Step 2: DuckDuckGo search ═══
+        if (!hasSufficientData()) {
           try {
             const q = buildSearchQuery(b);
             const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
               headers: { 'User-Agent': 'Mozilla/5.0' },
-              signal: AbortSignal.timeout(8000),
+              signal: AbortSignal.timeout(5000),
             });
-            if (r.ok) {
-              const html = await r.text();
-              extractFromHtml(html, b);
-            }
+            if (r.ok) extractFromHtml(await r.text(), b);
           } catch {}
-
-          // Found website from DDG → scrape it immediately
-          if (b.website && (!b.email || !b.phone)) {
-            try { await enrichFromWebsiteDeep(b); } catch {}
-          }
-          if (!b.email && b.website) {
-            try { await scrapeContactPageForEmail(b); } catch {}
+          // Scrape website immediately if new website found
+          if (b.website && !websiteScraped && (!b.email || !b.phone)) {
+            try { await enrichFromWebsiteDeep(b); websiteScraped = true; } catch {}
           }
         }
 
-        // ═══ Step 3: Bing search (yet more different results) ═══
-        if (!b.phone || !b.website || !b.email) {
+        // EARLY EXIT
+        if (hasSufficientData()) { enrichedCount++; return; }
+
+        // ═══ Step 3: Bing search ═══
+        if (!hasSufficientData()) {
           try {
             const q = buildSearchQuery(b);
             const bingResults = await searchBing(q);
@@ -2189,69 +2159,77 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               }
             }
           } catch {}
-
-          if (b.website && (!b.email || !b.phone)) {
-            try { await enrichFromWebsiteDeep(b); } catch {}
+          if (b.website && !websiteScraped && (!b.email || !b.phone)) {
+            try { await enrichFromWebsiteDeep(b); websiteScraped = true; } catch {}
           }
         }
 
-        // ═══ Step 4: DDG Lite (cleaner results, different from HTML DDG) ═══
-        if (!b.phone || !b.website || !b.email) {
+        // EARLY EXIT
+        if (hasSufficientData()) { enrichedCount++; return; }
+
+        // ═══ Step 4: DDG Lite ═══
+        if (!hasSufficientData()) {
           try {
             const q = decodeURIComponent(buildSearchQuery(b));
             const spResults = await searchDDGLite(q);
             for (const res of spResults) {
               extractFromText((res.snippet || '') + ' ' + (res.title || ''), b);
-              if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('startpage.com') && !res.url.includes('duckduckgo.com/lite')) {
+              if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('duckduckgo.com/lite')) {
                 b.website = res.url;
               }
             }
           } catch {}
-
-          if (b.website && (!b.email || !b.phone)) {
-            try { await enrichFromWebsiteDeep(b); } catch {}
+          if (b.website && !websiteScraped && (!b.email || !b.phone)) {
+            try { await enrichFromWebsiteDeep(b); websiteScraped = true; } catch {}
           }
         }
 
-        // ═══ Step 5: Contact page scraping ═══
-        if (!b.email && b.website) {
-          try { await scrapeContactPageForEmail(b); } catch {}
+        // EARLY EXIT
+        if (hasSufficientData()) { enrichedCount++; return; }
+
+        // ═══ Step 5: Contact page scraping (one time only) ═══
+        if (!b.email && b.website && !websiteScraped) {
+          try { await scrapeContactPageForEmail(b); websiteScraped = true; } catch {}
         }
 
-        // ═══ Step 5b: WordPress REST API (many sites expose contact data) ═══
+        // EARLY EXIT
+        if (hasSufficientData()) { enrichedCount++; return; }
+
+        // ═══ Step 5b: WordPress REST API ═══
         if ((!b.email || !b.phone) && b.website) {
           try { await scrapeWordPressAPI(b); } catch {}
         }
 
-        // ═══ Step 5c: Sitemap contact page discovery ═══
+        // ═══ Step 5c: Sitemap ═══
         if ((!b.email || !b.phone) && b.website) {
           try { await scrapeSitemapForContacts(b); } catch {}
         }
 
-        // ═══ Step 5d: vCard file discovery ═══
+        // EARLY EXIT
+        if (hasSufficientData()) { enrichedCount++; return; }
+
+        // ═══ Step 5d: vCard ═══
         if ((!b.email || !b.phone) && b.website) {
           try { await scrapeVCard(b); } catch {}
         }
 
-        // ═══ Step 5e: Google cache fallback ═══
+        // ═══ Step 5e: Google cache ═══
         if (!b.email || !b.phone) {
           try { await tryGoogleCache(b); } catch {}
         }
 
-        // ═══ Step 5f: AMP version fallback ═══
-        if (!b.email || !b.phone) {
-          try { await tryAMPVersion(b); } catch {}
-        }
+        // EARLY EXIT
+        if (hasSufficientData()) { enrichedCount++; return; }
 
-        // ═══ Step 6: Domain probing (guess website URL if none found) ═══
+        // ═══ Step 6: Domain probing ═══
         if (!b.website) {
           try { await probeDomains(b); } catch {}
-          if (b.website && (!b.email || !b.phone)) {
-            try { await enrichFromWebsiteDeep(b); } catch {}
+          if (b.website && !websiteScraped && (!b.email || !b.phone)) {
+            try { await enrichFromWebsiteDeep(b); websiteScraped = true; } catch {}
           }
         }
 
-        // ═══ Step 7: Social media search (for Facebook/Instagram) ═══
+        // ═══ Step 7: Social media search ═══
         if (!b.facebook && !b.instagram) {
           try {
             const nameEn2 = getEnglishCityName(b.name);
@@ -2265,13 +2243,13 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             const sq = encodeURIComponent(parts2.join(' '));
             const sr = await corsFetch('https://html.duckduckgo.com/html/?q=' + sq, {
               headers: { 'User-Agent': 'Mozilla/5.0' },
-              signal: AbortSignal.timeout(6000),
+              signal: AbortSignal.timeout(4000),
             });
             if (sr.ok) extractFromHtml(await sr.text(), b);
           } catch {}
         }
 
-        // ═══ Step 8: Guess email from domain (info@ is most common) ═══
+        // ═══ Step 8: Guess email from domain ═══
         if (!b.email && b.website) {
           const guesses = guessEmailsFromDomain(b.website);
           if (guesses.length > 0) b.email = guesses[0];
@@ -2281,7 +2259,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       } catch {}
     }));
 
-    if (i + _BATCH < maxEnrich) await wait(800);
+    if (i + _BATCH < maxEnrich) await wait(500);
     _ep.businessesProcessed = Math.min(i + _BATCH, maxEnrich);
     _ep.engines.find(e => e.name === 'DuckDuckGo')!.found = _ep.contacts.emails;
     _ep.engines.find(e => e.name === 'Brave')!.found = _ep.contacts.phones;
