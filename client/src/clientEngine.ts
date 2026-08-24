@@ -66,6 +66,9 @@ export interface Business {
   cuisine: string;
   facebook: string;
   instagram: string;
+  linkedin: string;
+  youtube: string;
+  tiktok: string;
 }
 
 // ─── Enrichment Progress (real-time panel) ──────────────────────
@@ -259,7 +262,8 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
 function extractPhone(tags: Record<string, string>): string {
   return tags.phone || tags['contact:phone'] || tags['contact:mobile'] ||
          tags['phone:mobile'] || tags['phone:international'] ||
-         tags['contact:landline'] || tags['contact:fax'] || '';
+         tags['contact:landline'] || tags['contact:fax'] ||
+         tags['contact:whatsapp'] || tags['contact:viber'] || '';
 }
 
 function extractEmail(tags: Record<string, string>): string {
@@ -283,6 +287,30 @@ function extractInstagram(tags: Record<string, string>): string {
   if (!raw) return '';
   if (raw.startsWith('http')) return raw;
   return `https://instagram.com/${raw.replace(/^@+/, '')}`;
+}
+
+// Extract LinkedIn from OSM tags
+function extractLinkedIn(tags: Record<string, string>): string {
+  const raw = tags['contact:linkedin'] || tags.linkedin || '';
+  if (!raw) return '';
+  if (raw.startsWith('http')) return raw;
+  return `https://linkedin.com/company/${raw.replace(/^@+/, '')}`;
+}
+
+// Extract YouTube from OSM tags
+function extractYouTube(tags: Record<string, string>): string {
+  const raw = tags['contact:youtube'] || tags.youtube || '';
+  if (!raw) return '';
+  if (raw.startsWith('http')) return raw;
+  return `https://youtube.com/@${raw.replace(/^@+/, '')}`;
+}
+
+// Extract TikTok from OSM tags
+function extractTikTok(tags: Record<string, string>): string {
+  const raw = tags['contact:tiktok'] || tags.tiktok || '';
+  if (!raw) return '';
+  if (raw.startsWith('http')) return raw;
+  return `https://tiktok.com/@${raw.replace(/^@+/, '')}`;
 }
 
 function formatAddress(tags: Record<string, string>): string {
@@ -338,6 +366,7 @@ function isCancelled(): boolean { return _cancelSignal?.aborted ?? false; }
 // 1. Tries direct fetch (instant for CORS-enabled: Nominatim, Overpass, Brave)
 // 2. Falls back to allorigins.win with 3s timeout (races raw + get)
 // Total max wait: ~4 seconds (not 12+)
+// Multi-proxy strategy: try 3 different CORS proxies in parallel
 let _proxyReachable: boolean | null = null; // cached proxy test result
 async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', ...init?.headers };
@@ -355,21 +384,25 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
     return new Response('', { status: 0, statusText: 'CORS unavailable' });
   }
 
-  // 3) Try allorigins proxy — race raw vs get, 3s max
+  // 3) Race 3 different CORS proxies — first OK wins, 3s max
+  const proxyUrls = [
+    'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
+    'https://api.allorigins.win/get?url=' + encodeURIComponent(url),
+    'https://corsproxy.org/?' + encodeURIComponent(url),
+  ];
   try {
-    const rawUrl = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url);
-    const getUrl = 'https://api.allorigins.win/get?url=' + encodeURIComponent(url);
-    const result = await Promise.race([
-      fetch(rawUrl, { headers, signal: AbortSignal.timeout(3000) }).then(async r => {
+    const result = await Promise.race(
+      proxyUrls.map(async (proxyUrl) => {
+        const r = await fetch(proxyUrl, { headers, signal: AbortSignal.timeout(3000) });
         if (!r.ok) throw new Error('not ok');
+        // allorigins.get returns JSON with contents field
+        if (proxyUrl.includes('allorigins.win/get')) {
+          const json = await r.json();
+          return new Response(json.contents || '', { status: 200, headers: { 'Content-Type': 'text/html' } });
+        }
         return r;
-      }),
-      fetch(getUrl, { headers, signal: AbortSignal.timeout(3000) }).then(async r => {
-        if (!r.ok) throw new Error('not ok');
-        const json = await r.json();
-        return new Response(json.contents || '', { status: 200, headers: { 'Content-Type': 'text/html' } });
-      }),
-    ]);
+      })
+    );
     _proxyReachable = true;
     return result;
   } catch {
@@ -381,7 +414,7 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
 
 // Direct fetch for services that support CORS (Nominatim, Overpass)
 async function directFetch(url: string, init?: RequestInit): Promise<Response> {
-  return fetch(url, { ...init, headers: { 'User-Agent': 'BlueOcean/3.9.3 (https://devso3939.github.io/Blue-Ocean; contact@blueocean.app)', ...init?.headers } });
+  return fetch(url, { ...init, headers: { 'User-Agent': 'BlueOcean/4.0.0 (https://devso3939.github.io/Blue-Ocean; contact@blueocean.app)', ...init?.headers } });
 }
 
 // Map category IDs to OSM tag filters for focused queries
@@ -660,6 +693,9 @@ out center body;`;
       cuisine: tags.cuisine || '',
       facebook: extractFacebook(tags),
       instagram: extractInstagram(tags),
+      linkedin: extractLinkedIn(tags),
+      youtube: extractYouTube(tags),
+      tiktok: extractTikTok(tags),
     };
 
     if (!results.has(category)) results.set(category, []);
@@ -1004,22 +1040,36 @@ async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct:
 
 // ── Unified extraction: pull phone, email, website, social from any HTML/text ──
 function extractFromHtml(html: string, b: Business): void {
-  const JUNK = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|duckduckgo|schema\.org/i;
+  const JUNK = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|duckduckgo|schema\.org|privacy.*policy|terms.*service|cookie/i;
 
   // Phone: tel: links, then text regex
   if (!b.phone) {
-    const telM = html.match(/href="tel:([\"]+)"/);
+    // 1. tel: links (most reliable)
+    const telM = html.match(/href="tel:([^"]+)"/);
     if (telM) b.phone = telM[1].trim();
+    // 2. Country-specific formats
     if (!b.phone) {
-      // Georgian format
       const geoM = html.match(/\+995\s?\d{3}\s?\d{2}\s?\d{2}\s?\d{2}/);
       if (geoM) b.phone = geoM[0].trim();
     }
     if (!b.phone) {
-      // Armenian format
       const armM = html.match(/\+374\s?\d{2}\s?\d{2}\s?\d{2}\s?\d{2}/);
       if (armM) b.phone = armM[0].trim();
     }
+    if (!b.phone) {
+      const turM = html.match(/\+90\s?\d{3}\s?\d{3}\s?\d{2}\s?\d{2}/);
+      if (turM) b.phone = turM[0].trim();
+    }
+    if (!b.phone) {
+      const ruM = html.match(/\+7\s?\d{3}\s?\d{3}\s?\d{2}\s?\d{2}/);
+      if (ruM) b.phone = ruM[0].trim();
+    }
+    // 3. Labeled phone patterns (Phone: +xxx, Tel: xxx, etc.)
+    if (!b.phone) {
+      const labeledPh = html.match(/(?:phone|tel|telephone|mobile|cell|fax|calls?|whatsapp|viber|contact)\s*[:;=\s"'>]*([+\d][\d\s\-\.()]{7,18})/i);
+      if (labeledPh && labeledPh[1].replace(/[^\d]/g, '').length >= 8) b.phone = labeledPh[1].trim();
+    }
+    // 4. General phone regex (fallback)
     if (!b.phone) {
       const phM = html.match(/(?:\+?\d[\d\s\-\.\(\)]{7,18})/g);
       if (phM) {
@@ -1029,17 +1079,33 @@ function extractFromHtml(html: string, b: Business): void {
         }
       }
     }
-    // Also look for labeled phone patterns
-    if (!b.phone) {
-      const labeledPh = html.match(/(?:phone|tel|telephone|mobile|cell|fax)\s*[:;]\s*([+\d][\d\s\-\.()]{7,18})/i);
-      if (labeledPh && labeledPh[1].replace(/[^\d]/g, '').length >= 8) b.phone = labeledPh[1].trim();
-    }
   }
 
-  // Email: mailto, text, Cloudflare decode, &#64; encode
+  // Email: mailto, text, Cloudflare decode, &#64; encode, JSON-LD
   if (!b.email) {
+    // 1. mailto: links (most reliable)
     const mailM = html.match(/href="mailto:([^"\?\s]+)/i);
     if (mailM && !JUNK.test(mailM[1])) b.email = mailM[1].trim();
+    // 2. Labeled email patterns (Email: xxx@yyy.com)
+    if (!b.email) {
+      const labelM = html.match(/(?:email|e-mail|mail|contact)\s*[:;=\s"'>]*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
+      if (labelM && !JUNK.test(labelM[1])) b.email = labelM[1];
+    }
+    // 3. JSON-LD structured data
+    if (!b.email) {
+      const jsonLdEmails = html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi);
+      for (const m of jsonLdEmails) {
+        try {
+          const data = JSON.parse(m[1]);
+          const entities = Array.isArray(data) ? data : [data];
+          for (const e of entities) {
+            if (e.email && !JUNK.test(e.email)) { b.email = e.email; break; }
+          }
+        } catch {}
+        if (b.email) break;
+      }
+    }
+    // 4. General email regex (fallback)
     if (!b.email) {
       const emails = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
       if (emails) {
@@ -1049,6 +1115,7 @@ function extractFromHtml(html: string, b: Business): void {
         }
       }
     }
+    // 5. Cloudflare encoded emails
     if (!b.email) {
       const cfM = html.match(/data-cfemail="([a-f0-9]+)"/i);
       if (cfM) {
@@ -1060,13 +1127,22 @@ function extractFromHtml(html: string, b: Business): void {
         } catch {}
       }
     }
+    // 6. HTML entity encoded (@)
     if (!b.email) {
       const entM = html.match(/([a-zA-Z0-9._%+-]+)&#64;([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
       if (entM && !JUNK.test(entM[0])) b.email = entM[1] + '@' + entM[2];
     }
-    // Also extract emails from visible text patterns like "Email: xxx@yyy.com"
+    // 7. JavaScript string literals
     if (!b.email) {
-      const labelM = html.match(/(?:email|e-mail|mail|contact)\s*[:;]\s*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
+      const jsEmailM = html.match(/['"]([\w][\w._%+-]*@[\w.-]+\.[a-zA-Z]{2,})['"]/);
+      if (jsEmailM && !JUNK.test(jsEmailM[1]) && jsEmailM[1].length > 6) b.email = jsEmailM[1];
+    }
+    // 8. data-email attributes
+    if (!b.email) {
+      const dataEmailM = html.match(/data-email\s*=\s*["']([^"']+@[^"']+)/i);
+      if (dataEmailM && !JUNK.test(dataEmailM[1])) b.email = dataEmailM[1];
+    }
+  }
       if (labelM && !JUNK.test(labelM[1])) b.email = labelM[1];
     }
     // Extract from data-email attributes
@@ -1299,7 +1375,7 @@ function buildSearchQuery(b: { name: string; address?: string; categoryLabel?: s
     // Also add original non-Latin name (some engines handle it)
     parts.push(`"${b.name}"`);
   }
-  parts.push('phone email website contact');
+  parts.push('phone email website contact address');
   return encodeURIComponent(parts.join(' '));
 }
 
@@ -1349,9 +1425,44 @@ function buildPhoneQuery(b: Business): string {
 function guessEmailsFromDomain(domain: string): string[] {
   try {
     const host = new URL(domain).hostname.replace(/^www\./, '');
-    const prefixes = ['info', 'contact', 'hello', 'mail', 'office', 'admin', 'support', 'reception', 'reservations'];
+    const prefixes = ['info', 'contact', 'hello', 'mail', 'office', 'admin', 'support', 'reception', 'reservations', 'booking', 'reservations', 'sales', 'manager', 'director'];
     return prefixes.map(p => p + '@' + host);
   } catch { return []; }
+}
+
+// Try Google cache as fallback for blocked websites
+async function tryGoogleCache(b: Business): Promise<void> {
+  if (b.email && b.phone) return;
+  if (!b.website) return;
+  try {
+    const cacheUrl = `https://webcache.googleusercontent.com/search?q=cache:${encodeURIComponent(b.website)}`;
+    const r = await corsFetch(cacheUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (r.ok) {
+      const html = await r.text();
+      extractFromHtml(html, b);
+    }
+  } catch {}
+}
+
+// Try AMP/cached version of a page
+async function tryAMPVersion(b: Business): Promise<void> {
+  if (b.email && b.phone) return;
+  if (!b.website) return;
+  try {
+    // Try AMP version (many sites have AMP pages with contact info)
+    const ampUrl = b.website.replace(/\.html$/, '') + '/amp';
+    const r = await corsFetch(ampUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(4000),
+    });
+    if (r.ok) {
+      const html = await r.text();
+      extractFromHtml(html, b);
+    }
+  } catch {}
 }
 
 // Also try to find email by scraping the website contact page directly
@@ -1359,7 +1470,40 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
   if (b.email || !b.website) return;
   try {
     const base = b.website.replace(/\/$/, '');
-    const paths = ['/contact', '/contact-us', '/about', '/about-us', '/kontakti', '/kontakt', '/team', '/info', '/footer', '/imprint', '/privacy', '/sitemap.xml', '/kontaktay', '/kavshiri', '/momkhmarebeli', '/tsmrunebi', '/about.html', '/contacts', '/links', '/contactos', '/contato', '/联系我们', '/お問い合わせ', '/reach-us'];
+    // Extended contact page paths — covers most CMS platforms and languages
+    const paths = [
+      // English
+      '/contact', '/contact-us', '/contact-me', '/contact-me/',
+      '/about', '/about-us', '/about-me', '/about-me/',
+      '/team', '/our-team', '/staff', '/people', '/people/',
+      '/info', '/information', '/info/',
+      '/imprint', '/impressum', '/legal', '/legal/',
+      '/privacy', '/privacy-policy', '/terms',
+      '/sitemap.xml', // Often lists all pages
+      '/links', '/links/',
+      '/reach-us', '/get-in-touch', '/find-us', '/locations',
+      '/careers', '/jobs', // Sometimes have contact info
+      '/press', '/media', // Press contacts
+      // Georgian
+      '/kontakti', '/kontakt', '/kontaktay', '/kavshiri',
+      '/momkhmarebeli', '/tsmrunebi', '/shesruleba',
+      // Russian
+      '/контакты', '/контакт', '/о-нас', '/команда',
+      // Turkish
+      '/iletisim', '/hakkimizda', '/ekibimiz',
+      // Armenian
+      '/կապ', '/մեր-մասին',
+      // Spanish/Portuguese
+      '/contactos', '/contato', '/sobre-nos', '/sobre-nosotros',
+      // French
+      '/nous-contacter', '/a-propos', '/notre-equipe',
+      // German
+      '/kontakt', '/ueber-uns', '/team/',
+      // Italian
+      '/contattaci', '/chi-siamo',
+      // Chinese/Japanese/Arabic
+      '/联系我们', '/お問い合わせ', '/اتصل بنا', '/написать-нам',
+    ];
     for (const path of paths) {
       if (b.email) break;
       try {
@@ -1801,6 +1945,16 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         // ═══ Step 5: Contact page scraping (last resort for email/phone) ═══
         if (!b.email && b.website) {
           try { await scrapeContactPageForEmail(b); } catch {}
+        }
+
+        // ═══ Step 5b: Google cache fallback (for blocked websites) ═══
+        if (!b.email || !b.phone) {
+          try { await tryGoogleCache(b); } catch {}
+        }
+
+        // ═══ Step 5c: AMP version fallback ═══
+        if (!b.email || !b.phone) {
+          try { await tryAMPVersion(b); } catch {}
         }
 
         // ═══ Step 6: Domain probing (guess website URL if none found) ═══
