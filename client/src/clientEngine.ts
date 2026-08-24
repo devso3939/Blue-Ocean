@@ -1208,23 +1208,38 @@ function extractFromText(text: string, b: Business): void {
 // Bing Search (free scraping, no API key needed)
 async function searchBing(query: string): Promise<{title: string; url: string; snippet: string}[]> {
   try {
-    const r = await corsFetch('https://www.bing.com/search?q=' + query + '&count=5', {
+    const r = await corsFetch('https://www.bing.com/search?q=' + query + '&count=10', {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
       signal: AbortSignal.timeout(8000),
     });
     if (!r.ok) return [];
     const html = await r.text();
     const results: {title: string; url: string; snippet: string}[] = [];
-    // Extract search result blocks
+    // Extract search result blocks (li.b_algo)
     const blocks = html.match(/<li class="b_algo"[^>]*>[\s\S]*?<\/li>/gi) || [];
     for (const block of blocks) {
       const titleMatch = block.match(/<h2[^>]*><a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
-      const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+      // Try multiple snippet selectors: b_caption p, then any p
+      const snippetMatch = block.match(/<div class="b_caption"[^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/i)
+        || block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
       if (titleMatch) {
+        // Decode Bing redirect URLs: bing.com/ck/a?...u=a1<base64>...
+        let url = titleMatch[1];
+        if (url.includes('bing.com/ck/a')) {
+          const uMatch = url.match(/u=([^&]+)/);
+          if (uMatch) {
+            const raw = uMatch[1];
+            if (raw.startsWith('a1')) {
+              try {
+                url = atob(raw.substring(2));
+              } catch {}
+            }
+          }
+        }
         results.push({
-          url: titleMatch[1],
-          title: titleMatch[2].replace(/<[^>]+>/g, ''),
-          snippet: snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '') : '',
+          url,
+          title: titleMatch[2].replace(/<[^>]+>/g, '').replace(/&#\d+;/g, ''),
+          snippet: snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&#\d+;/g, '') : '',
         });
       }
     }
@@ -1232,31 +1247,44 @@ async function searchBing(query: string): Promise<{title: string; url: string; s
   } catch { return []; }
 }
 
-// Startpage search - uses Google results, different from DDG/Bing
-async function searchStartpage(query: string): Promise<{title: string; url: string; snippet: string}[]> {
+// DuckDuckGo Lite search — different endpoint from html.duckduckgo.com, returns cleaner results
+async function searchDDGLite(query: string): Promise<{title: string; url: string; snippet: string}[]> {
   try {
-    const r = await corsFetch('https://www.startpage.com/sp/search?query=' + query + '&cat=web&language=english', {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+    const r = await corsFetch('https://lite.duckduckgo.com/lite/?q=' + query, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
       signal: AbortSignal.timeout(8000),
     });
     if (!r.ok) return [];
     const html = await r.text();
     const results: {title: string; url: string; snippet: string}[] = [];
-    // Extract from w-gl class result blocks
-    const blocks = html.match(/<div class="w-gl__result[^"]*">[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/gi) || [];
-    for (const block of blocks) {
-      const urlMatch = block.match(/href="(https?:\/\/[^"\s]+)"/);
-      const titleMatch = block.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
-      const snippetMatch = block.match(/<p class="w-gl__description[^"]*">([\s\S]*?)<\/p>/i);
-      if (urlMatch && !urlMatch[1].includes('startpage.com')) {
-        results.push({
-          url: urlMatch[1],
-          title: titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '') : '',
-          snippet: snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '') : '',
-        });
+    // DDG Lite uses table-based layout with class="result-link" for titles
+    const links = html.matchAll(/<a[^>]*rel="nofollow"[^>]*href="([^"]+)"[^>]*class="result-link"[^>]*>([^<]*)<\/a>/gi);
+    for (const m of links) {
+      const url = m[1];
+      const title = m[2].replace(/&amp;/g, '&').replace(/&#\d+;/g, '');
+      if (url.startsWith('http') && !url.includes('duckduckgo')) {
+        results.push({ url, title, snippet: '' });
       }
     }
-    return results;
+    // Extract snippets from adjacent table cells
+    const snippetBlocks = html.matchAll(/<td[^>]*class="result-snippet"[^>]*>([\s\S]*?)<\/td>/gi);
+    let si = 0;
+    for (const m of snippetBlocks) {
+      if (si < results.length) {
+        results[si].snippet = m[1].replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&#\d+;/g, '').trim();
+        si++;
+      }
+    }
+    // Fallback: try standard result pattern if lite layout fails
+    if (results.length === 0) {
+      const fallbackBlocks = html.matchAll(/<a[^>]*href="([^"]+)"[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/a>/gi);
+      for (const m of fallbackBlocks) {
+        if (m[1].startsWith('http') && !m[1].includes('duckduckgo')) {
+          results.push({ url: m[1], title: m[2].replace(/<[^>]+>/g, ''), snippet: '' });
+        }
+      }
+    }
+    return results.slice(0, 10);
   } catch { return []; }
 }
 
@@ -1762,7 +1790,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       { name: 'DuckDuckGo', icon: '🦆', status: 'idle', found: 0 },
       { name: 'Brave', icon: '🦁', status: 'idle', found: 0 },
       { name: 'Bing', icon: '🔍', status: 'idle', found: 0 },
-      { name: 'Startpage', icon: '🌐', status: 'idle', found: 0 },
+      { name: 'DDG Lite', icon: '🌐', status: 'idle', found: 0 },
       { name: '2GIS', icon: '📍', status: 'idle', found: 0 },
       { name: 'Yandex', icon: '🔴', status: 'idle', found: 0 },
       { name: 'Google Maps', icon: '🗺️', status: 'idle', found: 0 },
@@ -1818,7 +1846,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   onProgress?.(80, `Found ${totalBiz} businesses — enriching data in parallel…`);
 
   // ── Per-business enrichment pipeline ──
-  // Priority: Brave API → scrape website → DDG → scrape → Bing → Startpage → social → regional
+  // Priority: Brave API → scrape website → DDG → scrape → Bing → DDG Lite → social → regional
   // Each business follows the SAME priority chain, maximizing data per business
   if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
 
@@ -1911,14 +1939,14 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           }
         }
 
-        // ═══ Step 4: Startpage (uses Google results under the hood) ═══
+        // ═══ Step 4: DDG Lite (cleaner results, different from HTML DDG) ═══
         if (!b.phone || !b.website || !b.email) {
           try {
             const q = decodeURIComponent(buildSearchQuery(b));
-            const spResults = await searchStartpage(q);
+            const spResults = await searchDDGLite(q);
             for (const res of spResults) {
               extractFromText((res.snippet || '') + ' ' + (res.title || ''), b);
-              if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('startpage.com')) {
+              if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('startpage.com') && !res.url.includes('duckduckgo.com/lite')) {
                 b.website = res.url;
               }
             }
@@ -1996,7 +2024,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   _ep.engines.find(e => e.name === 'DuckDuckGo')!.status = 'done';
   _ep.engines.find(e => e.name === 'Brave')!.status = 'done';
   _ep.engines.find(e => e.name === 'Bing')!.status = 'done';
-  _ep.engines.find(e => e.name === 'Startpage')!.status = 'done';
+  _ep.engines.find(e => e.name === 'DDG Lite')!.status = 'done';
 
   if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
 
