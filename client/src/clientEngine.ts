@@ -1373,7 +1373,6 @@ function buildSearchQuery(b: { name: string; address?: string; categoryLabel?: s
   const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
   const category = b.categoryLabel || '';
   const isLatin = /^[a-zA-Z\s\-'&.]+$/.test(b.name);
-  // Extract street from address (often in Latin or transliteratable)
   const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
   const streetEn = getEnglishCityName(street);
   const parts: string[] = [];
@@ -1385,12 +1384,31 @@ function buildSearchQuery(b: { name: string; address?: string; categoryLabel?: s
     if (streetEn && streetEn !== street) parts.push(`"${streetEn}"`);
     if (cityEn) parts.push(cityEn);
     if (category) parts.push(category);
-    // Add transliterated name
     if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
-    // Also add original non-Latin name (some engines handle it)
     parts.push(`"${b.name}"`);
   }
-  parts.push('phone email website contact address');
+  // Add keywords that help find contact data in search snippets
+  parts.push('phone email website contact');
+  return encodeURIComponent(parts.join(' '));
+}
+
+// Build a targeted query specifically for finding contact pages
+function buildContactQuery(b: Business): string {
+  const nameEn = getEnglishCityName(b.name);
+  const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+  const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
+  const streetEn = getEnglishCityName(street);
+  const isLatin = /^[a-zA-Z\s\-'&.]+$/.test(b.name);
+  const parts: string[] = [];
+  if (isLatin) {
+    parts.push(`"${b.name}"`);
+  } else {
+    if (streetEn && streetEn !== street) parts.push(`"${streetEn}"`);
+    if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
+  }
+  if (cityEn) parts.push(cityEn);
+  // Use site: to search for contact pages specifically
+  parts.push('site:facebook.com OR site:instagram.com OR "contact us"');
   return encodeURIComponent(parts.join(' '));
 }
 

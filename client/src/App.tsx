@@ -101,7 +101,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '4.1.0';
+const APP_VERSION = '4.2.0';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -122,7 +122,7 @@ export default function App() {
   const [selectedOppCategory, setSelectedOppCategory] = useState<string | null>(null);
   const [showAllOpps, setShowAllOpps] = useState(false);
   const [aiInsights, setAiInsights] = useState('');
-  const [selectedBiz, setSelectedBiz] = useState<{name:string;category:string;categoryLabel:string;color:string;phone:string;email:string;website:string;address:string;facebook:string;instagram:string;lat:number;lon:number}|null>(null);
+  const [selectedBiz, setSelectedBiz] = useState<{name:string;category:string;categoryLabel:string;color:string;phone:string;email:string;website:string;address:string;facebook:string;instagram:string;linkedin:string;youtube:string;tiktok:string;lat:number;lon:number}|null>(null);
   const [enrichProgress, setEnrichProgress] = useState<EnrichmentProgress | null>(null);
 
   const mapRef = useRef<HTMLDivElement>(null);
@@ -266,9 +266,14 @@ export default function App() {
           if (p.website) contactParts.push(`<a href="${p.website}" target="_blank" style="color:#60a5fa;text-decoration:none">🌐 ${p.website.replace(/^https?:\/\//, '').substring(0, 30)}</a>`);
           if (p.facebook) contactParts.push(`<a href="${p.facebook}" target="_blank" style="color:#60a5fa;text-decoration:none">FB</a>`);
           if (p.instagram) contactParts.push(`<a href="${p.instagram}" target="_blank" style="color:#f472b6;text-decoration:none">IG</a>`);
+          if (p.linkedin) contactParts.push(`<a href="${p.linkedin}" target="_blank" style="color:#93c5fd;text-decoration:none">LI</a>`);
+          if (p.youtube) contactParts.push(`<a href="${p.youtube}" target="_blank" style="color:#f87171;text-decoration:none">YT</a>`);
+          if (p.tiktok) contactParts.push(`<a href="${p.tiktok}" target="_blank" style="color:#fff;text-decoration:none">TT</a>`);
           if (p.address) contactParts.push(`<span style="color:#94a3b8;font-size:11px">📍 ${p.address}</span>`);
+          const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${coords[1]},${coords[0]}`;
+          contactParts.push(`<a href="${mapsUrl}" target="_blank" style="color:#34d399;text-decoration:none;font-size:11px">📍 Open in Maps</a>`);
           const html = `
-            <div style="min-width:180px;max-width:280px;font-family:system-ui;font-size:13px;padding:0">
+            <div style="min-width:200px;max-width:300px;font-family:system-ui;font-size:13px;padding:0">
               <div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:${p.color}22;border-bottom:1px solid #333">
                 <span style="width:8px;height:8px;border-radius:50%;background:${p.color};flex-shrink:0"></span>
                 <strong style="color:#fff;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name || 'Unknown'}</strong>
@@ -287,7 +292,8 @@ export default function App() {
             name: p.name || '', category: p.category || '', categoryLabel: p.categoryLabel || '',
             color: p.color || '#64748b', phone: p.phone || '', email: p.email || '',
             website: p.website || '', address: p.address || '', facebook: p.facebook || '',
-            instagram: p.instagram || '', lat: coords[1], lon: coords[0],
+            instagram: p.instagram || '', linkedin: p.linkedin || '', youtube: p.youtube || '',
+            tiktok: p.tiktok || '', lat: coords[1], lon: coords[0],
           };
           window.dispatchEvent(new CustomEvent('biz-click'));
         };
@@ -346,6 +352,9 @@ export default function App() {
         address: b.address || '',
         facebook: b.facebook || '',
         instagram: b.instagram || '',
+        linkedin: b.linkedin || '',
+        youtube: b.youtube || '',
+        tiktok: b.tiktok || '',
       },
     }));
 
@@ -935,26 +944,54 @@ export default function App() {
               <div ref={mapRef} className="h-[420px] w-full map-container" />
               {selectedBiz && (
                 <div ref={bizPanelRef} className="border-t border-border bg-card/80 backdrop-blur-sm px-3 py-2">
-                  {/* Desktop: single row */}
-                  <div className="hidden sm:flex items-center gap-3 text-xs">
-                    <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{background: selectedBiz.color}} />
-                    <span className="font-semibold text-foreground truncate">{selectedBiz.name}</span>
-                    {selectedBiz.phone && <a href={'tel:' + selectedBiz.phone} className="text-blue-400 hover:underline flex-shrink-0">📞 {selectedBiz.phone}</a>}
-                    {selectedBiz.email && <a href={'mailto:' + selectedBiz.email} className="text-blue-400 hover:underline flex-shrink-0 truncate max-w-[160px]">✉️ {selectedBiz.email}</a>}
-                    {selectedBiz.website && <a href={selectedBiz.website} target="_blank" className="text-blue-400 hover:underline flex-shrink-0 truncate max-w-[160px]">🌐 {selectedBiz.website.replace(/^https?:\/\//, '').substring(0, 25)}</a>}
-                    <button onClick={() => setSelectedBiz(null)} className="ml-auto text-muted-foreground hover:text-foreground flex-shrink-0">✕</button>
+                  {/* Desktop: rich card */}
+                  <div className="hidden sm:flex items-start gap-3 text-xs">
+                    <div className="w-8 h-8 rounded-lg flex items-center justify-center text-sm flex-shrink-0" style={{background: selectedBiz.color + '22', color: selectedBiz.color}}>
+                      {selectedBiz.name.charAt(0).toUpperCase()}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <span className="font-semibold text-foreground truncate">{selectedBiz.name}</span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{background: selectedBiz.color + '22', color: selectedBiz.color}}>{selectedBiz.categoryLabel}</span>
+                      </div>
+                      {selectedBiz.address && <div className="text-muted-foreground truncate">📍 {selectedBiz.address}</div>}
+                      <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1">
+                        {selectedBiz.phone && <a href={'tel:' + selectedBiz.phone} className="text-blue-400 hover:underline">📞 {selectedBiz.phone}</a>}
+                        {selectedBiz.email && <a href={'mailto:' + selectedBiz.email} className="text-blue-400 hover:underline truncate max-w-[180px]">✉️ {selectedBiz.email}</a>}
+                        {selectedBiz.website && <a href={selectedBiz.website} target="_blank" className="text-blue-400 hover:underline truncate max-w-[180px]">🌐 {selectedBiz.website.replace(/^https?:\/\//, '').substring(0, 30)}</a>}
+                      </div>
+                      <div className="flex gap-2 mt-0.5">
+                        {selectedBiz.facebook && <a href={selectedBiz.facebook} target="_blank" className="text-blue-500 hover:underline">FB</a>}
+                        {selectedBiz.instagram && <a href={selectedBiz.instagram} target="_blank" className="text-pink-400 hover:underline">IG</a>}
+                        {selectedBiz.linkedin && <a href={selectedBiz.linkedin} target="_blank" className="text-blue-300 hover:underline">LI</a>}
+                        {selectedBiz.youtube && <a href={selectedBiz.youtube} target="_blank" className="text-red-400 hover:underline">YT</a>}
+                        {selectedBiz.tiktok && <a href={selectedBiz.tiktok} target="_blank" className="text-white hover:underline">TT</a>}
+                        <a href={`https://www.google.com/maps/search/?api=1&query=${selectedBiz.lat},${selectedBiz.lon}`} target="_blank" className="text-emerald-400 hover:underline ml-auto">📍 Maps</a>
+                      </div>
+                    </div>
+                    <button onClick={() => setSelectedBiz(null)} className="text-muted-foreground hover:text-foreground flex-shrink-0">✕</button>
                   </div>
                   {/* Mobile: stacked rows */}
                   <div className="sm:hidden">
                     <div className="flex items-center gap-2 text-xs mb-1">
                       <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{background: selectedBiz.color}} />
                       <span className="font-semibold text-foreground truncate flex-1">{selectedBiz.name}</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{background: selectedBiz.color + '22', color: selectedBiz.color}}>{selectedBiz.categoryLabel}</span>
                       <button onClick={() => setSelectedBiz(null)} className="text-muted-foreground hover:text-foreground flex-shrink-0 text-sm">✕</button>
                     </div>
-                    <div className="flex flex-col gap-1 text-xs pl-4">
+                    {selectedBiz.address && <div className="text-[11px] text-muted-foreground truncate pl-4 mb-0.5">📍 {selectedBiz.address}</div>}
+                    <div className="flex flex-col gap-0.5 text-xs pl-4">
                       {selectedBiz.phone && <a href={'tel:' + selectedBiz.phone} className="text-blue-400 hover:underline">📞 {selectedBiz.phone}</a>}
                       {selectedBiz.email && <a href={'mailto:' + selectedBiz.email} className="text-blue-400 hover:underline truncate">✉️ {selectedBiz.email}</a>}
                       {selectedBiz.website && <a href={selectedBiz.website} target="_blank" className="text-blue-400 hover:underline truncate">🌐 {selectedBiz.website.replace(/^https?:\/\//, '').substring(0, 35)}</a>}
+                    </div>
+                    <div className="flex gap-2 text-[11px] pl-4 mt-0.5">
+                      {selectedBiz.facebook && <a href={selectedBiz.facebook} target="_blank" className="text-blue-500 hover:underline">FB</a>}
+                      {selectedBiz.instagram && <a href={selectedBiz.instagram} target="_blank" className="text-pink-400 hover:underline">IG</a>}
+                      {selectedBiz.linkedin && <a href={selectedBiz.linkedin} target="_blank" className="text-blue-300 hover:underline">LI</a>}
+                      {selectedBiz.youtube && <a href={selectedBiz.youtube} target="_blank" className="text-red-400 hover:underline">YT</a>}
+                      {selectedBiz.tiktok && <a href={selectedBiz.tiktok} target="_blank" className="text-white hover:underline">TT</a>}
+                      <a href={`https://www.google.com/maps/search/?api=1&query=${selectedBiz.lat},${selectedBiz.lon}`} target="_blank" className="text-emerald-400 hover:underline ml-auto">📍 Maps</a>
                     </div>
                   </div>
                 </div>
