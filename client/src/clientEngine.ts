@@ -1143,19 +1143,6 @@ function extractFromHtml(html: string, b: Business): void {
       if (dataEmailM && !JUNK.test(dataEmailM[1])) b.email = dataEmailM[1];
     }
   }
-      if (labelM && !JUNK.test(labelM[1])) b.email = labelM[1];
-    }
-    // Extract from data-email attributes
-    if (!b.email) {
-      const dataEmailM = html.match(/data-email\s*=\s*["']([^"']+@[^"']+)/i);
-      if (dataEmailM && !JUNK.test(dataEmailM[1])) b.email = dataEmailM[1];
-    }
-    // Extract from JavaScript variables
-    if (!b.email) {
-      const jsEmailM = html.match(/['"](\w[\w._%+-]*@[\w.-]+\.[a-zA-Z]{2,})['"]/);
-      if (jsEmailM && !JUNK.test(jsEmailM[1]) && jsEmailM[1].length > 6) b.email = jsEmailM[1];
-    }
-  }
 
   // Website: extract from DDG result links
   if (!b.website) {
