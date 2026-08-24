@@ -1700,7 +1700,7 @@ async function tryGoogleCache(b: Business): Promise<void> {
     const cacheUrl = `https://webcache.googleusercontent.com/search?q=cache:${encodeURIComponent(b.website)}`;
     const r = await corsFetch(cacheUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0' },
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(3000),
     });
     if (r.ok) {
       const html = await r.text();
@@ -1733,13 +1733,10 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
   try {
     const base = b.website.replace(/\/$/, '');
     // Extended contact page paths — covers most CMS platforms and languages
-    // Top 15 most common contact page paths (skip rare ones for speed)
+    // Top 8 most effective contact page paths (speed: max 8 pages)
     const paths = [
       '/contact', '/contact-us', '/about', '/about-us',
-      '/kontakti', '/kontakt', '/контакты', '/о-нас',
-      '/iletisim', '/contato', '/contactos',
-      '/nous-contacter', '/kontakt', '/contattaci',
-      '/联系我们',
+      '/kontakti', '/контакты', '/iletisim', '/contato',
     ];
     for (const path of paths) {
       if (b.email) break;
@@ -1747,9 +1744,9 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
         // Try direct fetch first (most websites support CORS)
         let r: Response;
         try {
-          r = await fetch(base + path, { signal: AbortSignal.timeout(4000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
+          r = await fetch(base + path, { signal: AbortSignal.timeout(2500), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
         } catch {
-          r = await corsFetch(base + path, { signal: AbortSignal.timeout(4000) });
+          r = await corsFetch(base + path, { signal: AbortSignal.timeout(2500) });
         }
         if (!r.ok) continue;
         const html = await r.text();
@@ -2082,7 +2079,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   _ep.engines.forEach(e => { e.status = 'active'; e.found = 0; });
   emitEP();
 
-  const _BATCH = 5;
+  const _BATCH = 10;
   let enrichedCount = 0;
 
   for (let i = 0; i < maxEnrich; i += _BATCH) {
@@ -2092,174 +2089,151 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       try {
         // Helper: check if business has sufficient data (phone OR email + website)
         const hasSufficientData = () => (b.phone || b.email) && b.website;
-        let websiteScraped = false; // dedup: only scrape website once per business
+        let websiteScraped = false;
+        const scrapeWebsiteOnce = async () => {
+          if (websiteScraped || !b.website) return;
+          websiteScraped = true;
+          if (!b.email || !b.phone || !b.facebook) {
+            try { await enrichFromWebsiteDeep(b); } catch {}
+          }
+          if (!b.email && b.website) {
+            try { await scrapeContactPageForEmail(b); } catch {}
+          }
+        };
 
-        // ═══ Step 1: Brave API (fastest, has API key) ═══
-        if (!hasSufficientData()) {
-          try {
-            const q = buildSearchQuery(b);
-            const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=5`, {
-              headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
-              signal: AbortSignal.timeout(4000),
-            });
-            if (r.ok) {
-              const data = await r.json();
-              for (const res of (data.web?.results || [])) {
-                extractFromText((res.description || '') + ' ' + (res.title || ''), b);
-                if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('google.com/maps')) {
-                  b.website = res.url;
+        // ═══ PHASE 1: ALL search engines in PARALLEL (3-4s total, not 20s) ═══
+        const q = buildSearchQuery(b);
+        await Promise.all([
+          // Brave API
+          (async () => {
+            try {
+              const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=5`, {
+                headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
+                signal: AbortSignal.timeout(3000),
+              });
+              if (r.ok) {
+                const data = await r.json();
+                for (const res of (data.web?.results || [])) {
+                  extractFromText((res.description || '') + ' ' + (res.title || ''), b);
+                  if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('google.com/maps')) b.website = res.url;
                 }
+                if (!b.website && data.knowledge_graph?.url && !_EXCLUDE.test(data.knowledge_graph.url)) b.website = data.knowledge_graph.url;
               }
-              if (!b.website && data.knowledge_graph?.url && !_EXCLUDE.test(data.knowledge_graph.url)) {
-                b.website = data.knowledge_graph.url;
+            } catch {}
+          })(),
+          // DuckDuckGo HTML
+          (async () => {
+            try {
+              const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
+                headers: { 'User-Agent': 'Mozilla/5.0' },
+                signal: AbortSignal.timeout(4000),
+              });
+              if (r.ok) extractFromHtml(await r.text(), b);
+            } catch {}
+          })(),
+          // Bing
+          (async () => {
+            try {
+              const bingResults = await searchBing(q);
+              for (const res of bingResults) {
+                extractFromText((res.snippet || '') + ' ' + (res.title || ''), b);
+                if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('bing.com')) b.website = res.url;
               }
-            }
-          } catch {}
-
-          // Scrape website immediately if found (but only once!)
-          if (b.website && !websiteScraped && (!b.email || !b.phone || !b.facebook)) {
-            try { await enrichFromWebsiteDeep(b); websiteScraped = true; } catch {}
-          }
-          if (!b.email && b.website && !websiteScraped) {
-            try { await scrapeContactPageForEmail(b); websiteScraped = true; } catch {}
-          }
-        }
-
-        // EARLY EXIT: skip remaining steps if we have enough
-        if (hasSufficientData() && b.facebook) { enrichedCount++; return; }
-
-        // ═══ Step 2: DuckDuckGo search ═══
-        if (!hasSufficientData()) {
-          try {
-            const q = buildSearchQuery(b);
-            const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
-              headers: { 'User-Agent': 'Mozilla/5.0' },
-              signal: AbortSignal.timeout(5000),
-            });
-            if (r.ok) extractFromHtml(await r.text(), b);
-          } catch {}
-          // Scrape website immediately if new website found
-          if (b.website && !websiteScraped && (!b.email || !b.phone)) {
-            try { await enrichFromWebsiteDeep(b); websiteScraped = true; } catch {}
-          }
-        }
-
-        // EARLY EXIT
-        if (hasSufficientData()) { enrichedCount++; return; }
-
-        // ═══ Step 3: Bing search ═══
-        if (!hasSufficientData()) {
-          try {
-            const q = buildSearchQuery(b);
-            const bingResults = await searchBing(q);
-            for (const res of bingResults) {
-              extractFromText((res.snippet || '') + ' ' + (res.title || ''), b);
-              if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('bing.com')) {
-                b.website = res.url;
+            } catch {}
+          })(),
+          // DDG Lite
+          (async () => {
+            try {
+              const spResults = await searchDDGLite(decodeURIComponent(q));
+              for (const res of spResults) {
+                extractFromText((res.snippet || '') + ' ' + (res.title || ''), b);
+                if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('duckduckgo.com/lite')) b.website = res.url;
               }
-            }
-          } catch {}
-          if (b.website && !websiteScraped && (!b.email || !b.phone)) {
-            try { await enrichFromWebsiteDeep(b); websiteScraped = true; } catch {}
-          }
+            } catch {}
+          })(),
+        ]);
+
+        // ═══ PHASE 2: Scrape website ONCE ═══
+        await scrapeWebsiteOnce();
+
+        // EARLY EXIT
+        if (hasSufficientData()) { enrichedCount++; return; }
+
+        // ═══ PHASE 3: Email-focused search (targets contact pages) ═══
+        if (!b.email) {
+          const emailQ = buildEmailQuery(b);
+          await Promise.all([
+            (async () => {
+              try {
+                const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${emailQ}&count=5`, {
+                  headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
+                  signal: AbortSignal.timeout(3000),
+                });
+                if (r.ok) {
+                  const data = await r.json();
+                  for (const res of (data.web?.results || [])) {
+                    extractFromText((res.description || '') + ' ' + (res.title || ''), b);
+                    if (!b.email && res.url && /contact|about|team/i.test(res.url)) {
+                      try {
+                        const pageR = await corsFetch(res.url, { signal: AbortSignal.timeout(3000) });
+                        if (pageR.ok) extractFromHtml(await pageR.text(), b);
+                      } catch {}
+                    }
+                  }
+                }
+              } catch {}
+            })(),
+            (async () => {
+              try {
+                const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + emailQ, {
+                  headers: { 'User-Agent': 'Mozilla/5.0' },
+                  signal: AbortSignal.timeout(4000),
+                });
+                if (r.ok) extractFromHtml(await r.text(), b);
+              } catch {}
+            })(),
+          ]);
         }
 
         // EARLY EXIT
         if (hasSufficientData()) { enrichedCount++; return; }
 
-        // ═══ Step 4: DDG Lite ═══
-        if (!hasSufficientData()) {
-          try {
-            const q = decodeURIComponent(buildSearchQuery(b));
-            const spResults = await searchDDGLite(q);
-            for (const res of spResults) {
-              extractFromText((res.snippet || '') + ' ' + (res.title || ''), b);
-              if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('duckduckgo.com/lite')) {
-                b.website = res.url;
-              }
-            }
-          } catch {}
-          if (b.website && !websiteScraped && (!b.email || !b.phone)) {
-            try { await enrichFromWebsiteDeep(b); websiteScraped = true; } catch {}
-          }
-        }
-
-        // EARLY EXIT
-        if (hasSufficientData()) { enrichedCount++; return; }
-
-        // ═══ Step 5: Contact page scraping (one time only) ═══
-        if (!b.email && b.website && !websiteScraped) {
-          try { await scrapeContactPageForEmail(b); websiteScraped = true; } catch {}
-        }
-
-        // EARLY EXIT
-        if (hasSufficientData()) { enrichedCount++; return; }
-
-        // ═══ Step 5b: WordPress REST API ═══
-        if ((!b.email || !b.phone) && b.website) {
-          try { await scrapeWordPressAPI(b); } catch {}
-        }
-
-        // ═══ Step 5c: Sitemap ═══
-        if ((!b.email || !b.phone) && b.website) {
-          try { await scrapeSitemapForContacts(b); } catch {}
-        }
-
-        // EARLY EXIT
-        if (hasSufficientData()) { enrichedCount++; return; }
-
-        // ═══ Step 5d: vCard ═══
-        if ((!b.email || !b.phone) && b.website) {
-          try { await scrapeVCard(b); } catch {}
-        }
-
-        // ═══ Step 5e: Google cache ═══
-        if (!b.email || !b.phone) {
-          try { await tryGoogleCache(b); } catch {}
-        }
-
-        // EARLY EXIT
-        if (hasSufficientData()) { enrichedCount++; return; }
-
-        // ═══ Step 6: Domain probing ═══
+        // ═══ PHASE 4: Domain probing + email guess ═══
         if (!b.website) {
           try { await probeDomains(b); } catch {}
-          if (b.website && !websiteScraped && (!b.email || !b.phone)) {
-            try { await enrichFromWebsiteDeep(b); websiteScraped = true; } catch {}
-          }
+          await scrapeWebsiteOnce();
         }
 
-        // ═══ Step 7: Social media search ═══
-        if (!b.facebook && !b.instagram) {
+        if (!b.email && b.website) {
+          if (!websiteScraped) {
+            try { await scrapeContactPageForEmail(b); } catch {}
+          }
+          const guesses = guessEmailsFromDomain(b.website);
+          if (guesses.length > 0 && !b.email) b.email = guesses[0];
+        }
+
+        // ═══ PHASE 5: Social media (only if still missing) ═══
+        if (!b.facebook && !b.instagram && !hasSufficientData()) {
           try {
             const nameEn2 = getEnglishCityName(b.name);
             const cityEn2 = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
-            const street2 = b.address ? b.address.split(',')[0]?.trim() || '' : '';
-            const streetEn2 = getEnglishCityName(street2);
             const parts2 = ["'" + (nameEn2 || b.name) + "'"];
-            if (streetEn2 && streetEn2 !== street2) parts2.push(streetEn2);
             if (cityEn2) parts2.push(cityEn2);
-            parts2.push('facebook instagram linkedin social media');
+            parts2.push('facebook instagram social');
             const sq = encodeURIComponent(parts2.join(' '));
             const sr = await corsFetch('https://html.duckduckgo.com/html/?q=' + sq, {
               headers: { 'User-Agent': 'Mozilla/5.0' },
-              signal: AbortSignal.timeout(4000),
+              signal: AbortSignal.timeout(3000),
             });
             if (sr.ok) extractFromHtml(await sr.text(), b);
           } catch {}
-        }
-
-        // ═══ Step 8: Guess email from domain ═══
-        if (!b.email && b.website) {
-          const guesses = guessEmailsFromDomain(b.website);
-          if (guesses.length > 0) b.email = guesses[0];
         }
 
         if (b.phone || b.email || b.website) enrichedCount++;
       } catch {}
     }));
 
-    if (i + _BATCH < maxEnrich) await wait(500);
+    if (i + _BATCH < maxEnrich) await wait(200);
     _ep.businessesProcessed = Math.min(i + _BATCH, maxEnrich);
     _ep.engines.find(e => e.name === 'DuckDuckGo')!.found = _ep.contacts.emails;
     _ep.engines.find(e => e.name === 'Brave')!.found = _ep.contacts.phones;
