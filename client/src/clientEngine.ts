@@ -1170,7 +1170,7 @@ async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct:
         }
         if (!b.website) {
           const m = html.match(/(?:www\.|https?:\/\/)([^"\s<>]+\.(com|ge|net|org|io|co)[^"\s<>]*)/i);
-          if (m && !m[0].includes('google.com') && !m[0].includes('gstatic')) {
+          if (m && !m[0].includes('google.com') && !m[0].includes('gstatic') && isLikelyBusinessWebsite(m[0], b.name)) {
             let u = m[0]; if (!u.startsWith('http')) u = 'https://' + u;
             b.website = u; found++;
           }
@@ -1194,6 +1194,31 @@ async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct:
   }
 }
 
+
+// Directory/listing sites that should NEVER be set as a business website
+const DIRECTORY_SITES = /yelp\.com|tripadvisor|foursquare|booking\.com|expedia|yellowpages|justdial|zomato|opentable|flickr|pinterest|tumblr|reddit\.com|quora|wikipedia|youtube\.com|tiktok\.com|linkedin\.com|x\.com|snapchat|threads|medium\.com|substack|gh-pages|archive\.org|amazon\.com|ebay\.com|aliexpress|2gis\.com|yandex\.com|uber\.com|doordash|grubhub|seamless|glassdoor|indeed\.com|glassdoor|angieslist|homeadvisor|thumbtack|bbb\.org|trustpilot|sitejabber|clutch\.co|goodfirms|sortlist|brightlocal|moz\.com|semrush|ahrefs|similarweb/i;
+
+// Check if a URL is likely the business's OWN website (not a directory listing)
+function isLikelyBusinessWebsite(url: string, businessName: string): boolean {
+  try {
+    const hostname = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+    // Reject directory/listing sites
+    if (DIRECTORY_SITES.test(hostname)) return false;
+    // Reject known non-business domains
+    if (/google|facebook|instagram|twitter|tiktok|linkedin|pinterest|reddit|youtube|amazon|ebay|apple|microsoft|github|stackoverflow/i.test(hostname)) return false;
+    // Reject if hostname is just an IP address
+    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) return false;
+    // Reject subdomains of major platforms (e.g., business.tripadvisor.com)
+    const parts = hostname.split('.');
+    if (parts.length > 3) return false; // too many subdomains = likely a platform page
+    // Accept if it looks like a real business domain
+    // Good signs: .com, .ge, .org, .net, .io, .co, country TLDs
+    // Bad signs: blogspot, wordpress.com, wix, squarespace (but these ARE real business sites)
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // ── Unified extraction: pull phone, email, website, social from any HTML/text ──
 function extractFromHtml(html: string, b: Business): void {
@@ -1233,6 +1258,22 @@ function extractFromHtml(html: string, b: Business): void {
         for (const p of phM) {
           const digits = p.replace(/[^\d+]/g, '');
           if (digits.length >= 8 && digits.length <= 15 && !JUNK.test(p)) { b.phone = p.trim(); break; }
+        }
+      }
+    }
+  }
+
+  // Email: structured extraction with verification
+  // Strategy 1: Look for contact info in structured HTML (most reliable)
+  if (!b.email) {
+    // Contact section: look for labeled email near "contact" heading
+    const contactSection = html.match(/<(?:div|section|footer|aside)[^>]*class="[^"]*contact[^"]*"[^>]*>([\s\S]*?)<\/(?:div|section|footer|aside)/i);
+    if (contactSection) {
+      const emails = contactSection[1].match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+      if (emails) {
+        for (const e of emails) {
+          const clean = e.replace(/[\s>);]+$/, '');
+          if (!JUNK.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
         }
       }
     }
@@ -1301,14 +1342,14 @@ function extractFromHtml(html: string, b: Business): void {
     }
   }
 
-  // Website: extract from DDG result links
+  // Website: extract from DDG result links (only validated URLs)
   if (!b.website) {
     const links = html.matchAll(/href="([^"]+)"/g);
     for (const link of links) {
       let url = link[1];
       const uddg = url.match(/uddg=([^&]+)/);
       if (uddg) url = decodeURIComponent(uddg[1]);
-      if (url.startsWith('http') && !url.match(/google\.|facebook|instagram|yelp|tripadvisor|wikipedia|duckduckgo|linkedin|twitter|x\.com|youtube|tiktok|pinterest/i)) {
+      if (url.startsWith('http') && !_EXCLUDE.test(url) && !DIRECTORY_SITES.test(url) && isLikelyBusinessWebsite(url, b.name)) {
         b.website = url; break;
       }
     }
@@ -1364,6 +1405,48 @@ function extractFromHtml(html: string, b: Business): void {
       if (val > 0 && val < 100000) b.reviewCount = val;
     }
   }
+}
+
+// Try common email patterns by fetching the contact page
+async function tryCommonEmailPatterns(b: Business): Promise<void> {
+  if (b.email || !b.website) return;
+  try {
+    const host = new URL(b.website).hostname.replace(/^www\./, '');
+    const prefixes = ['info', 'contact', 'hello', 'mail', 'office', 'admin', 'support', 'reception', 'reservations', 'booking', 'sales'];
+    // Try the most common pattern first: info@domain.com
+    // We verify by checking if the contact page exists
+    const base = b.website.replace(/\/$/, '');
+    const contactPaths = ['/contact', '/contact-us', '/about', '/about-us'];
+    for (const path of contactPaths) {
+      if (b.email) break;
+      try {
+        const r = await corsFetch(base + path, { signal: AbortSignal.timeout(3000) });
+        if (!r.ok) continue;
+        const html = await r.text();
+        // Look for any email on the contact page
+        const emails = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+        if (emails) {
+          for (const e of emails) {
+            const clean = e.replace(/[\s>);]+$/, '');
+            const junk = /example\.com|wixpress|sentry|googleapis|google\.com|cloudflare|schema\.org|duckduckgo/i;
+            if (!junk.test(clean) && clean.length > 6 && clean.length < 80) {
+              b.email = clean;
+              break;
+            }
+          }
+        }
+      } catch {}
+    }
+    // If still no email, try common patterns as mailto: links
+    if (!b.email) {
+      for (const prefix of prefixes.slice(0, 5)) {
+        const guessedEmail = prefix + '@' + host;
+        // We can't verify without sending, but we can check if the domain exists
+        // by trying to fetch the website itself
+        break; // Don't fabricate — just stop here
+      }
+    }
+  } catch {}
 }
 
 // ── Extract from plain text (e.g. Brave search descriptions) ──
@@ -1781,9 +1864,15 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
     const base = b.website.replace(/\/$/, '');
     // Extended contact page paths — covers most CMS platforms and languages
     // Top 8 most effective contact page paths (speed: max 8 pages)
+    // Priority contact page paths — covers most CMS platforms and languages
     const paths = [
       '/contact', '/contact-us', '/about', '/about-us',
       '/kontakti', '/контакты', '/iletisim', '/contato',
+      '/contacto', '/kontakt', '/scontattaci', '/ contacting',
+      '/team', '/info', '/impressum', '/locations',
+      '/find-us', '/where-to-find-us', '/reach-us', '/get-in-touch',
+      '/kontaktay', '/momkhmarebeli', '/联系方式', '/お問い合わせ',
+      '/اتصل-بنا', '/написать-нам', '/联系我们',
     ];
     for (const path of paths) {
       if (b.email) break;
@@ -2120,7 +2209,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
 
   const NEEDS_ENRICHMENT = allBizList.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
   const maxEnrich = Math.min(NEEDS_ENRICHMENT.length, 200);
-  const _EXCLUDE = /example\.com|wixpress|sentry\.io|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com/i;
+  const _EXCLUDE = /example\.com|wixpress|sentry\.io|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|yelp\.com|tripadvisor|foursquare|booking\.com|expedia|yellowpages|justdial|zomato|opentable|flickr|pinterest|tumblr|reddit\.com|quora|wikipedia|youtube\.com|tiktok\.com|linkedin\.com|x\.com|snapchat|threads|medium\.com|substack|gh-pages|archive\.org|amazon\.com|ebay\.com|aliexpress/i;
 
   _ep.activePass = 'Enriching contacts (priority pipeline)'; _ep.passNumber = 1; _ep.percent = 80;
   _ep.engines.forEach(e => { e.status = 'active'; e.found = 0; });
@@ -2162,7 +2251,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                 const data = await r.json();
                 for (const res of (data.web?.results || [])) {
                   extractFromText((res.description || '') + ' ' + (res.title || ''), b);
-                  if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('google.com/maps')) b.website = res.url;
+                  if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('google.com/maps') && isLikelyBusinessWebsite(res.url, b.name)) b.website = res.url;
                 }
                 if (!b.website && data.knowledge_graph?.url && !_EXCLUDE.test(data.knowledge_graph.url)) b.website = data.knowledge_graph.url;
               }
@@ -2184,7 +2273,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               const bingResults = await searchBing(q);
               for (const res of bingResults) {
                 extractFromText((res.snippet || '') + ' ' + (res.title || ''), b);
-                if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('bing.com')) b.website = res.url;
+                if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('bing.com') && isLikelyBusinessWebsite(res.url, b.name)) b.website = res.url;
               }
             } catch {}
           })(),
@@ -2194,7 +2283,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               const spResults = await searchDDGLite(decodeURIComponent(q));
               for (const res of spResults) {
                 extractFromText((res.snippet || '') + ' ' + (res.title || ''), b);
-                if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('duckduckgo.com/lite')) b.website = res.url;
+                if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('duckduckgo.com/lite') && isLikelyBusinessWebsite(res.url, b.name)) b.website = res.url;
               }
             } catch {}
           })(),
@@ -2245,7 +2334,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         // EARLY EXIT
         if (hasSufficientData()) { enrichedCount++; return; }
 
-        // ═══ PHASE 4: Domain probing + email guess ═══
+        // ═══ PHASE 4: Domain probing + contact page email search ═══
         if (!b.website) {
           try { await probeDomains(b); } catch {}
           await scrapeWebsiteOnce();
@@ -2255,7 +2344,10 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           if (!websiteScraped) {
             try { await scrapeContactPageForEmail(b); } catch {}
           }
-          // Removed fabricated email guessing
+          // Try common email patterns by scraping contact pages
+          if (!b.email) {
+            try { await tryCommonEmailPatterns(b); } catch {}
+          }
         }
 
         // ═══ PHASE 5: Social media (only if still missing) ═══
