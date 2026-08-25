@@ -43,15 +43,7 @@ export async function resolveCity(query: string): Promise<CityResult[]> {
         lon: parseFloat(r.lon),
         population: pop,
         bbox: [bbox[0], bbox[2], bbox[1], bbox[3]],
-      
-  wedding: '["amenity"="wedding_venue"]',
-  printing: '["shop"~"print|printing"]',
-  tattoo: '["shop"="tattoo"]',
-  market: '["shop"="market"]',
-  dance: '["leisure"="dance"]',
-  music_school: '["amenity"~"music_school|dancing_school|arts_centre"]',
-  courier: '["office"~"courier|delivery"]',
-};
+      };
     });
   }
   throw new Error('Nominatim rate limit — try again in a few seconds');
@@ -233,12 +225,10 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   if (a === 'nightclub' || a === 'casino') return 'night_club';
   if (a === 'music_school' || a === 'dancing_school' || a === 'arts_centre') return 'music_school';
   if (a === 'spa' || a === 'sauna') return 'spa';
-  if (a === 'bbq') return 'restaurant';
   if (a === 'marketplace') return 'marketplace';
   if (a === 'fuel') return 'fuel';
 
-
-  // Craft businesses (Georgia, Russia, CIS)
+    // Craft businesses (Georgia, Russia, CIS)
   if (tags.craft === 'bakery') return 'bakery';
   if (tags.craft === 'car_repair' || tags.craft === 'car_paint') return 'car_repair';
   if (tags.craft === 'tailor' || tags.craft === 'dressmaker') return 'clothing';
@@ -251,8 +241,7 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   if (tags.healthcare === 'pharmacy') return 'pharmacy';
   if (tags.healthcare === 'hospital') return 'hospital';
   if (tags.healthcare === 'physiotherapist') return 'clinic';
-
-  // ─── Tourism ───
+// ─── Tourism ───
   if (t === 'hotel' || t === 'motel' || t === 'apartment') return 'hotel';
   if (t === 'hostel') return 'hostel';
   if (t === 'guest_house') return 'hotel';
@@ -414,12 +403,14 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   if (callerSignal?.aborted) throw new Error('Cancelled');
 
   // 2) If proxy was unreachable before, don't waste time trying again
-  // Removed permanent proxy block
+  if (_proxyReachable === false) {
+    return new Response('', { status: 0, statusText: 'CORS unavailable' });
+  }
 
   // 3) Race 3 different CORS proxies — first OK wins, 3s max
   const proxyUrls = [
-    'https://corsproxy.io/?url=' + encodeURIComponent(url),
-    'https://api.corsproxy.org/?url=' + encodeURIComponent(url),
+    'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
+    'https://api.allorigins.win/get?url=' + encodeURIComponent(url),
     'https://corsproxy.org/?url=' + encodeURIComponent(url),
   ];
   try {
@@ -428,7 +419,7 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
         const r = await fetch(proxyUrl, { headers, signal: AbortSignal.timeout(3000) });
         if (!r.ok) throw new Error('not ok');
         // allorigins.get returns JSON with contents field
-        if (proxyUrl.includes('corsproxy.org/')) {
+        if (proxyUrl.includes('allorigins.win/get')) {
           const json = await r.json();
           return new Response(json.contents || '', { status: 200, headers: { 'Content-Type': 'text/html' } });
         }
@@ -438,6 +429,8 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
     _proxyReachable = true;
     return result;
   } catch {
+    // Mark proxy as unreachable if this is the first failure
+    if (_proxyReachable === null) _proxyReachable = false;
     return new Response('', { status: 0, statusText: 'CORS unavailable' });
   }
 }
@@ -456,7 +449,7 @@ const CAT_OSM_FILTER: Record<string, string> = {
   fast_food: '["amenity"~"fast_food|food_court"]',
   ice_cream: '["amenity"="ice_cream"]',
   hotel: '["tourism"~"hotel|hostel|motel|apartment|guest_house"]',
-  gym: '["leisure"~"fitness_centre|sports_centre|sports_hall|swimming"]',
+  gym: '["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool"]',
   beauty_salon: '["shop"~"beauty|cosmetics|nail_salon"]',
   hair_salon: '["shop"~"hairdresser|wigs"]',
   pharmacy: '["amenity"~"pharmacy|chemist"]',
@@ -477,7 +470,7 @@ const CAT_OSM_FILTER: Record<string, string> = {
   laundry: '["shop"~"laundry|dry_cleaning"]',
   pet_groomer: '["shop"~"pet_grooming|pet"]',
   coworking: '["office"="coworking"]',
-  night_club: '["amenity"="nightclub"]',
+  night_club: '["amenity"="night_club"]',
   car_rental: '["amenity"="car_rental"]',
   veterinary: '["amenity"="veterinary"]',
   florist: '["shop"="florist"]',
@@ -508,7 +501,7 @@ const CAT_OSM_FILTER: Record<string, string> = {
   travel_agency: '["office"~"travel_agent"]',
   cleaning: '["shop"="cleaning"]',
   car_wash: '["amenity"="car_wash"]',
-  nail_salon: '["shop"~"nail_salon|beauty|cosmetics"]',
+  nail_salon: '["shop"="beauty"]',
 };
 
 async function fetchOverpass(query: string, timeoutSec = 60): Promise<any> {
@@ -613,8 +606,8 @@ out center body;`;
 (
   node(${bbox})["tourism"~"hotel|hostel|motel|apartment|guest_house"];
   way(${bbox})["tourism"~"hotel|hostel|motel|apartment|guest_house"];
-  node(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall|swimming"];
-  way(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall|swimming"];
+  node(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool"];
+  way(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool"];
   node(${bbox})["office"];
   way(${bbox})["office"];
 );
@@ -1718,7 +1711,7 @@ function guessEmailsFromDomain(domain: string): string[] {
 }
 
 // Try Google cache as fallback for blocked websites
-async function tryGoogleCache(_b: Business): Promise<void> { /* Google cache discontinued 2024 */ if(true) return;
+async function tryGoogleCache(_b: Business): Promise<void> { /* Google cache 2024 */ return;
   if (b.email && b.phone) return;
   if (!b.website) return;
   try {
@@ -2113,7 +2106,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     await Promise.all(batch.map(async (b) => {
       try {
         // Helper: check if business has sufficient data (phone OR email + website)
-        const hasSufficientData = () => b.phone && (b.email || b.website);
+        const hasSufficientData = () => (b.phone || b.email) && (b.email || b.phone);
         let websiteScraped = false;
         const scrapeWebsiteOnce = async () => {
           if (websiteScraped || !b.website) return;
@@ -2229,8 +2222,11 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           await scrapeWebsiteOnce();
         }
 
-        if (!b.email && b.website && !websiteScraped) {
-          try { await scrapeContactPageForEmail(b); } catch {}
+        if (!b.email && b.website) {
+          if (!websiteScraped) {
+            try { await scrapeContactPageForEmail(b); } catch {}
+          }
+          // Removed fabricated email guessing
         }
 
         // ═══ PHASE 5: Social media (only if still missing) ═══
