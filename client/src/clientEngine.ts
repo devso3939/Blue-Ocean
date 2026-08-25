@@ -390,7 +390,7 @@ function isCancelled(): boolean { return _cancelSignal?.aborted ?? false; }
 // 2. Falls back to allorigins.win with 3s timeout (races raw + get)
 // Total max wait: ~4 seconds (not 12+)
 // Multi-proxy strategy: try 3 different CORS proxies in parallel
-let _proxyReachable: boolean | null = null; // cached proxy test result
+let _lastProxyFail = 0; // 30s cooldown instead of permanent block
 async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', ...init?.headers };
   const callerSignal = init?.signal;
@@ -402,37 +402,28 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   } catch { /* CORS error */ }
   if (callerSignal?.aborted) throw new Error('Cancelled');
 
-  // 2) If proxy was unreachable before, don't waste time trying again
-  if (_proxyReachable === false) {
+  // 2) If proxy failed recently (30s cooldown), skip
+  if (Date.now() - _lastProxyFail < 30000) {
     return new Response('', { status: 0, statusText: 'CORS unavailable' });
   }
 
-  // 3) Race 3 different CORS proxies — first OK wins, 3s max
-  const proxyUrls = [
-    'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
-    'https://api.allorigins.win/get?url=' + encodeURIComponent(url),
-    'https://corsproxy.org/?url=' + encodeURIComponent(url),
-  ];
+  // 3) Try cors.sh (working as of 2026)
   try {
-    const result = await Promise.race(
-      proxyUrls.map(async (proxyUrl) => {
-        const r = await fetch(proxyUrl, { headers, signal: AbortSignal.timeout(3000) });
-        if (!r.ok) throw new Error('not ok');
-        // allorigins.get returns JSON with contents field
-        if (proxyUrl.includes('allorigins.win/get')) {
-          const json = await r.json();
-          return new Response(json.contents || '', { status: 200, headers: { 'Content-Type': 'text/html' } });
-        }
-        return r;
-      })
-    );
-    _proxyReachable = true;
-    return result;
-  } catch {
-    // Mark proxy as unreachable if this is the first failure
-    if (_proxyReachable === null) _proxyReachable = false;
-    return new Response('', { status: 0, statusText: 'CORS unavailable' });
-  }
+    const r = await fetch('https://cors.sh/' + url, { headers, signal: AbortSignal.timeout(5000) });
+    if (r.ok) return r;
+  } catch {}
+
+  // 4) Try allorigins (flaky, last resort)
+  try {
+    const r = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(url), { headers, signal: AbortSignal.timeout(5000) });
+    if (r.ok) {
+      const json = await r.json();
+      return new Response(json.contents || '', { status: 200, headers: { 'Content-Type': 'text/html' } });
+    }
+  } catch {}
+
+  _lastProxyFail = Date.now();
+  return new Response('', { status: 0, statusText: 'CORS unavailable' });
 }
 
 // Direct fetch for services that support CORS (Nominatim, Overpass)
@@ -588,8 +579,8 @@ export async function queryBusinesses(
   way(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream"];
   node(${bbox})["amenity"~"pharmacy|hospital|clinic|dentist|veterinary"];
   way(${bbox})["amenity"~"pharmacy|hospital|clinic|dentist|veterinary"];
-  node(${bbox})["amenity"~"bank|cinema|nightclub|car_rental|fuel|marketplace"];
-  way(${bbox})["amenity"~"bank|cinema|nightclub|car_rental|fuel|marketplace"];
+  node(${bbox})["amenity"~"bank|cinema|nightclub|car_rental|fuel|marketplace|spa|sauna|casino|music_school|dancing_school"];
+  way(${bbox})["amenity"~"bank|cinema|nightclub|car_rental|fuel|marketplace|spa|sauna|casino|music_school|dancing_school"];
 );
 out center body;`;
 
@@ -606,10 +597,14 @@ out center body;`;
 (
   node(${bbox})["tourism"~"hotel|hostel|motel|apartment|guest_house"];
   way(${bbox})["tourism"~"hotel|hostel|motel|apartment|guest_house"];
-  node(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool"];
-  way(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool"];
+  node(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool|spa|sauna"];
+  way(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool|spa|sauna"];
   node(${bbox})["office"];
   way(${bbox})["office"];
+  node(${bbox})["craft"];
+  way(${bbox})["craft"];
+  node(${bbox})["healthcare"];
+  way(${bbox})["healthcare"];
 );
 out center body;`;
 
@@ -763,8 +758,12 @@ async function enrichFromSocialPlatforms(businesses: Business[], onProgress?: (p
         if (!r.ok) return;
         const html = await r.text();
         // LinkedIn
-        if (!b.facebook) { // reuse facebook field for LinkedIn if we find it... no, add a new field? Let's put it in description
-          // Actually we don't have a LinkedIn field. Let's extract from results and put website if we find it
+        // LinkedIn
+        if (!b.linkedin) {
+          const liMatch = html.match(/linkedin\.com\/(?:company|school)\/([a-zA-Z0-9._-]+)/i);
+          if (liMatch && !liMatch[0].includes('login')) {
+            b.linkedin = 'https://linkedin.com/company/' + liMatch[1];
+          }
         }
         // Twitter/X
         // TikTok
@@ -974,10 +973,10 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
       }
 
       // 8. TikTok link
-      if (!b.facebook) {
+      if (!b.tiktok) {
         const ttMatch = full.match(/tiktok\.com\/@([a-zA-Z0-9._]+)/i);
         if (ttMatch && !ttMatch[0].includes('login')) {
-          b.facebook = 'https://tiktok.com/@' + ttMatch[1]; // reuse facebook field for TikTok
+          b.tiktok = 'https://tiktok.com/@' + ttMatch[1];
         }
       }
 
@@ -1539,26 +1538,75 @@ const BRAVE_API_KEY = 'BSAded3tnZfvadieW5pz0tiLrlh2lvn';
 // ─── Multilingual Search Helpers ───────────────────────────
 // Maps common Georgian city names to English
 const CITY_EN_MAP: Record<string, string> = {
+  // Georgian
   'თბილისი': 'Tbilisi', 'ბათუმი': 'Batumi', 'ქუთაისი': 'Kutaisi',
   'რუსთავი': 'Rustavi', 'ზუგდიდი': 'Zugdidi', 'გორი': 'Gori',
   'ფოთი': 'Poti', 'ქობულეთი': 'Kobuleti', 'თელავი': 'Telavi',
   'სამტრედია': 'Samtredia', 'სენაკი': 'Senaki', 'ხაშური': 'Khashuri',
   'ახალციხე': 'Akhaltsikhe', 'ოზურგეთი': 'Ozurgeti', 'მარნეული': 'Marneuli',
-  'ერევანი': 'Yerevan', 'ბაქო': 'Baku', 'მოსკოვი': 'Moscow',
-  'სტამბოლი': 'Istanbul', 'ლონდონი': 'London', 'პარიზი': 'Paris',
-  'ნიუ-იორკი': 'New York', 'ტოკიო': 'Tokyo',
+  // Armenian
+  'Երևան': 'Yerevan', 'Գյումրի': 'Gyumri', 'Վանաձոր': 'Vanadzor',
+  'Աբովյան': 'Abovyan', 'Կապան': 'Kapan', 'Հրազդան': 'Hrazdan',
+  // Russian
+  'Москва': 'Moscow', 'Санкт-Петербург': 'Saint Petersburg', 'Новосибирск': 'Novosibirsk',
+  'Екатеринбург': 'Yekaterinburg', 'Казань': 'Kazan', 'Нижний Новгород': 'Nizhny Novgorod',
+  'Краснодар': 'Krasnodar', 'Сочи': 'Sochi', 'Самара': 'Samara', 'Омск': 'Omsk',
+  // Turkish
+  'İstanbul': 'Istanbul', 'Ankara': 'Ankara', 'İzmir': 'Izmir',
+  'Bursa': 'Bursa', 'Antalya': 'Antalya', 'Adana': 'Adana',
+  'Trabzon': 'Trabzon', 'Gaziantep': 'Gaziantep', 'Konya': 'Konya',
+  'Mersin': 'Mersin', 'Diyarbakır': 'Diyarbakir',
+  // Azerbaijani
+  'Bakı': 'Baku', 'Gəncə': 'Ganja', 'Sumqayıt': 'Sumqayit',
+  // Arabic
+  'القاهرة': 'Cairo', 'الرياض': 'Riyadh', 'جدة': 'Jeddah',
+  'دبي': 'Dubai', 'بيروت': 'Beirut', 'عمّان': 'Amman',
+  // Hindi
+  'मुंबई': 'Mumbai', 'दिल्ली': 'Delhi', 'बेंगलुरु': 'Bangalore',
+  // Chinese/Japanese/Korean
+  '서울': 'Seoul', '도쿄': 'Tokyo',
+  // Ukrainian
+  'Київ': 'Kyiv', 'Харків': 'Kharkiv', 'Одеса': 'Odesa', 'Дніпро': 'Dnipro',
 };
 
-// Transliterate Georgian characters to Latin
+// Transliterate any non-Latin script to Latin
 function transliterateGeo(text: string): string {
   if (!text) return text;
   const map: Record<string, string> = {
+    // Georgian
     'ა': 'a', 'ბ': 'b', 'გ': 'g', 'დ': 'd', 'ე': 'e', 'ვ': 'v',
     'ზ': 'z', 'თ': 't', 'ი': 'i', 'კ': 'k', 'ლ': 'l', 'მ': 'm',
     'ნ': 'n', 'ო': 'o', 'პ': 'p', 'ჟ': 'zh', 'რ': 'r', 'ს': 's',
     'ტ': 't', 'უ': 'u', 'ფ': 'p', 'ქ': 'k', 'ღ': 'gh', 'ყ': 'q',
     'შ': 'sh', 'ჩ': 'ch', 'ც': 'ts', 'ძ': 'dz', 'წ': 'ts',
     'ჭ': 'ch', 'ხ': 'kh', 'ჯ': 'j', 'ჰ': 'h',
+    // Armenian
+    'Ա': 'A', 'Բ': 'B', 'Գ': 'G', 'Դ': 'D', 'Ե': 'Ye', 'Զ': 'Z',
+    'Է': 'E', 'Ը': 'Y', 'Թ': 'T', 'Ժ': 'Zh', 'Ի': 'I', 'Լ': 'L',
+    'Խ': 'Kh', 'Կ': 'K', 'Հ': 'H', 'Ձ': 'Dz', 'Ղ': 'Gh', 'Ճ': 'Ch',
+    'Մ': 'M', 'Յ': 'Y', 'Ն': 'N', 'Շ': 'Sh', 'Ո': 'Vo', 'Չ': 'Ch',
+    'Պ': 'P', 'Ջ': 'J', 'Ռ': 'R', 'Ս': 'S', 'Վ': 'V', 'Տ': 'T',
+    'Ր': 'R', 'Ց': 'Ts', 'Փ': 'P', 'Ք': 'K', 'Օ': 'O', 'Ֆ': 'F',
+    'ա': 'a', 'բ': 'b', 'գ': 'g', 'դ': 'd', 'ե': 'ye', 'զ': 'z',
+    'է': 'e', 'ը': 'y', 'թ': 't', 'ժ': 'zh', 'ի': 'i', 'լ': 'l',
+    'խ': 'kh', 'կ': 'k', 'հ': 'h', 'ձ': 'dz', 'ղ': 'gh', 'ճ': 'ch',
+    'մ': 'm', 'յ': 'y', 'ն': 'n', 'շ': 'sh', 'ո': 'vo', 'չ': 'ch',
+    'պ': 'p', 'ջ': 'j', 'ռ': 'r', 'ս': 's', 'վ': 'v', 'տ': 't',
+    'ր': 'r', 'ց': 'ts', 'ու': 'u', 'փ': 'p', 'ք': 'k', 'և': 'ev',
+    'օ': 'o', 'ֆ': 'f',
+    // Russian/Cyrillic
+    'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Е': 'E',
+    'Ё': 'Yo', 'Ж': 'Zh', 'З': 'Z', 'И': 'I', 'Й': 'Y', 'К': 'K',
+    'Л': 'L', 'М': 'M', 'Н': 'N', 'О': 'O', 'П': 'P', 'Р': 'R',
+    'С': 'S', 'Т': 'T', 'У': 'U', 'Ф': 'F', 'Х': 'Kh', 'Ц': 'Ts',
+    'Ч': 'Ch', 'Ш': 'Sh', 'Щ': 'Shch', 'Ъ': '', 'Ы': 'Y', 'Ь': '',
+    'Э': 'E', 'Ю': 'Yu', 'Я': 'Ya',
+    'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e',
+    'ё': 'yo', 'ж': 'zh', 'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k',
+    'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r',
+    'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'kh', 'ц': 'ts',
+    'ч': 'ch', 'ш': 'sh', 'щ': 'shch', 'ъ': '', 'ы': 'y', 'ь': '',
+    'э': 'e', 'ю': 'yu', 'я': 'ya',
   };
   return text.split('').map(c => map[c] || c).join('');
 }
@@ -1700,15 +1748,7 @@ function buildPhoneQuery(b: Business): string {
   parts.push('phone number telephone call');
   return encodeURIComponent(parts.join(' '));
 }
-
-// Guess common email patterns from a website domain
-function guessEmailsFromDomain(domain: string): string[] {
-  try {
-    const host = new URL(domain).hostname.replace(/^www\./, '');
-    const prefixes = ['info', 'contact', 'hello', 'mail', 'office', 'admin', 'support', 'reception', 'reservations', 'booking', 'reservations', 'sales', 'manager', 'director'];
-    return prefixes.map(p => p + '@' + host);
-  } catch { return []; }
-}
+// guessEmailsFromDomain removed
 
 // Try Google cache as fallback for blocked websites
 async function tryGoogleCache(_b: Business): Promise<void> {
@@ -2095,7 +2135,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     await Promise.all(batch.map(async (b) => {
       try {
         // Helper: check if business has sufficient data (phone OR email + website)
-        const hasSufficientData = () => (b.phone || b.email) && (b.email || b.phone);
+        const hasSufficientData = () => (b.phone && b.email) || (b.phone && b.website) || (b.email && b.website);
         let websiteScraped = false;
         const scrapeWebsiteOnce = async () => {
           if (websiteScraped || !b.website) return;
@@ -2486,7 +2526,7 @@ export async function getDemandSignals(categoryLabel: string, cityName: string):
   }).catch(() => {});
 
   // DuckDuckGo web search density
-  const ddgP = fetch(
+  const ddgP = corsFetch(
     `https://html.duckduckgo.com/html/?q=${encodeURIComponent(`"${categoryLabel}" "${cityName}"`)}`,
     { headers: { 'User-Agent': 'Mozilla/5.0' } }
   ).then(async r => {
@@ -2497,26 +2537,8 @@ export async function getDemandSignals(categoryLabel: string, cityName: string):
     }
   }).catch(() => {});
 
-  // Google Trends via SerpAPI free tier or direct scrape
-  const gtP = fetch(
-    `https://trends.google.com/trends/api/explore?hl=en-US&tz=-240&req={"comparisonItem":[{"keyword":"${encodeURIComponent(categoryLabel.toLowerCase())}","geo":"${encodeURIComponent(cityName)}","time":"today 12-m"}],"category":0,"property":""}`,
-    { headers: { 'User-Agent': 'Mozilla/5.0' } }
-  ).then(async r => {
-    if (r.ok) {
-      const text = await r.text();
-      // Google Trends prefixes response with ")]}'\n"
-      const json = text.replace(/^\)\]\}'\\n/, '');
-      try {
-        const d = JSON.parse(json);
-        const timeline = d?.default?.timelineData;
-        if (timeline && timeline.length > 0) {
-          const avg = timeline.reduce((s: number, t: any) => s + (t.value?.[0] || 0), 0) / timeline.length;
-          signals.webSearch = Math.min(100, Math.round(avg));
-          if (!signals.sources.includes('Google Trends')) signals.sources.push('Google Trends');
-        }
-      } catch {}
-    }
-  }).catch(() => {});
+  // Google Trends removed (dead endpoint, CORS-blocked)
+  const gtP = Promise.resolve();
 
   await Promise.race([
     Promise.all([wikiP, redditP, ddgP, gtP]),
