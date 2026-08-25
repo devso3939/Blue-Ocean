@@ -1711,20 +1711,9 @@ function guessEmailsFromDomain(domain: string): string[] {
 }
 
 // Try Google cache as fallback for blocked websites
-async function tryGoogleCache(_b: Business): Promise<void> { /* Google cache 2024 */ return;
-  if (b.email && b.phone) return;
-  if (!b.website) return;
-  try {
-    const cacheUrl = `https://webcache.googleusercontent.com/search?q=cache:${encodeURIComponent(b.website)}`;
-    const r = await corsFetch(cacheUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      signal: AbortSignal.timeout(3000),
-    });
-    if (r.ok) {
-      const html = await r.text();
-      extractFromHtml(html, b);
-    }
-  } catch {}
+async function tryGoogleCache(_b: Business): Promise<void> {
+    // Google Cache discontinued in 2024
+    return;
 }
 
 // Try AMP/cached version of a page
