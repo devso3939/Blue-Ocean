@@ -61,18 +61,17 @@ def main() -> int:
 
     print("\n== opportunities scan (snapshot + peers + scoring; heavy) ==")
     opps = run_job("opportunities", {"city_id": city_id})
-    rows = opps.get("rows") or []
+    rows = opps.get("opportunities") or []
     print(f"total_places: {opps.get('snapshot', {}).get('total_places')}")
-    print(f"rows returned: {len(rows)}")
-    emails_shown = 0
+    print(f"opportunities returned: {len(rows)}")
     for r in rows[:10]:
-        print(f"  #{r.get('rank')} {r.get('label'):30s} score={r.get('score')} gap={r.get('gap')} "
+        print(f"  #{r.get('rank', '-')} {r.get('label', '?')[:30]:30s} score={r.get('score')} gap={r.get('gap')} "
               f"conf={r.get('confidence')} existing={r.get('existing')}")
     if not rows:
-        raise RuntimeError("opportunity scan returned zero rows")
+        raise RuntimeError("opportunity scan returned zero opportunities")
 
     print("\n== single category analysis ==")
-    cat = rows[0].get("category_id") or rows[0].get("category")
+    cat = rows[0].get("category_id")
     if not cat:
         cats = client.get(f"{BASE}/categories", params={"popular": "true"}).json()
         cat = cats[0]["id"]
