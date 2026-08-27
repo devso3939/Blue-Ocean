@@ -9,18 +9,23 @@ import { fmtCompact, fmtNum } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useRouteParam } from "@/lib/use-route-param";
 
 export default function CountryCitiesPage({ cca2 }: { cca2: string }) {
+  // Under static export + SPA fallback the root page can be served at a deep
+  // URL ('/discover/country/<real-cca2>'); recover the real code from the URL.
+  const realCca2 = useRouteParam(cca2, /^\/discover\/country\/([^/]+)/) ?? cca2;
   const [data, setData] = React.useState<CountryCitiesResult | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [q, setQ] = React.useState("");
 
   React.useEffect(() => {
+    if (!realCca2) return;
     api
-      .countryCities(cca2)
+      .countryCities(realCca2)
       .then(setData)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load cities"));
-  }, [cca2]);
+  }, [realCca2]);
 
   if (error) {
     return (

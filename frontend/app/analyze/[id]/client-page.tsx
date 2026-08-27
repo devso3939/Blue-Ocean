@@ -38,8 +38,12 @@ import { Button } from "@/components/ui/button";
 import { ScoreRing } from "@/components/score-ring";
 import { MapView } from "@/components/map-view";
 import { ConfidenceBreakdown, ExistingVsExpected, PerCapitaChart, SupplyPosition } from "@/components/analysis-charts";
+import { useRouteParam } from "@/lib/use-route-param";
 
 export default function AnalysisPage({ id }: { id: string }) {
+  // Under static export + SPA fallback the root page can be served at a deep
+  // URL ('/analyze/<real-id>'); recover the real id from the address bar.
+  const realId = useRouteParam(id, /^\/analyze\/([^/]+)/);
   const [analysis, setAnalysis] = React.useState<MarketAnalysis | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [placesExpanded, setPlacesExpanded] = React.useState(false);
@@ -47,11 +51,12 @@ export default function AnalysisPage({ id }: { id: string }) {
   const [rechecking, setRechecking] = React.useState(false);
 
   React.useEffect(() => {
+    if (!realId) return;
     api
-      .analysis(id)
+      .analysis(realId)
       .then(setAnalysis)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load analysis"));
-  }, [id]);
+  }, [realId]);
 
   const recheck = async () => {
     if (!analysis || rechecking) return;

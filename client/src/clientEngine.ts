@@ -563,11 +563,17 @@ async function fetchOverpass(query: string, timeoutSec = 60, onWait?: (msg: stri
 
   // First pass across all mirrors…
   let data = await tryAllMirrors();
-  // …and if everything failed (typical cause: we just ran a heavy scan and the
-  // IP is rate-limited), cool down once and try every mirror again.
+  // …if everything failed, cool down and try again (typical cause: the IP is
+  // rate-limited after a heavy scan; bans usually lift within a minute).
   if (!data) {
     onWait?.('OpenStreetMap servers are busy — waiting 40s before retrying…');
     await wait(40000);
+    data = await tryAllMirrors();
+  }
+  // Still nothing? One last patient attempt — longer bans need a longer pause.
+  if (!data) {
+    onWait?.('Still busy — waiting 2 minutes for a final retry…');
+    await wait(120000);
     data = await tryAllMirrors();
   }
   if (data) return data;

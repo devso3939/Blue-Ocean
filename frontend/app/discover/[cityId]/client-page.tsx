@@ -22,6 +22,7 @@ import {
 import { api } from "@/lib/api";
 import type { JobStatus, OpportunityRow, OpportunitiesResult } from "@/lib/types";
 import { scoreHex } from "@/lib/types";
+import { useRouteParam } from "@/lib/use-route-param";
 import { cn, fmtCompact, fmtNum, fmtPct } from "@/lib/utils";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -32,6 +33,9 @@ const MIN_SCORE_OPTIONS = [0, 50, 60, 70, 80];
 
 export default function DiscoverPage({ cityId }: { cityId: string }) {
   const router = useRouter();
+  // Under static export + SPA fallback the root page can be served at a deep
+  // URL ('/discover/<real-id>'); recover the real id from the address bar.
+  const realCityId = useRouteParam(cityId, /^\/discover\/([^/]+)/) ?? cityId;
   const [data, setData] = React.useState<OpportunitiesResult | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [query, setQuery] = React.useState("");
@@ -43,8 +47,9 @@ export default function DiscoverPage({ cityId }: { cityId: string }) {
   const [rechecking, setRechecking] = React.useState(false);
 
   React.useEffect(() => {
+    if (!realCityId) return;
     api
-      .opportunities(cityId)
+      .opportunities(realCityId)
       .then(setData)
       .catch(async (e) => {
         // No cached opportunities — auto-trigger a scan
@@ -61,7 +66,7 @@ export default function DiscoverPage({ cityId }: { cityId: string }) {
           });
           const result = await api.runJob<OpportunitiesResult>(
             "opportunities",
-            { city_id: cityId },
+            { city_id: realCityId },
             (r) => setJob({ ...r, status: r.status } as unknown as JobStatus),
           );
           setData(result);
@@ -70,7 +75,7 @@ export default function DiscoverPage({ cityId }: { cityId: string }) {
           setError(scanErr instanceof Error ? scanErr.message : "Failed to load or scan opportunities");
         }
       });
-  }, [cityId]);
+  }, [realCityId]);
 
   async function recheck() {
     if (!data || rechecking) return;
@@ -280,12 +285,12 @@ export default function DiscoverPage({ cityId }: { cityId: string }) {
                 ))}
               </select>
             </label>
-            <a href={api.opportunitiesExport(cityId, "xlsx")} download>
+            <a href={api.opportunitiesExport(realCityId, "xlsx")} download>
               <Button variant="default" size="sm">
                 <FileSpreadsheet className="h-3.5 w-3.5" /> Excel
               </Button>
             </a>
-            <a href={api.opportunitiesExport(cityId, "csv")} download>
+            <a href={api.opportunitiesExport(realCityId, "csv")} download>
               <Button variant="outline" size="sm">
                 <Download className="h-3.5 w-3.5" /> CSV
               </Button>
