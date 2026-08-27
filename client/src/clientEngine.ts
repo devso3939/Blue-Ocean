@@ -372,8 +372,11 @@ function wait(ms: number): Promise<void> {
         if (isCancelled()) { reject(new Error('Cancelled')); return; }
         resolve();
       }, ms);
-      // Also listen for cancel during the wait
-      _cancelSignal?.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('Cancelled')); }, { once: true });
+      // Also listen for cancel during the wait (listener removed when the
+      // promise settles, so it doesn't accumulate across thousands of calls)
+      const onAbort = () => { clearTimeout(timer); reject(new Error('Cancelled')); };
+      _cancelSignal?.addEventListener('abort', onAbort, { once: true });
+      setTimeout(() => _cancelSignal?.removeEventListener('abort', onAbort), ms + 50);
       return;
     }
     // Tab is hidden: poll rapidly with short intervals so we don't get stuck
@@ -507,43 +510,68 @@ const CAT_OSM_FILTER: Record<string, string> = {
   massage: '["leisure"~"spa|sauna"]',
 };
 
-async function fetchOverpass(query: string, timeoutSec = 60): Promise<any> {
-  for (let mi = 0; mi < OVERPASS_MIRRORS.length; mi++) {
-    const mirror = OVERPASS_MIRRORS[mi];
-    // Try up to 2 attempts per mirror for main mirrors
-    const attempts = mi < 2 ? 2 : 1;
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), (timeoutSec + 15) * 1000);
-        const res = await fetch(mirror, {
-          method: 'POST',
-          body: `data=${encodeURIComponent(query)}`,
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          signal: controller.signal,
-        });
-        clearTimeout(timer);
-        if (!res.ok) {
-          if (attempt < attempts - 1) await wait(3000);
+// Set when fetchOverpass exhausts every mirror — lets callers distinguish
+// "area genuinely empty" from "Overpass never answered".
+let _overpassExhausted = false;
+
+async function fetchOverpass(query: string, timeoutSec = 60, onWait?: (msg: string) => void): Promise<any> {
+  _overpassExhausted = false;
+  const tryAllMirrors = async (): Promise<any> => {
+    for (let mi = 0; mi < OVERPASS_MIRRORS.length; mi++) {
+      const mirror = OVERPASS_MIRRORS[mi];
+      // Try up to 2 attempts per mirror for main mirrors
+      const attempts = mi < 2 ? 2 : 1;
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), (timeoutSec + 15) * 1000);
+          const res = await fetch(mirror, {
+            method: 'POST',
+            body: `data=${encodeURIComponent(query)}`,
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            signal: controller.signal,
+          });
+          clearTimeout(timer);
+          if (res.status === 429 || res.status === 504) {
+            // Rate limited / gateway timeout — this mirror needs a longer pause
+            if (attempt < attempts - 1) await wait(10000);
+            continue;
+          }
+          if (!res.ok) {
+            if (attempt < attempts - 1) await wait(3000);
+            continue;
+          }
+          const text = await res.text();
+          if (!text.trim().startsWith('{')) {
+            // Got XML error or empty — rate limited
+            if (attempt < attempts - 1) await wait(5000);
+            continue;
+          }
+          const data = JSON.parse(text);
+          if (data.elements === undefined) continue;
+          return data;
+        } catch (e) {
+          if (attempt < attempts - 1) await wait(2000);
           continue;
         }
-        const text = await res.text();
-        if (!text.trim().startsWith('{')) {
-          // Got XML error or empty — rate limited
-          if (attempt < attempts - 1) await wait(5000);
-          continue;
-        }
-        const data = JSON.parse(text);
-        if (data.elements === undefined) continue;
-        return data;
-      } catch (e) {
-        if (attempt < attempts - 1) await wait(2000);
-        continue;
       }
+      // Wait between mirrors
+      if (mi < OVERPASS_MIRRORS.length - 1) await wait(2000);
     }
-    // Wait between mirrors
-    if (mi < OVERPASS_MIRRORS.length - 1) await wait(2000);
+    return null;
+  };
+
+  // First pass across all mirrors…
+  let data = await tryAllMirrors();
+  // …and if everything failed (typical cause: we just ran a heavy scan and the
+  // IP is rate-limited), cool down once and try every mirror again.
+  if (!data) {
+    onWait?.('OpenStreetMap servers are busy — waiting 40s before retrying…');
+    await wait(40000);
+    data = await tryAllMirrors();
   }
+  if (data) return data;
+
   // ── Last resort: try Overpass directly (CORS supported) ──
   try {
     const controller = new AbortController();
@@ -564,6 +592,7 @@ async function fetchOverpass(query: string, timeoutSec = 60): Promise<any> {
     }
   } catch {}
 
+  _overpassExhausted = true;
   return null;
 }
 
@@ -632,7 +661,7 @@ out center body;`;
 );
 out center body;`;
     onProgress?.(10, `Scanning for ${getCategoryLabel(categoryFilter)}…`);
-    const d = await fetchOverpass(qFocused, 90);
+    const d = await fetchOverpass(qFocused, 90, (msg) => onProgress?.(15, msg));
     if (d?.elements) allElements.push(...d.elements);
 
     // Fallback: the focused tag can exist yet categorize into a different
@@ -652,23 +681,23 @@ out center body;`;
   way(${bbox})["shop"];
 );
 out center body;`;
-      const d2 = await fetchOverpass(qBroad, 60);
+      const d2 = await fetchOverpass(qBroad, 60, (msg) => onProgress?.(55, msg));
       if (d2?.elements) allElements.push(...d2.elements);
     }
   } else {
     // ── FULL MODE: All categories (for Discover Opportunities) ──
     onProgress?.(10, 'Scanning food, healthcare & entertainment…');
-    const d1 = await fetchOverpass(qFood, 90);
+    const d1 = await fetchOverpass(qFood, 90, (msg) => onProgress?.(15, msg));
     if (d1?.elements) allElements.push(...d1.elements);
 
     await wait(1500);
     onProgress?.(30, 'Scanning shops & retail…');
-    const d2 = await fetchOverpass(qShops, 90);
+    const d2 = await fetchOverpass(qShops, 90, (msg) => onProgress?.(35, msg));
     if (d2?.elements) allElements.push(...d2.elements);
 
     await wait(1500);
     onProgress?.(50, 'Scanning hotels, gyms & services…');
-    const d3 = await fetchOverpass(qOther, 60);
+    const d3 = await fetchOverpass(qOther, 60, (msg) => onProgress?.(55, msg));
     if (d3?.elements) allElements.push(...d3.elements);
 
     // ── Tier 2: Fallback ──
@@ -682,7 +711,7 @@ out center body;`;
   way(${bbox})["shop"];
 );
 out center body;`;
-      const d4 = await fetchOverpass(qMin, 60);
+      const d4 = await fetchOverpass(qMin, 60, (msg) => onProgress?.(65, msg));
       if (d4?.elements) allElements.push(...d4.elements);
     }
   }
@@ -690,7 +719,13 @@ out center body;`;
   onProgress?.(60, 'Categorizing businesses…');
 
   if (allElements.length === 0) {
-    onProgress?.(70, 'No businesses found from OpenStreetMap');
+    // Distinguish "genuinely empty area" from "Overpass never answered" —
+    // previously both surfaced as 'No businesses found'.
+    const rateLimited = _overpassExhausted;
+    onProgress?.(70, rateLimited
+      ? 'OpenStreetMap servers could not be reached (rate limited or busy). Please retry in a minute.'
+      : 'No businesses found from OpenStreetMap');
+    if (rateLimited) throw new Error('OpenStreetMap servers are rate-limiting requests. Wait a minute and retry.');
     return results;
   }
 
@@ -2168,10 +2203,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       { name: 'DDG Lite', icon: '🌐', status: 'idle', found: 0 },
       { name: '2GIS', icon: '📍', status: 'idle', found: 0 },
       { name: 'Yandex', icon: '🔴', status: 'idle', found: 0 },
-      { name: 'Google Maps', icon: '🗺️', status: 'idle', found: 0 },
       { name: 'Website Scraper', icon: '🕸️', status: 'idle', found: 0 },
-      { name: 'WordPress', icon: '📝', status: 'idle', found: 0 },
-      { name: 'Sitemap', icon: '🗺', status: 'idle', found: 0 },
     ],
     contacts: { emails: 0, phones: 0, websites: 0, social: 0, total: 0 },
     businessesProcessed: 0,

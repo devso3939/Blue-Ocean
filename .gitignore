@@ -36,6 +36,7 @@ backend/tmp_*.xlsx
 .env
 .env.local
 .env.*.local
+.github-token
 
 # IDE
 .vscode/
@@ -56,6 +57,11 @@ desktop.ini
 *.log
 *.log.err
 server.log
+
+# Local test artifacts
+*_output.txt
+.uvicorn_pid.txt
+client/parsertest.cjs
 
 # Tools (local runtimes)
 .tools/**

@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from . import config, taxonomy
 from .cache import cache
 from .countries import get_countries
+from .jobstore import JobStore
 from .models import JobRequest, JobStatus
 from .providers.city import CityResolutionError, CityResolver
 from .services import analysis as analysis_service
@@ -40,10 +41,80 @@ taxonomy.load_discovered()
 # ---------------------------------------------------------------------------
 
 class JobManager:
-    def __init__(self, max_workers: int):
+    def __init__(self, max_workers: int, store: Optional["JobStore"] = None):
         self._jobs: dict[str, dict[str, Any]] = {}
+        self._store = store
         self._lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        if store is not None:
+            self._recover()
+            self._prune()
+
+    # -- persistence helpers --------------------------------------------------
+    def _persist(self, job_id: str, payload_json: Optional[str] = None, **fields: Any) -> None:
+        if self._store is None:
+            return
+        try:
+            if payload_json is not None:
+                with self._lock:
+                    job = self._jobs.get(job_id)
+                    row = {
+                        "job_id": job_id,
+                        "kind": job["kind"] if job else "",
+                        "payload": payload_json,
+                        "status": fields.get("status", "queued"),
+                        "stage": fields.get("stage", "queued"),
+                        "progress": fields.get("progress", 0.0),
+                        "message": fields.get("message"),
+                        "result": fields.get("result"),
+                        "error": fields.get("error"),
+                        "created_at": fields.get("created_at") or (job["created_at"] if job else _now()),
+                        "updated_at": fields.get("updated_at") or _now(),
+                    }
+                self._store.upsert(
+                    row["job_id"], row["kind"], row["payload"], row["status"], row["stage"],
+                    row["progress"], row["message"], row["result"], row["error"],
+                    row["created_at"], row["updated_at"],
+                )
+            else:
+                self._store.update(job_id, updated_at=_now(), **fields)
+        except Exception:  # persistence must never break the job path
+            pass
+
+    def _recover(self) -> None:
+        """Re-queue jobs that were queued/running when the process last stopped."""
+        try:
+            for row in self._store.load_all():
+                result = None
+                if row["status"] == "done" and row["result"]:
+                    try:
+                        result = json.loads(row["result"])
+                    except Exception:
+                        result = None
+                job = {
+                    "job_id": row["job_id"], "kind": row["kind"], "status": row["status"],
+                    "stage": row["stage"], "progress": row["progress"], "message": row["message"],
+                    "result": result, "error": row["error"],
+                    "created_at": row["created_at"], "updated_at": row["updated_at"],
+                }
+                self._jobs[row["job_id"]] = job
+                if row["status"] in ("queued", "running"):
+                    payload = json.loads(row["payload"] or "{}")
+                    self._jobs[row["job_id"]]["status"] = "queued"
+                    self._jobs[row["job_id"]]["stage"] = "queued"
+                    self._jobs[row["job_id"]]["message"] = "re-queued after restart"
+                    self._executor.submit(self._run, row["job_id"], row["kind"], payload)
+        except Exception:
+            pass
+
+    def _prune(self) -> None:
+        try:
+            import datetime
+            cutoff = (datetime.datetime.now(datetime.timezone.utc)
+                      - datetime.timedelta(days=7)).isoformat()
+            self._store.delete_older_than(cutoff)
+        except Exception:
+            pass
 
     def submit(self, kind: str, payload: dict[str, Any]) -> str:
         job_id = uuid.uuid4().hex[:12]
@@ -54,6 +125,9 @@ class JobManager:
                 "stage": "queued", "progress": 0.0, "message": None,
                 "result": None, "error": None, "created_at": now, "updated_at": now,
             }
+        self._persist(job_id, payload_json=json.dumps(payload), status="queued",
+                      stage="queued", progress=0.0, message=None, result=None,
+                      error=None, created_at=now, updated_at=now)
         self._executor.submit(self._run, job_id, kind, payload)
         return job_id
 
@@ -71,6 +145,8 @@ class JobManager:
                     job["progress"] = round(min(1.0, max(0.0, frac)), 3)
                     job["message"] = message
                     job["updated_at"] = _now()
+            self._persist(job_id, status="running", stage=stage,
+                          progress=round(min(1.0, max(0.0, frac)), 3), message=message)
 
         try:
             with self._lock:
@@ -79,6 +155,7 @@ class JobManager:
                     job["status"] = "running"
                     job["stage"] = "started"
                     job["updated_at"] = _now()
+            self._persist(job_id, status="running", stage="started")
             result = self._dispatch(kind, payload, progress)
             with self._lock:
                 job = self._jobs.get(job_id)
@@ -88,6 +165,9 @@ class JobManager:
                     job["progress"] = 1.0
                     job["result"] = result
                     job["updated_at"] = _now()
+            self._persist(job_id, status="done", stage="done", progress=1.0,
+                          message=None, error=None,
+                          result=json.dumps(result, default=str))
         except Exception as e:  # noqa: BLE001
             with self._lock:
                 job = self._jobs.get(job_id)
@@ -95,6 +175,7 @@ class JobManager:
                     job["status"] = "error"
                     job["error"] = f"{type(e).__name__}: {e}"
                     job["updated_at"] = _now()
+            self._persist(job_id, status="error", error=f"{type(e).__name__}: {e}")
 
     def _dispatch(self, kind: str, payload: dict[str, Any], progress) -> Any:
         if kind == "resolve_city":
@@ -132,7 +213,7 @@ class JobManager:
         raise HTTPException(400, f"Unknown job kind: {kind}")
 
 
-jobs = JobManager(config.JOB_MAX_WORKERS)
+jobs = JobManager(config.JOB_MAX_WORKERS, store=JobStore(config.DATA_DIR / "jobs.sqlite"))
 
 
 def _now() -> str:

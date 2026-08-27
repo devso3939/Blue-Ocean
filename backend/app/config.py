@@ -6,6 +6,16 @@ import os
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+# Load a local .env file if present, so BLUEOCEAN_*/LLM environment variables
+# can be configured in backend/.env without exporting them manually.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(BACKEND_DIR / ".env")
+except ImportError:
+    pass
+
 DATA_DIR = Path(os.environ.get("BLUEOCEAN_DATA_DIR", BACKEND_DIR / "data"))
 SNAPSHOT_DIR = DATA_DIR / "snapshots"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
