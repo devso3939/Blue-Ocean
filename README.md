@@ -1,10 +1,10 @@
-# 🌊 Blue Ocean v5.2.0
+# 🌊 Blue Ocean v6.2.0
 
 **Find What Your City Is Missing.**
 
 Discover underserved industries, compare business supply across similar cities, and uncover Blue Ocean opportunities using global open location data — all from your browser with zero backend.
 
-![Version](https://img.shields.io/badge/version-5.2.0-blue)
+![Version](https://img.shields.io/badge/version-6.2.0-blue)
 ![React](https://img.shields.io/badge/React-18-61DAFB)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.4-3178C6)
 ![License](https://img.shields.io/badge/license-MIT-green)

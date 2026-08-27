@@ -17,10 +17,20 @@ build/
 # Data files (large, should not be in git)
 backend/data/places.sqlite
 backend/data/cache.sqlite
+backend/data/cache.sqlite-shm
+backend/data/cache.sqlite-wal
 backend/data/snapshots/
 backend/data/exports/
 *.db
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Build info
+*.tsbuildinfo
+
+# Temp artifacts
+backend/tmp_*.xlsx
 
 # Environment and secrets
 .env
