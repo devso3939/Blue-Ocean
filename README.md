@@ -149,7 +149,7 @@ Blue-Ocean/
 │   ├── tsconfig.json              # TypeScript config
 │   ├── tailwind.config.js         # Tailwind CSS theme
 │   └── postcss.config.js          # PostCSS config
-├── .github/workflows/deploy.yml   # Auto-deploy to GitHub Pages
+├── .github/workflows/deploy-client.yml   # Auto-deploy to GitHub Pages
 ├── DEPLOYMENT.md                  # Detailed deployment guide
 ├── README.md                      # This file
 └── .gitignore                     # Git ignore rules

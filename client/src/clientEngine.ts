@@ -1616,7 +1616,9 @@ async function probeDomains(b: Business): Promise<void> {
   }
 }
 
-const BRAVE_API_KEY = 'BSAded3tnZfvadieW5pz0tiLrlh2lvn';
+// Brave API key: prefer VITE_BRAVE_API_KEY from client/.env (see README),
+// falling back to the embedded free-tier key so the app works out of the box.
+const BRAVE_API_KEY = (import.meta as any).env?.VITE_BRAVE_API_KEY || 'BSAded3tnZfvadieW5pz0tiLrlh2lvn';
 
 // ─── Multilingual Search Helpers ───────────────────────────
 // Maps common Georgian city names to English
