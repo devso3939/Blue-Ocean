@@ -471,6 +471,21 @@ def get_opportunities(city_id: str):
 # Export
 # ---------------------------------------------------------------------------
 
+def _cleanup_old_exports(max_age_hours: int = 24) -> None:
+    """Delete export files older than max_age_hours (best-effort)."""
+    try:
+        import datetime
+        cutoff = time.time() - max_age_hours * 3600
+        for f in config.EXPORT_DIR.glob("*"):
+            try:
+                if f.is_file() and f.stat().st_mtime < cutoff:
+                    f.unlink(missing_ok=True)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
 def _place_row(p, label: str) -> list:
     gmaps = f"https://www.google.com/maps/search/?api=1&query={p.lat},{p.lon}"
     osm = f"https://www.openstreetmap.org/?mlat={p.lat}&mlon={p.lon}#map=17/{p.lat}/{p.lon}"
@@ -502,6 +517,7 @@ def market_context(city_id: str = Query("", max_length=80),
 
 @app.get("/api/analysis/{analysis_id}/export")
 def export_analysis(analysis_id: str, format: str = Query("json", pattern="^(json|csv|xlsx)$")):
+    _cleanup_old_exports()
     analysis = analysis_service.get_analysis(analysis_id)
     if analysis is None:
         raise HTTPException(404, "Analysis not found or expired")
@@ -584,6 +600,7 @@ def _analysis_xlsx(analysis, slug: str):
 
 @app.get("/api/opportunities/{city_id}/export")
 def export_opportunities(city_id: str, format: str = Query("csv", pattern="^(csv|xlsx)$")):
+    _cleanup_old_exports()
     data = cache.get(f"opportunities:v{config.LOGIC_VERSION}:{city_id}")
     if data is None:
         raise HTTPException(404, "No cached opportunity scan for this city.")
