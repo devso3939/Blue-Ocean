@@ -11,6 +11,7 @@ All data is cached for 7 days. No paid APIs required.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import math
 import re
@@ -139,9 +140,13 @@ def _wikipedia_views(article: str) -> dict[str, Any]:
     result = {"source": "wikipedia", "score": 0, "views": 0}
     
     try:
-        # Wikimedia REST API — no auth needed
+        # Wikimedia REST API — no auth needed. Monthly views for the last 12
+        # months, computed relative to today so the range never goes stale.
         encoded = urllib.parse.quote(article.replace(" ", "_"))
-        url = f"https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/all-agents/{encoded}/monthly/20240101/20260101"
+        today = datetime.date.today()
+        end = today.strftime("%Y%m%d")
+        start = (today - datetime.timedelta(days=365)).strftime("%Y%m%d")
+        url = f"https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/all-agents/{encoded}/monthly/{start}/{end}"
         req = urllib.request.Request(url, headers={
             "User-Agent": "BlueOcean/1.0 (demand research; contact@example.com)",
         })

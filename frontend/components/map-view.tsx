@@ -312,6 +312,7 @@ export function MapView({ places, boundary, densityGrid, center, height = 540 }:
       m.on("load", setup);
 
       // Emoji images require the style to be ready — retry until it is.
+      let emojiRetry = 0;
       const retryEmojis = () => {
         try {
           if (m.isStyleLoaded() || m.loaded()) {
@@ -321,7 +322,8 @@ export function MapView({ places, boundary, densityGrid, center, height = 540 }:
         } catch {
           /* retry */
         }
-        setTimeout(retryEmojis, 120);
+        // Bound the retries so a destroyed/never-ready map can't spin forever
+        if (++emojiRetry <= 100) setTimeout(retryEmojis, 120);
       };
       retryEmojis();
 

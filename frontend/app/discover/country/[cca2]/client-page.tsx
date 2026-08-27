@@ -2,14 +2,13 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { AlertTriangle, ArrowLeft, ArrowRight, Building2, Compass, Users, BarChart3, TrendingUp } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowRight, BarChart3, Compass, Users } from "lucide-react";
 import { api } from "@/lib/api";
 import type { CountryCitiesResult } from "@/lib/api";
 import { fmtCompact, fmtNum } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { ScoreRing } from "@/components/score-ring";
 
 export default function CountryCitiesPage({ cca2 }: { cca2: string }) {
   const [data, setData] = React.useState<CountryCitiesResult | null>(null);

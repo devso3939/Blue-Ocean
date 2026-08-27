@@ -2,6 +2,7 @@
 QIDs, candidate peer cities with population and coordinates)."""
 from __future__ import annotations
 
+import datetime
 import re
 import time
 from typing import Any, Optional
@@ -146,7 +147,7 @@ def enrich_population(meta: CityMeta) -> tuple[Optional[int], Optional[int], Opt
     year = int(date[:4]) if date and len(date) >= 4 else None
     note = None
     if year:
-        age = 2026 - year  # approximate current year reference
+        age = datetime.date.today().year - year
         if age > 5:
             note = f"Population figure is from {year} and may be outdated."
     elif info.get("method"):

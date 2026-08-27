@@ -275,7 +275,7 @@ def _data_confidence(
     # 4. Population availability + recency
     if city_pop:
         year = (city.population_year if city else None) or (snap.population_year if snap else None)
-        age = (2026 - year) if year else None
+        age = (datetime.date.today().year - year) if year else None
         if age is None:
             pop_score = 0.5
             detail = "Population known, year unknown"

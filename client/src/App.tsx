@@ -35,6 +35,15 @@ function scoreColor(score: number | null | undefined): string {
   return 'text-rose-400';
 }
 
+function escapeHtml(s: unknown): string {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 const COUNTRIES = [
   { name: 'Georgia', code: 'GE' }, { name: 'Armenia', code: 'AM' },
   { name: 'Azerbaijan', code: 'AZ' }, { name: 'Turkey', code: 'TR' },
@@ -259,29 +268,29 @@ export default function App() {
           const coords = f.geometry.coordinates;
           // Close previous popup
           if (activePopup) { activePopup.remove(); activePopup = null; }
-          // Build compact popup HTML
+          // Build compact popup HTML (all business-controlled values escaped)
           const contactParts: string[] = [];
-          if (p.phone) contactParts.push(`<a href="tel:${p.phone}" style="color:#60a5fa;text-decoration:none">📞 ${p.phone}</a>`);
-          if (p.email) contactParts.push(`<a href="mailto:${p.email}" style="color:#60a5fa;text-decoration:none">✉️ ${p.email}</a>`);
-          if (p.website) contactParts.push(`<a href="${p.website}" target="_blank" style="color:#60a5fa;text-decoration:none">🌐 ${p.website.replace(/^https?:\/\//, '').substring(0, 30)}</a>`);
-          if (p.facebook) contactParts.push(`<a href="${p.facebook}" target="_blank" style="color:#60a5fa;text-decoration:none">FB</a>`);
-          if (p.instagram) contactParts.push(`<a href="${p.instagram}" target="_blank" style="color:#f472b6;text-decoration:none">IG</a>`);
-          if (p.linkedin) contactParts.push(`<a href="${p.linkedin}" target="_blank" style="color:#93c5fd;text-decoration:none">LI</a>`);
-          if (p.youtube) contactParts.push(`<a href="${p.youtube}" target="_blank" style="color:#f87171;text-decoration:none">YT</a>`);
-          if (p.tiktok) contactParts.push(`<a href="${p.tiktok}" target="_blank" style="color:#fff;text-decoration:none">TT</a>`);
-          if (p.twitter) contactParts.push(`<a href="${p.twitter}" target="_blank" style="color:#38bdf8;text-decoration:none">X</a>`);
-          if (p.pinterest) contactParts.push(`<a href="${p.pinterest}" target="_blank" style="color:#f87171;text-decoration:none">Pin</a>`);
-          if (p.rating > 0) contactParts.push(`<span style="color:#fbbf24;font-size:11px">★ ${p.rating.toFixed(1)}${p.reviewCount > 0 ? ` (${p.reviewCount})` : ''}</span>`);
-          if (p.hours) contactParts.push(`<span style="color:#94a3b8;font-size:11px">🕐 ${p.hours}</span>`);
-          if (p.address) contactParts.push(`<span style="color:#94a3b8;font-size:11px">📍 ${p.address}</span>`);
+          if (p.phone) contactParts.push(`<a href="tel:${escapeHtml(p.phone)}" style="color:#60a5fa;text-decoration:none">📞 ${escapeHtml(p.phone)}</a>`);
+          if (p.email) contactParts.push(`<a href="mailto:${escapeHtml(p.email)}" style="color:#60a5fa;text-decoration:none">✉️ ${escapeHtml(p.email)}</a>`);
+          if (p.website) contactParts.push(`<a href="${escapeHtml(p.website)}" target="_blank" rel="noopener noreferrer" style="color:#60a5fa;text-decoration:none">🌐 ${escapeHtml(String(p.website).replace(/^https?:\/\//, '').substring(0, 30))}</a>`);
+          if (p.facebook) contactParts.push(`<a href="${escapeHtml(p.facebook)}" target="_blank" rel="noopener noreferrer" style="color:#60a5fa;text-decoration:none">FB</a>`);
+          if (p.instagram) contactParts.push(`<a href="${escapeHtml(p.instagram)}" target="_blank" rel="noopener noreferrer" style="color:#f472b6;text-decoration:none">IG</a>`);
+          if (p.linkedin) contactParts.push(`<a href="${escapeHtml(p.linkedin)}" target="_blank" rel="noopener noreferrer" style="color:#93c5fd;text-decoration:none">LI</a>`);
+          if (p.youtube) contactParts.push(`<a href="${escapeHtml(p.youtube)}" target="_blank" rel="noopener noreferrer" style="color:#f87171;text-decoration:none">YT</a>`);
+          if (p.tiktok) contactParts.push(`<a href="${escapeHtml(p.tiktok)}" target="_blank" rel="noopener noreferrer" style="color:#fff;text-decoration:none">TT</a>`);
+          if (p.twitter) contactParts.push(`<a href="${escapeHtml(p.twitter)}" target="_blank" rel="noopener noreferrer" style="color:#38bdf8;text-decoration:none">X</a>`);
+          if (p.pinterest) contactParts.push(`<a href="${escapeHtml(p.pinterest)}" target="_blank" rel="noopener noreferrer" style="color:#f87171;text-decoration:none">Pin</a>`);
+          if (p.rating > 0) contactParts.push(`<span style="color:#fbbf24;font-size:11px">★ ${Number(p.rating).toFixed(1)}${p.reviewCount > 0 ? ` (${p.reviewCount})` : ''}</span>`);
+          if (p.hours) contactParts.push(`<span style="color:#94a3b8;font-size:11px">🕐 ${escapeHtml(p.hours)}</span>`);
+          if (p.address) contactParts.push(`<span style="color:#94a3b8;font-size:11px">📍 ${escapeHtml(p.address)}</span>`);
           const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${coords[1]},${coords[0]}`;
-          contactParts.push(`<a href="${mapsUrl}" target="_blank" style="color:#34d399;text-decoration:none;font-size:11px">📍 Open in Maps</a>`);
+          contactParts.push(`<a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#34d399;text-decoration:none;font-size:11px">📍 Open in Maps</a>`);
           const html = `
             <div style="min-width:200px;max-width:300px;font-family:system-ui;font-size:13px;padding:0">
               <div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:${p.color}22;border-bottom:1px solid #333">
                 <span style="width:8px;height:8px;border-radius:50%;background:${p.color};flex-shrink:0"></span>
-                <strong style="color:#fff;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name || 'Unknown'}</strong>
-                <span style="font-size:10px;color:${p.color};background:${p.color}22;padding:1px 6px;border-radius:8px">${p.categoryLabel || ''}</span>
+                <strong style="color:#fff;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(p.name) || 'Unknown'}</strong>
+                <span style="font-size:10px;color:${p.color};background:${p.color}22;padding:1px 6px;border-radius:8px">${escapeHtml(p.categoryLabel) || ''}</span>
               </div>
               <div style="padding:6px 10px;display:flex;flex-direction:column;gap:3px">
                 ${contactParts.join('')}
@@ -814,7 +823,7 @@ export default function App() {
                     <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-cyan-500 transition-all duration-300" style={{width: `${enrichProgress.percent}%`}} />
                   </div>
 
-n                  {/* Search engines status */}
+                  {/* Search engines status */}
                   <div className="flex flex-wrap gap-1.5 mb-3">
                     {enrichProgress.engines.map((eng) => (
                       <span
@@ -832,7 +841,7 @@ n                  {/* Search engines status */}
                     ))}
                   </div>
 
-n                  {/* Live contact counters */}
+                  {/* Live contact counters */}
                   <div className="flex items-center gap-3 text-[11px]">
                     <span className="flex items-center gap-1">
                       <span className="text-muted-foreground">📧</span>
@@ -924,7 +933,7 @@ n                  {/* Live contact counters */}
               <h3 className="text-sm font-bold mb-2">🤖 AI Market Analysis</h3>
               <div className="text-xs text-muted-foreground leading-relaxed whitespace-pre-line">
                 {aiInsights.split('\n').map((line, i) => (
-                  <p key={i} className="mb-2" dangerouslySetInnerHTML={{ __html: line.replace(/\*\*(.*?)\*\*/g, '<strong class="text-foreground">$1</strong>') }} />
+                  <p key={i} className="mb-2" dangerouslySetInnerHTML={{ __html: escapeHtml(line).replace(/\*\*(.*?)\*\*/g, '<strong class="text-foreground">$1</strong>') }} />
                 ))}
               </div>
             </div>
@@ -1285,9 +1294,9 @@ n                  {/* Live contact counters */}
           <div className="rounded-xl border border-border bg-card p-5 text-xs leading-relaxed text-muted-foreground">
             <p className="font-medium text-foreground mb-1">How the scoring works</p>
             <p>
-              Every category is counted from OpenStreetMap data, normalized per 10,000 residents, and benchmarked against the median.
-              Opportunity Score = <span className="font-mono">0.60 × supplyGap + 0.15 × marketSize + 0.25 × 50 + demandBonus(0-15)</span>.
-              Demand signals come from Google search presence, Wikipedia pageviews, and Reddit mentions.
+              Every category is counted from OpenStreetMap data, normalized per 10,000 residents, and benchmarked against a baseline.
+              Opportunity Score = <span className="font-mono">0.45 × gap + 0.25 × citySize + 0.30 × lowCompetition + demandBonus(0-15)</span>.
+              Demand signals come from DuckDuckGo search presence, Wikipedia pageviews, and Reddit mentions.
             </p>
           </div>
         </div>

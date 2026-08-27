@@ -18,6 +18,7 @@ import {
   Sparkles,
   Target,
   TrendingUp,
+  Users,
   Zap,
 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -37,7 +38,7 @@ const CAPABILITIES = [
     desc: "Detected supply vs a peer benchmark, with an estimated gap in real business counts.",
   },
   {
-    icon: Users3,
+    icon: Users,
     title: "Peer City Benchmarking",
     desc: "Comparable cities found automatically by population and region.",
   },
@@ -62,14 +63,6 @@ const CAPABILITIES = [
     desc: "Any city on Earth — open data only, no API keys required.",
   },
 ];
-
-function Users3(props: { className?: string }) {
-  return <UsersIcon {...props} />;
-}
-
-function UsersIcon(props: { className?: string }) {
-  return <Compass className={props.className} />;
-}
 
 export default function Home() {
   const router = useRouter();
@@ -106,7 +99,9 @@ export default function Home() {
   async function startJob(kind: string) {
     if (!country || !city) return;
     setBusy(true);
-    setJobKind(kind);
+    // JobProgress keys its hint off the backend job kind; the discovery flow
+    // runs an "opportunities" job even though the button passes "discover".
+    setJobKind(kind === "discover" ? "opportunities" : kind);
     setJob({} as JobStatus);
     try {
       // 1. resolve the city
@@ -152,14 +147,22 @@ export default function Home() {
 
   function onExplorerSearch(q: string) {
     setExplorerQuery(q);
-    if (q.trim().length === 0) {
+  }
+
+  // Debounced explorer search (CategorySelect-style 300ms), avoids one API
+  // call per keystroke.
+  React.useEffect(() => {
+    if (explorerQuery.trim().length === 0) {
       setExplorerResults(null);
       return;
     }
-    api.categories({ q }).then((d) => {
-      if (Array.isArray(d)) setExplorerResults(d.map((c) => ({ id: c.id, label: c.label, family_label: c.family_label })));
-    });
-  }
+    const h = setTimeout(() => {
+      api.categories({ q: explorerQuery }).then((d) => {
+        if (Array.isArray(d)) setExplorerResults(d.map((c) => ({ id: c.id, label: c.label, family_label: c.family_label })));
+      });
+    }, 300);
+    return () => clearTimeout(h);
+  }, [explorerQuery]);
 
   return (
     <div>
@@ -337,7 +340,7 @@ export default function Home() {
                   onClick={(e) => {
                     e.preventDefault();
                     setCategoryId(c.id);
-                    document.getElementById("top")?.scrollIntoView();
+                    document.getElementById("explorer")?.scrollIntoView();
                   }}
                 >
                   <span>
@@ -401,7 +404,7 @@ export default function Home() {
                 desc: "count ÷ population × 10,000. Population from Wikidata, year shown.",
               },
               {
-                icon: Users3,
+                icon: Users,
                 title: "3 · Peer selection",
                 desc: "Same-country cities at 0.5–2× population, then regional cities of similar size — always shown.",
               },

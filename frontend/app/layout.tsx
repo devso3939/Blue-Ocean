@@ -16,11 +16,11 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className="dark" suppressHydrationWarning>
+    <html lang="en" suppressHydrationWarning>
       <head>
-        <script dangerouslySetInnerHTML={{ __html: `document.documentElement.classList.add('dark')` }} />
+        <script dangerouslySetInnerHTML={{ __html: `(function(){try{var t=localStorage.getItem('theme');var d=t==='dark'||(!t&&window.matchMedia('(prefers-color-scheme: dark)').matches);if(d)document.documentElement.classList.add('dark');}catch(e){}})()` }} />
       </head>
-      <body className={`${inter.variable} font-sans dark`}>
+      <body className={`${inter.variable} font-sans`}>
         <ThemeProvider>
           <div className="flex min-h-screen flex-col">
             <header className="sticky top-0 z-40 border-b border-border/60 bg-background/80 backdrop-blur-md">

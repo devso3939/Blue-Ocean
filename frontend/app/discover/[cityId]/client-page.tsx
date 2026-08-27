@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { JobStatus, OpportunityRow, OpportunitiesResult } from "@/lib/types";
-import { scoreColor, scoreHex } from "@/lib/types";
+import { scoreHex } from "@/lib/types";
 import { cn, fmtCompact, fmtNum, fmtPct } from "@/lib/utils";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";

@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { AlertTriangle, CheckCircle2, Loader2, MapPin, Store, TrendingUp, Users } from "lucide-react";
+import { AlertTriangle, CheckCircle2, GraduationCap, Loader2, MapPin, ShieldCheck, Store, TrendingUp, Users } from "lucide-react";
 import type { JobStatus } from "@/lib/types";
 import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
@@ -12,6 +12,8 @@ const STAGES: { id: string; label: string; icon: React.ReactNode }[] = [
   { id: "categorizing", label: "Categorizing businesses", icon: <Store className="h-3.5 w-3.5" /> },
   { id: "peers", label: "Finding peer cities", icon: <Users className="h-3.5 w-3.5" /> },
   { id: "analyzing", label: "Calculating market gap", icon: <TrendingUp className="h-3.5 w-3.5" /> },
+  { id: "validating", label: "Cross-checking with OpenStreetMap", icon: <ShieldCheck className="h-3.5 w-3.5" /> },
+  { id: "learning", label: "Learning local name signals", icon: <GraduationCap className="h-3.5 w-3.5" /> },
 ];
 
 function stageIndex(stage: string): number {

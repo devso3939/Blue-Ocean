@@ -357,7 +357,18 @@ export default function AnalysisPage({ id }: { id: string }) {
                     <td className="py-2.5 pr-4 tabular-nums text-muted-foreground">{p.weight.toFixed(2)}</td>
                     <td className="py-2.5 pr-4 tabular-nums">
                       {p.per_10k !== null && p.per_10k !== undefined ? (
-                        <span className={cn("font-semibold", p.per_10k > (s.per_10k ?? 0) && "text-emerald-400", p.per_10k < (s.per_10k ?? Infinity) && "text-rose-400")}>
+                        <span
+                          className={cn(
+                            "font-semibold",
+                            s.per_10k === null || s.per_10k === undefined
+                              ? ""
+                              : p.per_10k > s.per_10k
+                                ? "text-emerald-400"
+                                : p.per_10k < s.per_10k
+                                  ? "text-rose-400"
+                                  : ""
+                          )}
+                        >
                           {p.per_10k.toFixed(2)}
                         </span>
                       ) : (
@@ -779,13 +790,6 @@ function MarketIndicators({ market }: { market: MarketContext }) {
 function BuyerPotential({ market }: { market: MarketContext }) {
   const bp = market.buyer_potential;
   const comps = (bp.components || {}) as Record<string, number>;
-  
-  const getBarColor = (val: number) => {
-    if (val >= 80) return "from-emerald-500 to-emerald-400";
-    if (val >= 60) return "from-teal-500 to-teal-400";
-    if (val >= 40) return "from-amber-500 to-amber-400";
-    return "from-rose-500 to-rose-400";
-  };
 
   return (
     <div className="rounded-xl border border-border bg-gradient-to-br from-card to-card/80 p-5">

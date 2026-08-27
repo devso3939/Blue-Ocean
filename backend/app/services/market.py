@@ -144,7 +144,7 @@ def fetch_market_context(
     category_label: str = "",
     force: bool = False,
 ) -> Optional[MarketContext]:
-    """Market context for a city's country, cached 7 days."""
+    """Market context for a city's country (cached under the market_analysis TTL, 30 days)."""
     iso3 = _iso3(city.country_code)
     if not iso3:
         return None

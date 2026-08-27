@@ -175,7 +175,12 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   const l = tags.leisure;
 
   // ─── Shops (always businesses) ───
-  if (s === 'beauty' || s === 'cosmetics') return 'beauty_salon';
+  if (s === 'beauty' || s === 'cosmetics') {
+    // A "beauty" shop named like a nail salon is a nail salon, not a beauty salon
+    const nm = (tags.name || tags['name:en'] || '').toLowerCase();
+    if (/(nail|manikюр|pedikюр)/.test(nm)) return 'nail_salon';
+    return 'beauty_salon';
+  }
   if (s === 'hairdresser' || s === 'wigs') return 'hair_salon';
   if (s === 'tattoo' || s === 'tattoo_piercing') return 'tattoo';
   if (s === 'printing' || s === 'print') return 'printing';
@@ -247,7 +252,12 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   if (t === 'guest_house') return 'hotel';
 
   // ─── Leisure ───
-  if (l === 'fitness_centre' || l === 'sports_centre' || l === 'sports_hall' || l === 'swimming_pool') return 'gym';
+  if (l === 'fitness_centre' || l === 'sports_centre' || l === 'sports_hall' || l === 'swimming_pool') {
+    // Name-based split: yoga/pilates studios before the generic 'gym' bucket
+    const nameLower = (tags.name || tags['name:en'] || '').toLowerCase();
+    if (/(yoga|pilates)/.test(nameLower)) return 'yoga';
+    return 'gym';
+  }
 
   // ─── Amenity (car wash, etc) ───
   if (a === 'car_wash') return 'car_wash';
@@ -262,7 +272,7 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   if (tags.office === 'it' || tags.office === 'software') return 'software';
   if (tags.office === 'consulting') return 'it_consulting';
   if (tags.office === 'marketing' || tags.office === 'advertising') return 'digital_marketing';
-  if (tags.office === 'telecommunication' || tags.office === 'it') return 'web_agency';
+  if (tags.office === 'telecommunication') return 'web_agency';
 
   // ─── Name-based heuristics for new categories ───
   const nameLower = (tags.name || tags['name:en'] || '').toLowerCase();
@@ -275,6 +285,7 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
     if (/(clean|ubor|cleaning)/.test(nameLower)) return 'cleaning';
     if (/(car.?wash|moyk[ae]|автомойк)/.test(nameLower)) return 'car_wash';
     if (/(nail|manikюр|pedikюр)/.test(nameLower)) return 'nail_salon';
+    if (/(yoga|pilates)/.test(nameLower)) return 'yoga';
   }
 
   return null;
@@ -475,16 +486,16 @@ const CAT_OSM_FILTER: Record<string, string> = {
   art: '["shop"="art"]',
   bicycle: '["shop"="bicycle"]',
   convenience: '["shop"~"convenience|kiosk|newsagent"]',
-  spa: '["shop"="beauty"]',
+  spa: '["amenity"~"spa|sauna"]',
   yoga: '["leisure"="fitness_centre"]',
   bookstore: '["shop"~"books|stationery"]',
   library: '["amenity"="library"]',
   post_office: '["amenity"="post_office"]',
   // ── v3.5.0 new categories ──
-  web_agency: '["office"~"it|design|consulting"]',
+  web_agency: '["office"="telecommunication"]',
   software: '["office"~"it|software"]',
-  it_consulting: '["office"~"it|consulting"]',
-  digital_marketing: '["office"~"it|marketing|advertising"]',
+  it_consulting: '["office"="consulting"]',
+  digital_marketing: '["office"~"marketing|advertising"]',
   lawyer: '["office"="lawyer"]',
   accountant: '["office"="accountant"]',
   real_estate: '["office"~"estate_agent|real_estate"]',
@@ -492,7 +503,8 @@ const CAT_OSM_FILTER: Record<string, string> = {
   travel_agency: '["office"~"travel_agent"]',
   cleaning: '["shop"="cleaning"]',
   car_wash: '["amenity"="car_wash"]',
-  nail_salon: '["shop"="beauty"]',
+  nail_salon: '["shop"~"beauty|nail_salon|cosmetics"]',
+  massage: '["leisure"~"spa|sauna"]',
 };
 
 async function fetchOverpass(query: string, timeoutSec = 60): Promise<any> {
@@ -623,8 +635,14 @@ out center body;`;
     const d = await fetchOverpass(qFocused, 90);
     if (d?.elements) allElements.push(...d.elements);
 
-    // Fallback: try broader query
-    if (allElements.length === 0) {
+    // Fallback: the focused tag can exist yet categorize into a different
+    // bucket (e.g. leisure=fitness_centre -> 'gym' when scanning for 'yoga',
+    // shop=beauty -> 'beauty_salon' when scanning for 'spa'/'nail_salon').
+    // Retry broadly unless at least one element lands in the requested category.
+    const hasRequestedCategory = allElements.some(
+      el => categorizeBusiness(el.tags || {}) === categoryFilter
+    );
+    if (!hasRequestedCategory) {
       onProgress?.(50, 'Retrying with broader query…');
       const qBroad = `[out:json][timeout:60][maxsize:268435456];
 (
