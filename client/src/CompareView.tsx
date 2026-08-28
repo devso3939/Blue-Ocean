@@ -174,7 +174,7 @@ export default function CompareView() {
       setProgress(70);
 
       const totalBiz = Array.from(biz.values()).reduce((s, a) => s + a.length, 0);
-      const opps = computeOpportunities(biz, city.population || 500000, new Map());
+      const opps = computeOpportunities(biz, city.population || 0, new Map());
       setProgress(100);
 
       const data: CityData = { city, businesses: biz, opportunities: opps, totalBiz };
@@ -186,8 +186,8 @@ export default function CompareView() {
       if (other) {
         const oppsA = which === 'a' ? opps : other.opportunities;
         const oppsB = which === 'b' ? opps : other.opportunities;
-        const popA = which === 'a' ? (city.population || 500000) : (other.city.population || 500000);
-        const popB = which === 'b' ? (city.population || 500000) : (other.city.population || 500000);
+        const popA = which === 'a' ? (city.population || 0) : (other.city.population || 0);
+        const popB = which === 'b' ? (city.population || 0) : (other.city.population || 0);
         const tA = which === 'a' ? totalBiz : other.totalBiz;
         const tB = which === 'b' ? totalBiz : other.totalBiz;
         const nA = which === 'a' ? city.name : other.city.name;
@@ -441,7 +441,7 @@ export default function CompareView() {
           {/* AI Comparison Insights */}
           {aiInsight && (
             <div className="bg-gradient-to-br from-purple-900/40 to-blue-900/40 border border-purple-500/30 rounded-xl p-5">
-              <h4 className="text-sm font-semibold text-purple-300 mb-2">🤖 AI Comparison Analysis</h4>
+              <h4 className="text-sm font-semibold text-purple-300 mb-2">🤖 Market Comparison <span className="font-normal text-gray-400">(model-generated when available, else data-derived)</span></h4>
               <p className="text-sm text-gray-300 whitespace-pre-line">{aiInsight}</p>
             </div>
           )}

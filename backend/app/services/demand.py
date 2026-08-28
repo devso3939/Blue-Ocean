@@ -39,8 +39,13 @@ def _google_trends_score(keyword: str, location: str = "") -> dict[str, Any]:
         return cached
     
     query = f"{keyword} {location}".strip()
+    # Provenance honesty: the modern Trends explore page is JS-rendered, so
+    # the embedded timelineData this scraper looks for is effectively never
+    # present. We still try (cheap), but when it fails we fall through to a
+    # measured DDG result count and LABEL the source accordingly instead of
+    # presenting it as Google Trends.
     result = {"source": "google_trends", "score": 0, "raw": None}
-    
+
     try:
         # Use Google Trends RSS-like endpoint for interest over time
         encoded = urllib.parse.quote(query)
@@ -62,8 +67,8 @@ def _google_trends_score(keyword: str, location: str = "") -> dict[str, Any]:
                 result["raw"] = {"avg_interest": avg_interest, "data_points": len(values)}
     except Exception:
         pass
-    
-    # Fallback: estimate from web search results
+
+    # Fallback: estimate from web search results (labeled honestly)
     if result["score"] == 0:
         try:
             encoded = urllib.parse.quote(f'"{query}"')
@@ -78,6 +83,8 @@ def _google_trends_score(keyword: str, location: str = "") -> dict[str, Any]:
                 count = len(results)
                 result["score"] = min(100, count * 10)
                 result["raw"] = {"search_results": count}
+                result["source"] = "web_search_results"
+                result["note"] = "Google Trends unavailable (JS-rendered page); score is a live web-search result count proxy"
         except Exception:
             pass
     

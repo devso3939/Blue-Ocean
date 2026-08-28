@@ -436,7 +436,7 @@ export default function App() {
       setProgress(80);
 
       setLoadingStage('Computing opportunity scores…');
-      const opps = computeOpportunities(biz, selectedCity.population || 500000, signals);
+      const opps = computeOpportunities(biz, selectedCity.population || 0, signals);
       setOpportunities(opps);
       setProgress(90);
 
@@ -446,7 +446,7 @@ export default function App() {
           category: o.category, label: o.categoryLabel,
           existing: o.existing, gap: o.gap, score: o.score,
         }));
-        const aiResult = await getAIAnalysis(selectedCity.name, selectedCity.country, topOpps, selectedCity.population || 500000);
+        const aiResult = await getAIAnalysis(selectedCity.name, selectedCity.country, topOpps, selectedCity.population || 0);
         setAiInsights(aiResult);
       } catch {}
       setProgress(100);
@@ -503,7 +503,7 @@ export default function App() {
       setProgress(80);
 
       setLoadingStage('Computing opportunity scores…');
-      const opps = computeOpportunities(biz, selectedCity.population || 500000, signals);
+      const opps = computeOpportunities(biz, selectedCity.population || 0, signals);
       setOpportunities(opps);
       setSelectedOppCategory(selectedCategory);
       setProgress(100);
@@ -921,7 +921,9 @@ export default function App() {
               <h2 className="text-lg font-bold">Opportunities in {selectedCity.name}</h2>
               <div className="flex gap-3 text-xs text-muted-foreground">
                 <span>📊 {fmtNum(allBizCount)} businesses</span>
-                {selectedCity.population && <span>👥 pop. {fmtCompact(selectedCity.population)}</span>}
+                {selectedCity.population
+                  ? <span>👥 pop. {fmtCompact(selectedCity.population)}</span>
+                  : <span className="text-amber-500">⚠ population unknown — gap metrics disabled, ranking by competition & demand</span>}
                 <span>📈 {opportunities.length} categories</span>
               </div>
             </div>
@@ -930,7 +932,7 @@ export default function App() {
           {/* AI Insights */}
           {aiInsights && (
             <div className="rounded-xl border border-emerald-500/30 bg-gradient-to-br from-emerald-500/10 to-transparent p-5">
-              <h3 className="text-sm font-bold mb-2">🤖 AI Market Analysis</h3>
+              <h3 className="text-sm font-bold mb-2">🤖 AI Market Analysis <span className="font-normal text-muted-foreground">(model-generated from live scan data)</span></h3>
               <div className="text-xs text-muted-foreground leading-relaxed whitespace-pre-line">
                 {aiInsights.split('\n').map((line, i) => (
                   <p key={i} className="mb-2" dangerouslySetInnerHTML={{ __html: escapeHtml(line).replace(/\*\*(.*?)\*\*/g, '<strong class="text-foreground">$1</strong>') }} />
@@ -1043,12 +1045,12 @@ export default function App() {
                 </div>
                 <div className="rounded-lg bg-muted/50 p-3">
                   <div className="text-xs text-muted-foreground">Expected (peer benchmark)</div>
-                  <div className="text-2xl font-bold">{fmtNum(selectedOpp.expected)}</div>
+                  <div className="text-2xl font-bold">{selectedOpp.expected != null ? fmtNum(selectedOpp.expected) : '—'}</div>
                 </div>
                 <div className="rounded-lg bg-muted/50 p-3">
                   <div className="text-xs text-muted-foreground">Supply Gap</div>
-                  <div className={`text-2xl font-bold ${selectedOpp.gap > 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {selectedOpp.gap > 0 ? '+' : ''}{fmtNum(selectedOpp.gap)}
+                  <div className={`text-2xl font-bold ${selectedOpp.gap != null && selectedOpp.gap > 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {selectedOpp.gap != null && selectedOpp.gap > 0 ? '+' : ''}{selectedOpp.gap != null ? fmtNum(selectedOpp.gap) : 'n/a'}
                   </div>
                 </div>
               </div>
@@ -1121,7 +1123,7 @@ export default function App() {
                                 setDemandSignals(signals);
                                 setProgress(80);
                                 setLoadingStage('Computing opportunity scores…');
-                                const opps = computeOpportunities(biz, selectedCity.population || 500000, signals);
+                                const opps = computeOpportunities(biz, selectedCity.population || 0, signals);
                                 setOpportunities(opps);
                                 setSelectedOppCategory(selectedOppCategory);
                                 setProgress(100);
@@ -1265,8 +1267,8 @@ export default function App() {
                         <td className="px-4 py-3 text-right tabular-nums">{fmtNum(opp.existing)}</td>
                         <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">{opp.per10k}</td>
                         <td className="px-4 py-3 text-right tabular-nums">
-                          <span className={opp.gap > 0 ? 'text-emerald-400' : 'text-rose-400'}>
-                            {opp.gap > 0 ? '+' : ''}{fmtNum(opp.gap)}
+                          <span className={opp.gap != null && opp.gap > 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                            {opp.gap != null && opp.gap > 0 ? '+' : ''}{opp.gap != null ? fmtNum(opp.gap) : '—'}
                           </span>
                         </td>
                         <td className="px-4 py-3 text-right">
@@ -1294,9 +1296,11 @@ export default function App() {
           <div className="rounded-xl border border-border bg-card p-5 text-xs leading-relaxed text-muted-foreground">
             <p className="font-medium text-foreground mb-1">How the scoring works</p>
             <p>
-              Every category is counted from OpenStreetMap data, normalized per 10,000 residents, and benchmarked against a baseline.
+              Every category is counted live from OpenStreetMap data. When the area's population is known, counts are normalized
+              per 10,000 residents and benchmarked against per-category baselines (live city median for unlisted categories).
               Opportunity Score = <span className="font-mono">0.45 × gap + 0.25 × citySize + 0.30 × lowCompetition + demandBonus(0-15)</span>.
-              Demand signals come from DuckDuckGo search presence, Wikipedia pageviews, and Reddit mentions.
+              Without a known population, gap/size criteria score neutral and ranking relies on competition &amp; measured demand — no numbers are fabricated.
+              Demand signals come from Wikipedia pageviews (rolling 12-month window), Reddit, and web search — counted only when successfully measured (confidence &gt; 0).
             </p>
           </div>
         </div>
@@ -1304,8 +1308,8 @@ export default function App() {
 
       <footer className="border-t border-border py-8 mt-8">
         <div className="mx-auto max-w-7xl px-4 text-center text-xs text-muted-foreground">
-          <p>Blue Ocean · Market Gap Intelligence — built on OpenStreetMap, Nominatim, Wikipedia</p>
-          <p className="mt-1">100% client-side · No backend · No data stored · Free & open source</p>
+          <p>Blue Ocean · Market Gap Intelligence — built on OpenStreetMap, Nominatim, Wikipedia, Wikidata</p>
+          <p className="mt-1">Client SPA runs fully in your browser · No data stored · Free &amp; open source · A Next.js + FastAPI stack lives in frontend/ and backend/ for self-hosting</p>
         </div>
       </footer>
     </div>

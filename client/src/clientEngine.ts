@@ -1727,7 +1727,10 @@ async function waybackContacts(b: Business): Promise<void> {
   } catch { /* best effort */ }
 }
 
-// Domain probing - check if common domain patterns exist for a business
+// Domain probing - check if common domain patterns exist for a business.
+// Ownership verification: a guessed domain that merely returns HTTP 200 could
+// belong to anyone (cybersquatters, unrelated businesses). The page must
+// mention the business name before it may be attached.
 async function probeDomains(b: Business): Promise<void> {
   if (b.website) return;
   const nameEn = getEnglishCityName(b.name);
@@ -1750,12 +1753,21 @@ async function probeDomains(b: Business): Promise<void> {
       try {
         const domain = 'https://' + slug + tld;
         const r = await corsFetch(domain, {
-          method: 'HEAD',
           signal: AbortSignal.timeout(4000),
         });
         if (r.ok) {
-          b.website = domain;
-          return;
+          const html = (await r.text()).toLowerCase();
+          // Verify the page actually references the business (name, in any
+          // of its written forms) before claiming it as the business's site.
+          const nameTokens = [nameEn, translit, b.name]
+            .map(n => (n || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff\u0400-\u04ff\u0370-\u03ff]+/g, ''))
+            .filter(n => n.length >= 4);
+          const nameMatch = nameTokens.some(tok => html.includes(tok.slice(0, 10)));
+          const cityMatch = cityEn ? html.includes(cityEn.toLowerCase()) : true;
+          if (nameMatch || (cityMatch && nameTokens.length === 0)) {
+            b.website = domain;
+            return;
+          }
         }
       } catch {}
     }
@@ -2661,60 +2673,57 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
 
 
 // ─── AI-Powered Opportunity Analysis ───────────────────────────
-// Uses Hugging Face free inference API for market analysis
+// Uses Pollinations (free, keyless LLM) for genuine model-generated
+// analysis. Falls back to a deterministic data brief (labeled as such by
+// the caller) — the two paths are visually distinguished in the UI.
 export async function getAIAnalysis(
   cityName: string,
   countryName: string,
-  topOpps: Array<{ category: string; label: string; existing: number; gap: number; score: number }>,
+  topOpps: Array<{ category: string; label: string; existing: number; gap: number | null; score: number }>,
   population: number
 ): Promise<string> {
   try {
     // Build a prompt from the data
     const oppText = topOpps.slice(0, 8).map(o =>
-      `${o.label}: ${o.existing} existing, gap of ${o.gap}, score ${o.score}/100`
+      `${o.label}: ${o.existing} existing, gap of ${o.gap ?? 'unknown (no population data)'}, score ${o.score}/100`
     ).join('\n');
 
-    const prompt = `Analyze business opportunities in ${cityName}, ${countryName} (pop. ${population.toLocaleString()}). Market data:\n${oppText}\n\nProvide 3-5 concise insights about the best investment opportunities, underserved markets, and competitive advantages. Be specific and actionable. Format as bullet points.`;
+    const prompt = `You are a market analyst. Analyze business opportunities in ${cityName}, ${countryName} (population ${population.toLocaleString()}). Market data (businesses found, estimated supply gap, opportunity score):\n${oppText}\n\nProvide 3-5 concise, specific insights about the best opportunities, underserved segments, and risks. Use only the numbers given. Format as bullet points.`;
 
-    // Use Hugging Face free inference API
-    const r = await fetch('https://api-inference.huggingface.co/models/facebook/bart-large-cnn', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        inputs: prompt,
-        parameters: { max_length: 300, min_length: 50, do_sample: false },
-      }),
-      signal: AbortSignal.timeout(15000),
+    // Pollinations text API: GET https://text.pollinations.ai/<prompt>
+    const r = await fetch('https://text.pollinations.ai/' + encodeURIComponent(prompt), {
+      signal: AbortSignal.timeout(30000),
     });
-
-    if (!r.ok) {
-      // Fallback: generate analysis from data directly
-      return generateLocalAnalysis(cityName, countryName, topOpps, population);
+    if (!r.ok) throw new Error('pollinations ' + r.status);
+    const text = (await r.text()).trim();
+    // Real model output: substantive, not an error page
+    if (text && text.length > 120 && !/^\s*<!doctype|<html/i.test(text)) {
+      return text;
     }
-
-    const data = await r.json();
-    if (data[0]?.summary_text) {
-      return data[0].summary_text;
-    }
+    // Fallback: deterministic brief from the same real data
     return generateLocalAnalysis(cityName, countryName, topOpps, population);
   } catch {
     return generateLocalAnalysis(cityName, countryName, topOpps, population);
   }
 }
 
-// Local analysis fallback (no API needed)
+// Local analysis fallback (no API needed) — deterministic brief from real
+// data, clearly labeled by the caller as data-derived (not model output)
 function generateLocalAnalysis(
   cityName: string,
   countryName: string,
-  topOpps: Array<{ category: string; label: string; existing: number; gap: number; score: number }>,
+  topOpps: Array<{ category: string; label: string; existing: number; gap: number | null; score: number }>,
   population: number
 ): string {
   const insights: string[] = [];
 
-  // Find biggest gap
-  const biggestGap = topOpps.reduce((best, o) => o.gap > best.gap ? o : best, topOpps[0]);
+  // Find biggest gap (null gaps = unknown population, excluded)
+  const gapped = topOpps.filter(o => o.gap != null);
+  const biggestGap = gapped.length
+    ? gapped.reduce((best, o) => (o.gap as number) > (best.gap as number) ? o : best, gapped[0])
+    : null;
   if (biggestGap) {
-    insights.push(`🔍 **Biggest opportunity**: ${biggestGap.label} — only ${biggestGap.existing} exist but ${biggestGap.gap + biggestGap.existing} are expected for a city of ${population.toLocaleString()}. Gap score: ${biggestGap.score}/100.`);
+    insights.push(`🔍 **Biggest opportunity**: ${biggestGap.label} — only ${biggestGap.existing} exist but ${(biggestGap.gap as number) + biggestGap.existing} are expected for a city of ${population.toLocaleString()}. Gap score: ${biggestGap.score}/100.`);
   }
 
   // Find underserved categories
@@ -2723,10 +2732,12 @@ function generateLocalAnalysis(
     insights.push(`📊 **${underserved.length} underserved categories** (score ≥60): ${underserved.map(o => o.label).join(', ')}.`);
   }
 
-  // Market density
+  // Market density (only meaningful with real population)
   const totalExisting = topOpps.reduce((s, o) => s + o.existing, 0);
-  const per10k = ((totalExisting / Math.max(population, 1)) * 10000).toFixed(1);
-  insights.push(`📈 Market density: ${totalExisting} businesses across ${topOpps.length} categories = ${per10k} per 10k residents.`);
+  if (population > 0) {
+    const per10k = ((totalExisting / population) * 10000).toFixed(1);
+    insights.push(`📈 Market density: ${totalExisting} businesses across ${topOpps.length} categories = ${per10k} per 10k residents.`);
+  }
 
   // Competition level
   const lowComp = topOpps.filter(o => o.existing < 5);
@@ -2734,10 +2745,10 @@ function generateLocalAnalysis(
     insights.push(`🏆 **Low competition** (<5 businesses): ${lowComp.map(o => o.label).join(', ')}. First-mover advantage available.`);
   }
 
-  // Population insight
+  // Population insight (only with real population)
   if (population > 500000) {
     insights.push(`👥 Large population (${(population/1000000).toFixed(1)}M) supports specialized niches — consider premium/quality positioning.`);
-  } else if (population < 100000) {
+  } else if (population > 0 && population < 100000) {
     insights.push(`🏘️ Smaller market (${population.toLocaleString()}) — focus on essential services with proven demand.`);
   }
 
@@ -2773,9 +2784,14 @@ export async function getDemandSignals(categoryLabel: string, cityName: string):
     explanation: '', sources: [],
   };
 
-  // Wikipedia pageviews
+  // Wikipedia pageviews — ROLLING 12-month window ending last month
+  // (the old hardcoded 20240101/20260101 window went stale by construction)
+  const now = new Date();
+  const end = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const start = new Date(now.getFullYear(), now.getMonth() - 13, 1);
+  const fmt = (d: Date) => d.toISOString().slice(0, 10).replace(/-/g, '');
   const wikiP = fetch(
-    `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/all-agents/${encodeURIComponent(categoryLabel.replace(/ /g, '_'))}/monthly/20240101/20260101`,
+    `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/all-agents/${encodeURIComponent(categoryLabel.replace(/ /g, '_'))}/monthly/${fmt(start)}/${fmt(end)}`,
     { headers: { 'User-Agent': 'BlueOcean/1.0' } }
   ).then(async r => {
     if (r.ok) {
@@ -2845,11 +2861,12 @@ export interface OpportunityResult {
   categoryLabel: string;
   existing: number;
   per10k: number;
-  expected: number;
-  gap: number;
+  expected: number | null;   // null when population unknown (never fabricated)
+  gap: number | null;        // null when population unknown
   gapPct: number;
   score: number;
   demandBonus: number;
+  populationKnown: boolean;
 }
 
 export function computeOpportunities(
@@ -2859,17 +2876,24 @@ export function computeOpportunities(
 ): OpportunityResult[] {
   const results: OpportunityResult[] = [];
 
+  // Population honesty: when the area has no known population we do NOT
+  // fabricate one. Per-capita metrics (expected/gap) are computed only with
+  // a real figure; without one, gap/size criteria score neutral (50) and
+  // results carry populationKnown=false so the UI can warn the user.
+  const pop = population && population > 0 ? population : null;
+
   // Calculate per-10k density for all categories
   const per10kValues: number[] = [];
   for (const [, bizs] of businesses) {
-    per10kValues.push((bizs.length / Math.max(population, 1)) * 10000);
+    per10kValues.push((bizs.length / Math.max(pop || 1, 1)) * 10000);
   }
   per10kValues.sort((a, b) => a - b);
   const median = per10kValues.length > 0
     ? per10kValues[Math.floor(per10kValues.length / 2)]
     : 5;
 
-  // Global baseline for well-served city (per 10k people)
+  // Category baselines (per 10k residents) — heuristic starting points,
+  // replaced by the live city median for any category not listed.
   const GLOBAL_BASELINES: Record<string, number> = {
     cafe: 4, restaurant: 5, bar: 2, pub: 1.5, fast_food: 3,
     hotel: 1, gym: 1.5, beauty_salon: 2, hair_salon: 2,
@@ -2879,25 +2903,28 @@ export function computeOpportunities(
 
   for (const [cat, bizs] of businesses) {
     const existing = bizs.length;
-    const per10k = (existing / Math.max(population, 1)) * 10000;
+    const per10k = (existing / Math.max(pop || 1, 1)) * 10000;
     const baseline = GLOBAL_BASELINES[cat] || median;
-    const expected = Math.round((baseline * population) / 10000);
-    const gap = Math.max(0, expected - existing);
-    const gapPct = expected > 0 ? gap / expected : 0;
+    const expected = pop ? Math.round((baseline * pop) / 10000) : null;
+    const gap = expected != null ? Math.max(0, expected - existing) : null;
+    const gapPct = expected ? (gap as number) / expected : 0;
 
-    // Gap score: how underserved (0-100)
-    const gapScore = Math.min(100, Math.round(gapPct * 120));
+    // Gap score: how underserved (0-100); neutral without population
+    const gapScore = pop ? Math.min(100, Math.round(gapPct * 120)) : 50;
 
-    // Size score: bigger city = bigger opportunity (0-100)
-    const sizeScore = Math.min(100, Math.round(Math.log10(Math.max(population, 1)) * 18));
+    // Size score: bigger city = bigger opportunity (0-100); neutral without
+    // population
+    const sizeScore = pop ? Math.min(100, Math.round(Math.log10(Math.max(pop, 1)) * 18)) : 50;
 
     // Competition score: fewer existing = less competition (0-100)
     const compScore = existing === 0 ? 90 : Math.max(0, Math.round(100 - existing * 3));
 
     let score = Math.round(0.45 * gapScore + 0.25 * sizeScore + 0.30 * compScore);
 
+    // Demand bonus only from REAL measured signals (confidence > 0) —
+    // a dead-network zero must not drag scores down (M7).
     const demand = demandSignals.get(cat);
-    const demandBonus = demand ? Math.round(demand.score * 0.15) : 0;
+    const demandBonus = demand && demand.confidence > 0 ? Math.round(demand.score * 0.15) : 0;
     score = Math.min(100, score + demandBonus);
 
     results.push({
@@ -2910,6 +2937,7 @@ export function computeOpportunities(
       gapPct: Math.round(gapPct * 100),
       score,
       demandBonus,
+      populationKnown: pop != null,
     });
   }
 

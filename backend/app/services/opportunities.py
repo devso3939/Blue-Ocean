@@ -196,7 +196,9 @@ def scan_opportunities(city_id: str, filters: Optional[dict[str, Any]] = None,
                 country_name=city.country,
                 category_aliases=aliases,
             )
-            if demand and demand.get("score", 0) > 0:
+            # Only boost on real measured signals (nonzero confidence) —
+            # a failed-fetch zero must not silently alter rankings.
+            if demand and demand.get("score", 0) > 0 and (demand.get("confidence") or 0) > 0:
                 demand_bonus = round(demand["score"] * 0.15)  # up to +15 points
                 stats.opportunity_score = min(100, (stats.opportunity_score or 0) + demand_bonus)
                 stats.score_label = analysis_service.score_label(stats.opportunity_score)

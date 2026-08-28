@@ -1,22 +1,23 @@
 /**
- * AI Analysis Module — Blue Ocean v2.9.0
- * Provides market analysis and insights using Hugging Face free inference API.
+ * AI Analysis Module — Blue Ocean v6.3.0
+ * Genuine LLM analysis via Pollinations (free, keyless), with deterministic
+ * data-derived fallbacks. Model output and data-derived output are labeled
+ * differently by the UI so users always know the provenance.
  */
 
 import type { OpportunityResult } from './clientEngine';
 import { getCategoryLabel } from './clientEngine';
 
-// Hugging Face API (free, no key required)
-async function callHF(model: string, inputs: string, params: Record<string, any> = {}): Promise<any> {
+// Pollinations text API (free, keyless): GET https://text.pollinations.ai/<prompt>
+async function callLLM(prompt: string, timeoutMs = 30000): Promise<string | null> {
   try {
-    const r = await fetch(`https://api-inference.huggingface.co/models/${model}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ inputs, parameters: params }),
-      signal: AbortSignal.timeout(20000),
+    const r = await fetch('https://text.pollinations.ai/' + encodeURIComponent(prompt), {
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!r.ok) return null;
-    return await r.json();
+    const text = (await r.text()).trim();
+    if (text && text.length > 40 && !/^\s*<!doctype|<html/i.test(text)) return text;
+    return null;
   } catch {
     return null;
   }
@@ -44,29 +45,30 @@ export async function analyzeCity(
   const underserved = topOpps.filter(o => o.score >= 60);
   const saturated = topOpps.filter(o => o.score < 30);
   const avgScore = Math.round(topOpps.reduce((s, o) => s + o.score, 0) / Math.max(topOpps.length, 1));
-  const density = ((totalBiz / Math.max(population, 1)) * 10000).toFixed(1);
+  const hasPop = population > 0;
+  const density = hasPop ? ((totalBiz / population) * 10000).toFixed(1) : null;
 
-  // Try HF summarization
-  const prompt = `${cityName} has ${totalBiz} businesses across ${categories.length} categories (${density} per 10k people). ${underserved.length} categories show significant gaps. Biggest gap: ${underserved[0] ? getCategoryLabel(underserved[0].category) : 'none'}.`;
-  const ai = await callHF('facebook/bart-large-cnn', prompt, { max_length: 300, min_length: 80, do_sample: false });
+  const prompt = `You are a market analyst. ${cityName}, ${countryName}: ${totalBiz} businesses in ${categories.length} categories${density ? `, ${density} per 10k residents` : ' (population unknown)'}. Underserved: ${underserved.slice(0, 3).map(o => getCategoryLabel(o.category)).join(', ') || 'none'}. In 2-3 sentences, give investment guidance using only these figures.`;
+  const ai = await callLLM(prompt);
 
-  const summary = ai?.[0]?.summary_text || `${cityName} has ${totalBiz} businesses across ${categories.length} categories (${density} per 10k people). ${underserved.length} categories show significant opportunity gaps.`;
+  const summary = ai ||
+    `${cityName} has ${totalBiz} businesses across ${categories.length} categories${density ? ` (${density} per 10k people)` : ''}. ${underserved.length} categories show significant opportunity gaps.`;
 
   return {
-    summary,
+    summary: ai ? `[AI] ${summary}` : `[data-derived] ${summary}`,
     topOpportunities: underserved.slice(0, 5).map(o =>
-      `${getCategoryLabel(o.category)}: gap of ${o.gap} businesses (${o.score}/100 score)`
+      `${getCategoryLabel(o.category)}: gap of ${o.gap ?? 'unknown'} businesses (${o.score}/100 score)`
     ),
     risks: saturated.slice(0, 3).map(o =>
       `${getCategoryLabel(o.category)}: saturated with ${o.existing} businesses`
     ),
     recommendations: [
-      underserved.length > 0 ? `🎯 Priority: ${getCategoryLabel(underserved[0].category)} — ${underserved[0].gap} unit gap` : 'Market appears well-served',
-      population > 500000 ? '🏙️ Large market supports specialization' : '🏘️ Focus on essential services',
+      underserved.length > 0 ? `🎯 Priority: ${getCategoryLabel(underserved[0].category)} — ${underserved[0].gap ?? 'unknown'} unit gap` : 'Market appears well-served',
+      hasPop && population > 500000 ? '🏙️ Large market supports specialization' : '🏘️ Focus on essential services',
       `💰 Top investment: ${underserved.slice(0, 3).map(o => getCategoryLabel(o.category)).join(' → ')}`,
     ],
     investmentScore: avgScore,
-    investmentReason: `${underserved.length} underserved categories, ${density} businesses per 10k`,
+    investmentReason: `${underserved.length} underserved categories${density ? `, ${density} businesses per 10k` : ''}`,
   };
 }
 
@@ -77,17 +79,18 @@ export async function analyzeComparison(
   popA: number, popB: number,
   totalBizA: number, totalBizB: number
 ): Promise<string> {
-  const dA = ((totalBizA / Math.max(popA, 1)) * 10000).toFixed(1);
-  const dB = ((totalBizB / Math.max(popB, 1)) * 10000).toFixed(1);
+  const hasA = popA > 0, hasB = popB > 0;
+  const dA = hasA ? ((totalBizA / popA) * 10000).toFixed(1) : null;
+  const dB = hasB ? ((totalBizB / popB) * 10000).toFixed(1) : null;
   const avgA = Math.round(oppsA.reduce((s, o) => s + o.score, 0) / Math.max(oppsA.length, 1));
   const avgB = Math.round(oppsB.reduce((s, o) => s + o.score, 0) / Math.max(oppsB.length, 1));
 
-  const context = `${cityA} (pop ${popA.toLocaleString()}, ${totalBizA} businesses, ${dA}/10k) vs ${cityB} (pop ${popB.toLocaleString()}, ${totalBizB} businesses, ${dB}/10k). A avg score: ${avgA}, B avg score: ${avgB}.`;
-  const ai = await callHF('facebook/bart-large-cnn', `Compare: ${context}`, { max_length: 250, min_length: 50 });
-  if (ai?.[0]?.summary_text) return ai[0].summary_text;
+  const context = `${cityA} (pop ${hasA ? popA.toLocaleString() : 'unknown'}, ${totalBizA} businesses${dA ? `, ${dA}/10k` : ''}) vs ${cityB} (pop ${hasB ? popB.toLocaleString() : 'unknown'}, ${totalBizB} businesses${dB ? `, ${dB}/10k` : ''}). Avg opportunity scores: ${avgA} vs ${avgB}.`;
+  const ai = await callLLM(`You are a market analyst. Compare investment potential: ${context} In 2-3 sentences, using only these figures.`);
+  if (ai) return `[AI] ${ai}`;
 
   const lines: string[] = [];
-  lines.push(`${cityA} has ${totalBizA} businesses (${dA}/10k), ${cityB} has ${totalBizB} (${dB}/10k).`);
+  lines.push(`[data-derived] ${cityA} has ${totalBizA} businesses${dA ? ` (${dA}/10k)` : ''}, ${cityB} has ${totalBizB}${dB ? ` (${dB}/10k)` : ''}.`);
   lines.push(`Average opportunity: ${cityA}=${avgA}, ${cityB}=${avgB}. ${avgA > avgB ? cityA : cityB} has more investment potential.`);
   const catsA = new Set(oppsA.filter(o => o.score >= 60).map(o => o.category));
   const catsB = new Set(oppsB.filter(o => o.score >= 60).map(o => o.category));
@@ -104,11 +107,11 @@ export async function analyzeCountry(
   cityData: Array<{ name: string; population: number; totalBiz: number; topOpps: OpportunityResult[] }>
 ): Promise<string> {
   const context = cityData.map(c =>
-    `${c.name} (pop ${(c.population / 1000).toFixed(0)}K, ${c.totalBiz} businesses, top: ${c.topOpps.slice(0, 3).map(o => `${getCategoryLabel(o.category)}(${o.score})`).join(', ')})`
+    `${c.name} (pop ${c.population > 0 ? (c.population / 1000).toFixed(0) + 'K' : 'unknown'}, ${c.totalBiz} businesses, top: ${c.topOpps.slice(0, 3).map(o => `${getCategoryLabel(o.category)}(${o.score})`).join(', ')})`
   ).join('. ');
 
-  const ai = await callHF('facebook/bart-large-cnn', `Country analysis for ${countryName}: ${context}`, { max_length: 300, min_length: 60 });
-  if (ai?.[0]?.summary_text) return ai[0].summary_text;
+  const ai = await callLLM(`You are a market analyst. Country analysis for ${countryName}: ${context}. In 3-4 sentences, which city offers the best investment outlook and why? Use only these figures.`);
+  if (ai) return `[AI] ${ai}`;
 
   const sorted = [...cityData].sort((a, b) => {
     const sA = a.topOpps.reduce((s, o) => s + o.score, 0) / Math.max(a.topOpps.length, 1);
@@ -120,5 +123,5 @@ export async function analyzeCountry(
   const bestGaps = best.topOpps.filter(o => o.score >= 60);
   const totalPop = cityData.reduce((s, c) => s + c.population, 0);
   const totalBiz = cityData.reduce((s, c) => s + c.totalBiz, 0);
-  return `${countryName} analysis across ${cityData.length} cities. Best investment: ${best.name} (avg ${bestScore}/100, ${bestGaps.length} high-opportunity categories). Top: ${bestGaps.slice(0, 5).map(o => getCategoryLabel(o.category)).join(', ')}. Total market: ${totalPop.toLocaleString()} people, ${totalBiz} businesses.`;
+  return `[data-derived] ${countryName} analysis across ${cityData.length} cities. Best investment: ${best.name} (avg ${bestScore}/100, ${bestGaps.length} high-opportunity categories). Top: ${bestGaps.slice(0, 5).map(o => getCategoryLabel(o.category)).join(', ')}. Total market: ${totalPop > 0 ? totalPop.toLocaleString() + ' people' : 'population data unavailable'}, ${totalBiz} businesses.`;
 }

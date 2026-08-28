@@ -193,7 +193,7 @@ export default function CountryView() {
             setStage(`Scanning ${city.name} (${i + 1}/${cities.length}): ${msg}`);
           });
           const totalBiz = Array.from(biz.values()).reduce((s, a) => s + a.length, 0);
-          const opps = computeOpportunities(biz, city.population || 200000, new Map());
+          const opps = computeOpportunities(biz, city.population || 0, new Map());
           results.push({ city, businesses: biz, opportunities: opps, totalBiz });
         } catch (e: any) {
           results.push({
@@ -219,11 +219,11 @@ export default function CountryView() {
         }
       }
       
-      const totalPopulation = results.reduce((s, r) => s + (r.city.population || 200000), 0);
-      
+      const totalPopulation = results.reduce((s, r) => s + (r.city.population || 0), 0);
+
       // Recompute each city's opportunities with cross-city median
       for (const r of results) {
-        r.opportunities = computeOpportunities(r.businesses, r.city.population || 200000, new Map());
+        r.opportunities = computeOpportunities(r.businesses, r.city.population || 0, new Map());
       }
 
       setCityData(results);
@@ -234,7 +234,7 @@ export default function CountryView() {
           selectedCountry,
           results.map(r => ({
             name: r.city.name,
-            population: r.city.population || 200000,
+            population: r.city.population || 0,
             totalBiz: r.totalBiz,
             topOpps: r.opportunities.slice(0, 5),
           }))
