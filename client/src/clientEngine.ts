@@ -357,7 +357,12 @@ function formatAddress(tags: Record<string, string>): string {
 const OVERPASS_MIRRORS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
-  'https://lz4.overpass-api.de/api/interpreter',
+  // Independent infrastructure: different operators = different rate-limit
+  // pools, so heavy scans on one don't poison the others. (lz4 was removed:
+  // it shares infrastructure and bans with overpass-api.de, adding a mirror
+  // that is already banned just wastes the retry window.)
+  'https://overpass.osm.jp/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
   'https://overpass.openstreetmap.ru/api/interpreter',
 ];
 
@@ -1082,6 +1087,7 @@ async function scrapeWordPressAPI(b: Business): Promise<void> {
   if (!b.website || (b.email && b.phone)) return;
   const base = b.website.replace(/\/$/, '');
   const JUNK = /example\.com|wixpress|sentry|googleapis|google\.com|cloudflare|schema\.org/i;
+  const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
 
   const endpoints = ['/wp-json/', '/wp-json/wp/v2/users', '/wp-json/wp/v2/pages'];
   for (const ep of endpoints) {
@@ -1099,7 +1105,7 @@ async function scrapeWordPressAPI(b: Business): Promise<void> {
         if (emails) {
           for (const e of emails) {
             const clean = e.replace(/[\s>);]+$/, '');
-            if (!JUNK.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
+            if (!JUNK.test(clean) && !EMAIL_FILE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
           }
         }
       }
@@ -1124,6 +1130,7 @@ async function scrapeSitemapForContacts(b: Business): Promise<void> {
   if (!b.website || (b.email && b.phone)) return;
   const base = b.website.replace(/\/$/, '');
   const JUNK = /example\.com|wixpress|sentry|googleapis|google\.com|cloudflare/i;
+  const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
 
   try {
     const r = await corsFetch(base + '/sitemap.xml', {
@@ -1147,7 +1154,7 @@ async function scrapeSitemapForContacts(b: Business): Promise<void> {
           if (emails) {
             for (const e of emails) {
               const clean = e.replace(/[\s>);]+$/, '');
-              if (!JUNK.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
+              if (!JUNK.test(clean) && !EMAIL_FILE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
             }
           }
         }
@@ -1280,8 +1287,8 @@ function isLikelyBusinessWebsite(url: string, businessName: string): boolean {
 }
 
 // ── Unified extraction: pull phone, email, website, social from any HTML/text ──
-function extractFromHtml(html: string, b: Business): void {
-  const JUNK = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|duckduckgo|schema\.org|privacy.*policy|terms.*service|cookie/i;
+function extractFromHtml(html: string, b: Business): void {  const JUNK = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|duckduckgo|schema\.org|privacy.*policy|terms.*service|cookie/i;
+  const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
 
   // Phone: tel: links, then text regex
   if (!b.phone) {
@@ -1308,7 +1315,7 @@ function extractFromHtml(html: string, b: Business): void {
     // 3. Labeled phone patterns (Phone: +xxx, Tel: xxx, etc.)
     if (!b.phone) {
       const labeledPh = html.match(/(?:phone|tel|telephone|mobile|cell|fax|calls?|whatsapp|viber|contact)\s*[:;=\s"'>]*([+\d][\d\s\-\.()]{7,18})/i);
-      if (labeledPh && labeledPh[1].replace(/[^\d]/g, '').length >= 8) b.phone = labeledPh[1].trim();
+      if (labeledPh && labeledPh[1].replace(/[^\d]/g, '').length >= 8 && plausiblePhone(labeledPh[1])) b.phone = labeledPh[1].trim();
     }
     // 4. General phone regex (fallback)
     if (!b.phone) {
@@ -1316,7 +1323,7 @@ function extractFromHtml(html: string, b: Business): void {
       if (phM) {
         for (const p of phM) {
           const digits = p.replace(/[^\d+]/g, '');
-          if (digits.length >= 8 && digits.length <= 15 && !JUNK.test(p)) { b.phone = p.trim(); break; }
+          if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(p) && !JUNK.test(p)) { b.phone = p.trim(); break; }
         }
       }
     }
@@ -1332,7 +1339,7 @@ function extractFromHtml(html: string, b: Business): void {
       if (emails) {
         for (const e of emails) {
           const clean = e.replace(/[\s>);]+$/, '');
-          if (!JUNK.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
+          if (!JUNK.test(clean) && !EMAIL_FILE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
         }
       }
     }
@@ -1342,11 +1349,11 @@ function extractFromHtml(html: string, b: Business): void {
   if (!b.email) {
     // 1. mailto: links (most reliable)
     const mailM = html.match(/href="mailto:([^"\?\s]+)/i);
-    if (mailM && !JUNK.test(mailM[1])) b.email = mailM[1].trim();
+    if (mailM && !JUNK.test(mailM[1]) && !EMAIL_FILE.test(mailM[1])) b.email = mailM[1].trim();
     // 2. Labeled email patterns (Email: xxx@yyy.com)
     if (!b.email) {
       const labelM = html.match(/(?:email|e-mail|mail|contact)\s*[:;=\s"'>]*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
-      if (labelM && !JUNK.test(labelM[1])) b.email = labelM[1];
+      if (labelM && !JUNK.test(labelM[1]) && !EMAIL_FILE.test(labelM[1])) b.email = labelM[1];
     }
     // 3. JSON-LD structured data
     if (!b.email) {
@@ -1356,7 +1363,7 @@ function extractFromHtml(html: string, b: Business): void {
           const data = JSON.parse(m[1]);
           const entities = Array.isArray(data) ? data : [data];
           for (const e of entities) {
-            if (e.email && !JUNK.test(e.email)) { b.email = e.email; break; }
+            if (e.email && !JUNK.test(e.email) && !EMAIL_FILE.test(e.email)) { b.email = e.email; break; }
           }
         } catch {}
         if (b.email) break;
@@ -1368,7 +1375,7 @@ function extractFromHtml(html: string, b: Business): void {
       if (emails) {
         for (const e of emails) {
           const clean = e.replace(/[\s>);]+$/, '');
-          if (!JUNK.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
+          if (!JUNK.test(clean) && !EMAIL_FILE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
         }
       }
     }
@@ -1392,25 +1399,30 @@ function extractFromHtml(html: string, b: Business): void {
     // 7. JavaScript string literals
     if (!b.email) {
       const jsEmailM = html.match(/['"]([\w][\w._%+-]*@[\w.-]+\.[a-zA-Z]{2,})['"]/);
-      if (jsEmailM && !JUNK.test(jsEmailM[1]) && jsEmailM[1].length > 6) b.email = jsEmailM[1];
+      if (jsEmailM && !JUNK.test(jsEmailM[1]) && !EMAIL_FILE.test(jsEmailM[1]) && jsEmailM[1].length > 6) b.email = jsEmailM[1];
     }
     // 8. data-email attributes
     if (!b.email) {
       const dataEmailM = html.match(/data-email\s*=\s*["']([^"']+@[^"']+)/i);
-      if (dataEmailM && !JUNK.test(dataEmailM[1])) b.email = dataEmailM[1];
+      if (dataEmailM && !JUNK.test(dataEmailM[1]) && !EMAIL_FILE.test(dataEmailM[1])) b.email = dataEmailM[1];
     }
   }
 
-  // Website: extract from DDG result links (only validated URLs)
+  // Website: extract from links. Self-contained denylist (this variant must
+  // not depend on the nested DIRECTORY_SITES/_EXCLUDE helpers).
   if (!b.website) {
     const links = html.matchAll(/href="([^"]+)"/g);
+    const DENY = /yelp\.com|tripadvisor|foursquare|booking\.com|expedia|yellowpages|justdial|zomato|opentable|flickr|pinterest\.com|tumblr|reddit\.com|quora|wikipedia\.org|youtube\.com|tiktok\.com|linkedin\.com|facebook\.com|instagram\.com|twitter\.com|x\.com|snapchat|threads|medium\.com|substack|archive\.org|amazon\.|ebay\.|aliexpress|2gis\.|yandex\.|uber\.com|doordash|grubhub|glassdoor|indeed\.com|thumbtack|bbb\.org|trustpilot|google\.|gstatic|apple\.com|microsoft\.com/i;
     for (const link of links) {
       let url = link[1];
       const uddg = url.match(/uddg=([^&]+)/);
       if (uddg) url = decodeURIComponent(uddg[1]);
-      if (url.startsWith('http') && !_EXCLUDE.test(url) && !DIRECTORY_SITES.test(url) && isLikelyBusinessWebsite(url, b.name)) {
-        b.website = url; break;
-      }
+      if (!url.startsWith('http')) continue;
+      let host = '';
+      try { host = new URL(url).hostname.replace(/^www\./, ''); } catch { continue; }
+      if (DENY.test(host)) continue;
+      if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) continue;
+      b.website = url; break;
     }
   }
 
@@ -1448,7 +1460,7 @@ function extractFromHtml(html: string, b: Business): void {
 
   // Rating from meta/structured data
   if (!b.rating) {
-    const ratingM = html.match(/(?:ratingValue|rating)["\s:=]+(\d\.\d)/i)
+    const ratingM = html.match(/(?:ratingValue|rating)["\s:=]*(?:content)?["\s:=]*(\d\.\d)/i)
       || html.match(/(\d\.\d)\s*(?:out of|\/)\s*5/i);
     if (ratingM) {
       const val = parseFloat(ratingM[1]);
@@ -2792,4 +2804,222 @@ export function computeOpportunities(
 
   results.sort((a, b) => b.score - a.score);
   return results;
+}
+
+// Sanity gate for phones scraped from arbitrary page text: rejects dates
+// (2026-06-11), IP-like groups (23.58.223.22) and unix timestamps
+// (1787851477009) that naive digit-count checks accept.
+function plausiblePhone(p: string): boolean {
+  const t = p.trim();
+  const digits = t.replace(/\D/g, '');
+  if (digits.length < 8 || digits.length > 15) return false;
+  // date-like: 2026-06-11 / 11.06.2026 / 2026/06/11
+  if (/^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}$/.test(t) || /^\d{1,2}[-/.]\d{1,2}[-/.]\d{4}$/.test(t)) return false;
+  // IP-like: 23.58.223.22
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(t)) return false;
+  // bare 1-prefixed 10-13 digit runs without + are usually timestamps/IDs
+  // (real international numbers in our regions carry +995/+374/+90/+7)
+  if (/^1\d{9,12}$/.test(digits) && !t.startsWith('+')) return false;
+  return true;
+}
+
+// ─── Test-only exports (corsFetch is module-scope; extractFromHtml is
+// published inside queryBusinesses, which owns its scope) ───
+export const __internals: any = {};
+__internals.corsFetch = corsFetch;
+__internals.extractFromHtml = extractFromHtmlModule;
+
+// ── Unified extraction: pull phone, email, website, social from any HTML/text ──
+// (module-scope utility: pure parsing, no closure state — used by the
+// enrichment pipeline inside queryBusinesses and by the parsing test harness)
+function extractFromHtmlModule(html: string, b: Business): void {
+  const JUNK = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|duckduckgo|schema\.org|privacy.*policy|terms.*service|cookie/i;
+  const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
+
+  // Phone: tel: links, then text regex
+  if (!b.phone) {
+    // 1. tel: links (most reliable)
+    const telM = html.match(/href="tel:([^"]+)"/);
+    if (telM) b.phone = telM[1].trim();
+    // 2. Country-specific formats
+    if (!b.phone) {
+      const geoM = html.match(/\+995\s?\d{3}\s?\d{2}\s?\d{2}\s?\d{2}/);
+      if (geoM) b.phone = geoM[0].trim();
+    }
+    if (!b.phone) {
+      const armM = html.match(/\+374\s?\d{2}\s?\d{2}\s?\d{2}\s?\d{2}/);
+      if (armM) b.phone = armM[0].trim();
+    }
+    if (!b.phone) {
+      const turM = html.match(/\+90\s?\d{3}\s?\d{3}\s?\d{2}\s?\d{2}/);
+      if (turM) b.phone = turM[0].trim();
+    }
+    if (!b.phone) {
+      const ruM = html.match(/\+7\s?\d{3}\s?\d{3}\s?\d{2}\s?\d{2}/);
+      if (ruM) b.phone = ruM[0].trim();
+    }
+    // 3. Labeled phone patterns (Phone: +xxx, Tel: xxx, etc.)
+    if (!b.phone) {
+      const labeledPh = html.match(/(?:phone|tel|telephone|mobile|cell|fax|calls?|whatsapp|viber|contact)\s*[:;=\s"'>]*([+\d][\d\s\-\.()]{7,18})/i);
+      if (labeledPh && labeledPh[1].replace(/[^\d]/g, '').length >= 8 && plausiblePhone(labeledPh[1])) b.phone = labeledPh[1].trim();
+    }
+    // 4. General phone regex (fallback)
+    if (!b.phone) {
+      const phM = html.match(/(?:\+?\d[\d\s\-\.\(\)]{7,18})/g);
+      if (phM) {
+        for (const p of phM) {
+          const digits = p.replace(/[^\d+]/g, '');
+          if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(p) && !JUNK.test(p)) { b.phone = p.trim(); break; }
+        }
+      }
+    }
+  }
+
+  // Email: structured extraction with verification
+  // Strategy 1: Look for contact info in structured HTML (most reliable)
+  if (!b.email) {
+    // Contact section: look for labeled email near "contact" heading
+    const contactSection = html.match(/<(?:div|section|footer|aside)[^>]*class="[^"]*contact[^"]*"[^>]*>([\s\S]*?)<\/(?:div|section|footer|aside)/i);
+    if (contactSection) {
+      const emails = contactSection[1].match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+      if (emails) {
+        for (const e of emails) {
+          const clean = e.replace(/[\s>);]+$/, '');
+          if (!JUNK.test(clean) && !EMAIL_FILE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
+        }
+      }
+    }
+  }
+
+  // Email: mailto, text, Cloudflare decode, &#64; encode, JSON-LD
+  if (!b.email) {
+    // 1. mailto: links (most reliable)
+    const mailM = html.match(/href="mailto:([^"\?\s]+)/i);
+    if (mailM && !JUNK.test(mailM[1]) && !EMAIL_FILE.test(mailM[1])) b.email = mailM[1].trim();
+    // 2. Labeled email patterns (Email: xxx@yyy.com)
+    if (!b.email) {
+      const labelM = html.match(/(?:email|e-mail|mail|contact)\s*[:;=\s"'>]*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
+      if (labelM && !JUNK.test(labelM[1]) && !EMAIL_FILE.test(labelM[1])) b.email = labelM[1];
+    }
+    // 3. JSON-LD structured data
+    if (!b.email) {
+      const jsonLdEmails = html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi);
+      for (const m of jsonLdEmails) {
+        try {
+          const data = JSON.parse(m[1]);
+          const entities = Array.isArray(data) ? data : [data];
+          for (const e of entities) {
+            if (e.email && !JUNK.test(e.email) && !EMAIL_FILE.test(e.email)) { b.email = e.email; break; }
+          }
+        } catch {}
+        if (b.email) break;
+      }
+    }
+    // 4. General email regex (fallback)
+    if (!b.email) {
+      const emails = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+      if (emails) {
+        for (const e of emails) {
+          const clean = e.replace(/[\s>);]+$/, '');
+          if (!JUNK.test(clean) && !EMAIL_FILE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
+        }
+      }
+    }
+    // 5. Cloudflare encoded emails
+    if (!b.email) {
+      const cfM = html.match(/data-cfemail="([a-f0-9]+)"/i);
+      if (cfM) {
+        try {
+          const bytes = cfM[1].match(/.{2}/g)!.map(h => parseInt(h, 16));
+          const key = bytes[0];
+          const decoded = bytes.slice(1).map(x => x ^ key).map(x => String.fromCharCode(x)).join('');
+          if (decoded.includes('@') && !JUNK.test(decoded)) b.email = decoded;
+        } catch {}
+      }
+    }
+    // 6. HTML entity encoded (@)
+    if (!b.email) {
+      const entM = html.match(/([a-zA-Z0-9._%+-]+)&#64;([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+      if (entM && !JUNK.test(entM[0])) b.email = entM[1] + '@' + entM[2];
+    }
+    // 7. JavaScript string literals
+    if (!b.email) {
+      const jsEmailM = html.match(/['"]([\w][\w._%+-]*@[\w.-]+\.[a-zA-Z]{2,})['"]/);
+      if (jsEmailM && !JUNK.test(jsEmailM[1]) && !EMAIL_FILE.test(jsEmailM[1]) && jsEmailM[1].length > 6) b.email = jsEmailM[1];
+    }
+    // 8. data-email attributes
+    if (!b.email) {
+      const dataEmailM = html.match(/data-email\s*=\s*["']([^"']+@[^"']+)/i);
+      if (dataEmailM && !JUNK.test(dataEmailM[1]) && !EMAIL_FILE.test(dataEmailM[1])) b.email = dataEmailM[1];
+    }
+  }
+
+  // Website: extract from links. Self-contained denylist (this variant must
+  // not depend on the nested DIRECTORY_SITES/_EXCLUDE helpers).
+  if (!b.website) {
+    const links = html.matchAll(/href="([^"]+)"/g);
+    const DENY = /yelp\.com|tripadvisor|foursquare|booking\.com|expedia|yellowpages|justdial|zomato|opentable|flickr|pinterest\.com|tumblr|reddit\.com|quora|wikipedia\.org|youtube\.com|tiktok\.com|linkedin\.com|facebook\.com|instagram\.com|twitter\.com|x\.com|snapchat|threads|medium\.com|substack|archive\.org|amazon\.|ebay\.|aliexpress|2gis\.|yandex\.|uber\.com|doordash|grubhub|glassdoor|indeed\.com|thumbtack|bbb\.org|trustpilot|google\.|gstatic|apple\.com|microsoft\.com/i;
+    for (const link of links) {
+      let url = link[1];
+      const uddg = url.match(/uddg=([^&]+)/);
+      if (uddg) url = decodeURIComponent(uddg[1]);
+      if (!url.startsWith('http')) continue;
+      let host = '';
+      try { host = new URL(url).hostname.replace(/^www\./, ''); } catch { continue; }
+      if (DENY.test(host)) continue;
+      if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) continue;
+      b.website = url; break;
+    }
+  }
+
+  // Facebook
+  if (!b.facebook) {
+    const fbM = html.match(/facebook\.com\/([a-zA-Z0-9._]+)/i);
+    if (fbM && !fbM[0].includes('login') && !fbM[0].includes('sharer') && !fbM[0].includes('dialog')) {
+      b.facebook = 'https://facebook.com/' + fbM[1].replace(/\/$/, '');
+    }
+  }
+
+  // Instagram
+  if (!b.instagram) {
+    const igM = html.match(/instagram\.com\/([a-zA-Z0-9._]+)/i);
+    if (igM && !igM[0].includes('accounts') && !igM[0].includes('explore')) {
+      b.instagram = 'https://instagram.com/' + igM[1].replace(/\/$/, '');
+    }
+  }
+
+  // Twitter/X
+  if (!b.twitter) {
+    const twM = html.match(/(?:twitter|x)\.com\/([a-zA-Z0-9._]+)/i);
+    if (twM && !twM[0].includes('login') && !twM[0].includes('intent') && !twM[0].includes('share')) {
+      b.twitter = 'https://twitter.com/' + twM[1].replace(/\/$/, '');
+    }
+  }
+
+  // Pinterest
+  if (!b.pinterest) {
+    const pinM = html.match(/pinterest\.com\/([a-zA-Z0-9._]+)/i);
+    if (pinM && !pinM[0].includes('login')) {
+      b.pinterest = 'https://pinterest.com/' + pinM[1].replace(/\/$/, '');
+    }
+  }
+
+  // Rating from meta/structured data
+  if (!b.rating) {
+    const ratingM = html.match(/(?:ratingValue|rating)["\s:=]*(?:content)?["\s:=]*(\d\.\d)/i)
+      || html.match(/(\d\.\d)\s*(?:out of|\/)\s*5/i);
+    if (ratingM) {
+      const val = parseFloat(ratingM[1]);
+      if (val >= 1 && val <= 5) b.rating = val;
+    }
+  }
+  // Review count
+  if (!b.reviewCount) {
+    const revM = html.match(/(?:reviewCount|ratingCount)["\s:=]+(\d+)/i)
+      || html.match(/(\d[\d,]*)\s*reviews?/i);
+    if (revM) {
+      const val = parseInt(revM[1].replace(/,/g, ''));
+      if (val > 0 && val < 100000) b.reviewCount = val;
+    }
+  }
 }

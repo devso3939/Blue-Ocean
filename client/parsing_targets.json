@@ -1,0 +1,990 @@
+[
+ {
+  "name": "H&M",
+  "category": "clothing_store",
+  "address": "Kavtaradze 1, 1 Petre Kavtaradze St",
+  "url": "https://www.hm.com/ge?utm_source=overture_location&utm_medium=organic&utm_campaign=GE0003",
+  "known": {
+   "phones": [
+    "+995-322001313"
+   ],
+   "emails": [
+    "kundservice.se@hm.com"
+   ],
+   "socials": []
+  }
+ },
+ {
+  "name": "H&M",
+  "category": "clothing_store",
+  "address": "2/4 Shota Rustaveli Ave",
+  "url": "https://www.hm.com/ge?utm_source=overture_location&utm_medium=organic&utm_campaign=GE0001",
+  "known": {
+   "phones": [
+    "+995-3222002292"
+   ],
+   "emails": [
+    "kundservice.se@hm.com"
+   ],
+   "socials": []
+  }
+ },
+ {
+  "name": "Representative Office of ANDRITZ HYDRO",
+  "category": "engineering_service",
+  "address": "11 Apakidze Street, apt. 140, Vake-Saburtalo district",
+  "url": "https://www.andritz.com/hydro",
+  "known": {
+   "phones": [
+    "+995 32 27 28 700"
+   ],
+   "emails": [
+    "contact-hydro.ge@andritz.com"
+   ],
+   "socials": []
+  }
+ },
+ {
+  "name": "Hilton Garden Inn Tbilisi Chavchavadze",
+  "category": "hotel",
+  "address": "64a Ilia Chavchavadze Avenue",
+  "url": "http://www.tbilisichavchavadze.hgi.com/",
+  "known": {
+   "phones": [
+    "+995322252020"
+   ],
+   "emails": [
+    "tbsgi-salesadm@hilton.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/103687492066970"
+   ]
+  }
+ },
+ {
+  "name": "ibis Tbilisi Stadium",
+  "category": "hotel",
+  "address": "178 Davit Aghmashenebeli Ave",
+  "url": "https://all.accor.com/hotel/A1L2/index.en.shtml",
+  "known": {
+   "phones": [
+    "+995322221035"
+   ],
+   "emails": [
+    "ha1l2@accor.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/112121336921916"
+   ]
+  }
+ },
+ {
+  "name": "Hilton Garden Inn Tbilisi Riverview",
+  "category": "hotel",
+  "address": "17 Ialbuzi St",
+  "url": "https://www.hilton.com/en/hotels/tbsrvgi-hilton-garden-inn-tbilisi-riverview",
+  "known": {
+   "phones": [
+    "+995322009977"
+   ],
+   "emails": [
+    "tbsrv_sm@hilton.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/117248041372930"
+   ]
+  }
+ },
+ {
+  "name": "Ibis Budget Tbilisi Center",
+  "category": "hotel",
+  "address": "22 Giorgi Akhvlediani St",
+  "url": "https://all.accor.com/hotel/B2T3/index.en.shtml",
+  "known": {
+   "phones": [
+    "+995322158888"
+   ],
+   "emails": [
+    "hb2t3-fo@accor.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/111024928246390"
+   ]
+  }
+ },
+ {
+  "name": "Courtyard by Marriott Tbilisi",
+  "category": "hotel",
+  "address": "4 Freedom Square",
+  "url": "https://www.marriott.com/en-us/hotels/tbscy-courtyard-tbilisi/overview/?scid=d2406702-e8ea-4b45-bb9b-69cddaaef03d",
+  "known": {
+   "phones": [
+    "+995322779100"
+   ],
+   "emails": [
+    "courtyard.tbilisi@marriott.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/1248667745245038"
+   ]
+  }
+ },
+ {
+  "name": "Holiday Inn Tbilisi",
+  "category": "hotel",
+  "address": "1 Twentysix May Square",
+  "url": "https://www.ihg.com/holidayinn/hotels/gb/en/tbilisi/tbsms/hoteldetail?cm_mmc=FacebookMaps-_-HI-_-GE-_-TBSMS",
+  "known": {
+   "phones": [
+    "+995322300099"
+   ],
+   "emails": [
+    "info@hi-tbilisi.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/154628654566711"
+   ]
+  }
+ },
+ {
+  "name": "Ibis Styles Tbilisi Center",
+  "category": "hotel",
+  "address": "4 Galaktion Tabidze St",
+  "url": "http://www.ibisstyles.com/",
+  "known": {
+   "phones": [
+    "+995322002424"
+   ],
+   "emails": [
+    "ha413-re@accor.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/1756045301314055"
+   ]
+  }
+ },
+ {
+  "name": "Moxy",
+  "category": "hotel",
+  "address": "Saarbrucken Square",
+  "url": "https://www.marriott.com/en-us/hotels/tbsox-moxy-tbilisi/overview/?scid=d2406702-e8ea-4b45-bb9b-69cddaaef03d",
+  "known": {
+   "phones": [
+    "+995322779277"
+   ],
+   "emails": [
+    "moxy.tbsox.hotel@moxyhotels.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/501615226852583"
+   ]
+  }
+ },
+ {
+  "name": "Pullman Tbilisi Axis Towers",
+  "category": "hotel",
+  "address": "37M Ilia Chavchavadze Avenue",
+  "url": "https://all.accor.com/hotel/A1F1/index.en.shtml",
+  "known": {
+   "phones": [
+    "+995322003322"
+   ],
+   "emails": [
+    "reception@pullmantbilisi.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/110107768329851"
+   ]
+  }
+ },
+ {
+  "name": "Tbilisi Marriott Hotel",
+  "category": "hotel",
+  "address": "13 Shota Rustaveli Ave",
+  "url": "https://www.marriott.com/en-us/hotels/tbsmc-tbilisi-marriott-hotel/overview/?scid=d2406702-e8ea-4b45-bb9b-69cddaaef03d",
+  "known": {
+   "phones": [
+    "+995322779200"
+   ],
+   "emails": [
+    "tbilisi.marriott@marriott.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/364575518905"
+   ]
+  }
+ },
+ {
+  "name": "Radisson Blu Iveria Hotel",
+  "category": "hotel",
+  "address": "1 Rose Revolution Square",
+  "url": "https://www.radissonhotels.com/en-us/hotels/radisson-blu-tbilisi",
+  "known": {
+   "phones": [
+    "+995322402200"
+   ],
+   "emails": [
+    "tbilisi.ots@radissonblu.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/362534992892"
+   ]
+  }
+ },
+ {
+  "name": "Mercure Tbilisi Old Town",
+  "category": "hotel",
+  "address": "9 Vakhtang Gorgasali St",
+  "url": "http://www.mercure.com/",
+  "known": {
+   "phones": [
+    "+995322006060"
+   ],
+   "emails": [
+    "h9417-re@accor.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/532045390282802"
+   ]
+  }
+ },
+ {
+  "name": "Swissôtel Tbilisi",
+  "category": "hotel",
+  "address": "3 Soliko Virsaladze St",
+  "url": "https://www.swissotel.com/hotels/tbilisi/",
+  "known": {
+   "phones": [
+    "+995322202070"
+   ],
+   "emails": [],
+   "socials": [
+    "https://www.facebook.com/112464561796769"
+   ]
+  }
+ },
+ {
+  "name": "Holiday Inn Express Tbilisi Avlabari",
+  "category": "hotel",
+  "address": "ლაგოდეხის ქუჩა 4",
+  "url": "http://www.hiexpress.com/",
+  "known": {
+   "phones": [
+    "+995322228400"
+   ],
+   "emails": [
+    "info@hiextbilisi.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/107002925603291"
+   ]
+  }
+ },
+ {
+  "name": "Novotel Tbilisi Center",
+  "category": "hotel",
+  "address": "გურჯაანის ქუჩა 1",
+  "url": "https://all.accor.com/hotel/B0I6/index.en.shtml",
+  "known": {
+   "phones": [
+    "+995322441100"
+   ],
+   "emails": [
+    "hb0i6@accor.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/126205573909254"
+   ]
+  }
+ },
+ {
+  "name": "Sheraton",
+  "category": "hotel",
+  "address": "20 Telavi Street",
+  "url": "https://www.marriott.com/en-us/hotels/tbssi-sheraton-grand-tbilisi-metechi-palace/overview/?scid=d2406702-e8ea-4b45-bb9b-69cddaaef03d",
+  "known": {
+   "phones": [
+    "+995322772020"
+   ],
+   "emails": [
+    "sh.tbssi.sales@sheratonhotels.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/257018884390669"
+   ]
+  }
+ },
+ {
+  "name": "ibis Styles Old Tbilisi",
+  "category": "hotel",
+  "address": "39 Kote Afkhazi St",
+  "url": "https://all.accor.com/hotel/B9K7/index.en.shtml",
+  "known": {
+   "phones": [
+    "+995322002022"
+   ],
+   "emails": [
+    "hb9k7@accor.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/353965514471953"
+   ]
+  }
+ },
+ {
+  "name": "GT Motors",
+  "category": "auto_dealer",
+  "address": "D.Agmashenebeli alley, 12 th km",
+  "url": "http://www.tegetamotors.ge/",
+  "known": {
+   "phones": [
+    "+995322595000"
+   ],
+   "emails": [],
+   "socials": [
+    "https://www.facebook.com/143775795709631"
+   ]
+  }
+ },
+ {
+  "name": "Tbilisi Philharmonic",
+  "category": "hotel",
+  "address": "10 Petre Melikishvili St",
+  "url": "https://all.accor.com/hotel/C1N1/index.en.shtml",
+  "known": {
+   "phones": [
+    "+995322447777"
+   ],
+   "emails": [
+    "hc1n1@accor.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/110047698829400"
+   ]
+  }
+ },
+ {
+  "name": "Radisson RED Tbilisi",
+  "category": "hotel",
+  "address": "44 Davit Aghmashenebeli Ave",
+  "url": "https://bit.ly/RadissonREDTbilisi",
+  "known": {
+   "phones": [
+    "+995322222020"
+   ],
+   "emails": [
+    "info.tbilisi@radissonred.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/115074028163135"
+   ]
+  }
+ },
+ {
+  "name": "Golden Tulip Design Tbilisi",
+  "category": "hotel",
+  "address": "37 Ketevan Tsamebuli Ave",
+  "url": "https://design-tbilisi.goldentulip.com/",
+  "known": {
+   "phones": [
+    "+995322157157"
+   ],
+   "emails": [
+    "info@goldentulipdesigntbilisi.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/103715628908356"
+   ]
+  }
+ },
+ {
+  "name": "Restaurant Dumas • რესტორანი დიუმა",
+  "category": "french_restaurant",
+  "address": "Axis Towers, Pullman Tbilisi, 37m Ilia Chavchavadze Avenue",
+  "url": "https://pullmantbilisi.com/dumas-menus/",
+  "known": {
+   "phones": [
+    "+995322003366"
+   ],
+   "emails": [
+    "dumas@pullmantbilisi.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/108926508519809"
+   ]
+  }
+ },
+ {
+  "name": "Rooms Tbilisi",
+  "category": "hotel",
+  "address": "14 Merab Kostava Street T'bilisi, 14 Merab Kostava St",
+  "url": "http://roomshotels.com",
+  "known": {
+   "phones": [
+    "+995322020099"
+   ],
+   "emails": [],
+   "socials": [
+    "https://www.facebook.com/226031663926469"
+   ]
+  }
+ },
+ {
+  "name": "BOSS Store",
+  "category": "clothing_store",
+  "address": "37 Shota Rustaveli Ave",
+  "url": "https://www.hugoboss.com/us/storedetail?storeid=1005546",
+  "known": {
+   "phones": [
+    "+995595309151"
+   ],
+   "emails": [],
+   "socials": [
+    "https://www.facebook.com/284370522177003"
+   ]
+  }
+ },
+ {
+  "name": "Hotel Coste",
+  "category": "hotel",
+  "address": "45a Merab Kostava St",
+  "url": "http://hotelcoste.ge/",
+  "known": {
+   "phones": [
+    "+995322191111"
+   ],
+   "emails": [
+    "info@hotelcoste.ge"
+   ],
+   "socials": [
+    "https://www.facebook.com/317132268496703"
+   ]
+  }
+ },
+ {
+  "name": "McDonald's",
+  "category": "fast_food_restaurant",
+  "address": "Akaki Tsereteli Ave",
+  "url": "https://www.mcdonalds.ge/ge/application?appUrl%3Dgmalite%3A%2F%2Fgmalite-home",
+  "known": {
+   "phones": [
+    "+995322920691"
+   ],
+   "emails": [
+    "tk@mcdonalds.ge"
+   ],
+   "socials": [
+    "https://www.facebook.com/111516551374468"
+   ]
+  }
+ },
+ {
+  "name": "Liberty • ლიბერთი",
+  "category": "bank",
+  "address": "74 Ilia Chavchavadze Avenue",
+  "url": "http://www.libertybank.ge/",
+  "known": {
+   "phones": [
+    "+995322555500"
+   ],
+   "emails": [
+    "info@libertybank.ge"
+   ],
+   "socials": [
+    "https://www.facebook.com/200490093310560"
+   ]
+  }
+ },
+ {
+  "name": "McDonald's",
+  "category": "fast_food_restaurant",
+  "address": "1 Brothers Kakabadzeebi Str",
+  "url": "https://www.mcdonalds.ge/ge/application?appUrl%3Dgmalite%3A%2F%2Fgmalite-home",
+  "known": {
+   "phones": [
+    "+995322922942"
+   ],
+   "emails": [],
+   "socials": [
+    "https://www.facebook.com/107262781808005"
+   ]
+  }
+ },
+ {
+  "name": "McDonald's",
+  "category": "fast_food_restaurant",
+  "address": "Merab Kostava St",
+  "url": "https://www.mcdonalds.ge/ge/application?appUrl%3Dgmalite%3A%2F%2Fgmalite-home",
+  "known": {
+   "phones": [
+    "+995322364923"
+   ],
+   "emails": [],
+   "socials": [
+    "https://www.facebook.com/108503558348826"
+   ]
+  }
+ },
+ {
+  "name": "Kopala Tskneti Hotel",
+  "category": "hotel",
+  "address": "55 Rustaveli St",
+  "url": "http://www.kopala.ge/tskneti",
+  "known": {
+   "phones": [
+    "+995322228062"
+   ],
+   "emails": [
+    "tskneti@kopala.ge"
+   ],
+   "socials": [
+    "https://www.facebook.com/1509951882553780"
+   ]
+  }
+ },
+ {
+  "name": "Hotel Genio",
+  "category": "hotel",
+  "address": "15 Titsian Tabidze St",
+  "url": "http://www.genio.ge/",
+  "known": {
+   "phones": [
+    "+995599150810"
+   ],
+   "emails": [
+    "info@genio.ge"
+   ],
+   "socials": [
+    "https://www.facebook.com/274486543027357"
+   ]
+  }
+ },
+ {
+  "name": "Taberne Boutique Hotel",
+  "category": "hotel",
+  "address": "3 Vakhtang Orbeliani St",
+  "url": "http://www.taberne.ge/",
+  "known": {
+   "phones": [
+    "+995599664499"
+   ],
+   "emails": [
+    "info@taberne.ge"
+   ],
+   "socials": [
+    "https://www.facebook.com/108877057346450"
+   ]
+  }
+ },
+ {
+  "name": "Best Western Tbilisi Art Hotel",
+  "category": "hotel",
+  "address": "Apakidze 11",
+  "url": "https://www.bestwestern.ru/ru_RU/book/hotel-details.91450.html?aff=BRU&iata=00171890&ssob=BLBWI0003G",
+  "known": {
+   "phones": [
+    "+995322300777"
+   ],
+   "emails": [],
+   "socials": [
+    "https://www.facebook.com/698146393582650"
+   ]
+  }
+ },
+ {
+  "name": "Biography Tbilisi",
+  "category": "hotel",
+  "address": "15 Bezhan Kalandadze St",
+  "url": "http://Biographyhotel.ge/",
+  "known": {
+   "phones": [
+    "+995322121222"
+   ],
+   "emails": [
+    "info@biographyhotel.ge"
+   ],
+   "socials": [
+    "https://www.facebook.com/111496157825485"
+   ]
+  }
+ },
+ {
+  "name": "ილიაუნის თეატრი  •  Iliauni Theatre",
+  "category": "theatre_venue",
+  "address": "ილია ჭავჭავაძის გამზირი 32",
+  "url": "http://www.iliaunitheatre.ge/",
+  "known": {
+   "phones": [
+    "+995322294715"
+   ],
+   "emails": [
+    "theatre@iliauni.edu.ge"
+   ],
+   "socials": [
+    "https://www.facebook.com/111207378950838"
+   ]
+  }
+ },
+ {
+  "name": "Folk Boutique Hotel",
+  "category": "hotel",
+  "address": "56 Ioseb Grishashvili St",
+  "url": "https://folkhotel.ge/",
+  "known": {
+   "phones": [
+    "+995591990033"
+   ],
+   "emails": [
+    "sales@tblhotels.ge"
+   ],
+   "socials": [
+    "https://www.facebook.com/268940037084507"
+   ]
+  }
+ },
+ {
+  "name": "Chichua Medical Center Mzera",
+  "category": "eyewear_store",
+  "address": "ლავრენტი მანაგაძის N4",
+  "url": "http://mzeraclinic.ge/",
+  "known": {
+   "phones": [
+    "+995322775588"
+   ],
+   "emails": [
+    "info@mzeraclinic.ge"
+   ],
+   "socials": [
+    "https://www.facebook.com/382641041899111"
+   ]
+  }
+ },
+ {
+  "name": "McDonald's",
+  "category": "fast_food_restaurant",
+  "address": "3 Dimitri Arakishvili St",
+  "url": "https://www.mcdonalds.ge/ge/application?appUrl%3Dgmalite%3A%2F%2Fgmalite-home",
+  "known": {
+   "phones": [
+    "+995322922945"
+   ],
+   "emails": [],
+   "socials": [
+    "https://www.facebook.com/100704459142685"
+   ]
+  }
+ },
+ {
+  "name": "McDonald's",
+  "category": "fast_food_restaurant",
+  "address": "Kote Marjanishvili St",
+  "url": "https://www.mcdonalds.ge/ge/application?appUrl%3Dgmalite%3A%2F%2Fgmalite-home",
+  "known": {
+   "phones": [
+    "+995322922945"
+   ],
+   "emails": [],
+   "socials": [
+    "https://www.facebook.com/106255865243665"
+   ]
+  }
+ },
+ {
+  "name": "Old Meidan Tbilisi",
+  "category": "hotel",
+  "address": "9/11 Samghebro St",
+  "url": "http://www.meidanhotels.ge/",
+  "known": {
+   "phones": [
+    "+995598318888"
+   ],
+   "emails": [
+    "urbanoldmeidan@gmail.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/167287403623709"
+   ]
+  }
+ },
+ {
+  "name": "Superdry Georgia",
+  "category": "clothing_store",
+  "address": "2/4 Shota Rustaveli Ave, T'bilisi Shopping Center Galleria Tbilisi, II floor Shopping, 2/4 Shota Rustaveli Ave",
+  "url": "https://stores.superdry.com/ge/tbilisi/galleria",
+  "known": {
+   "phones": [
+    "+995322121217"
+   ],
+   "emails": [],
+   "socials": [
+    "https://www.facebook.com/102179718698693"
+   ]
+  }
+ },
+ {
+  "name": "Regus",
+  "category": "professional_service",
+  "address": "1 Building, Giorgi Leonidze Street, 2 Galaktion Tabidze St",
+  "url": "www.regus.com.ge",
+  "known": {
+   "phones": [
+    "+995322900039"
+   ],
+   "emails": [
+    "ruska.chakvetadze@regus.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/741330699384864"
+   ]
+  }
+ },
+ {
+  "name": "Casino Iveria Tbilisi",
+  "category": "casino",
+  "address": "Rose Revolution Square",
+  "url": "http://casinoiveria.com/",
+  "known": {
+   "phones": [
+    "+995322402245"
+   ],
+   "emails": [
+    "info@casinoiveria.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/861655817235479"
+   ]
+  }
+ },
+ {
+  "name": "Barbara Bar",
+  "category": "cocktail_bar",
+  "address": "33 Kote Afkhazi St",
+  "url": "https://barbara.ge/",
+  "known": {
+   "phones": [
+    "+995599420810"
+   ],
+   "emails": [
+    "barbara.tbilisi@gmail.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/2040023916305012"
+   ]
+  }
+ },
+ {
+  "name": "No12 Boutique Hotel",
+  "category": "hotel",
+  "address": "12 Vakhtang Beridze St",
+  "url": "http://www.no12hotel.com/",
+  "known": {
+   "phones": [
+    "+995322552212"
+   ],
+   "emails": [
+    "no12hotel@gmail.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/376576819081707"
+   ]
+  }
+ },
+ {
+  "name": "Strada Mosashvili",
+  "category": "restaurant",
+  "address": "11 Ilo Mosashvili St",
+  "url": "http://stradacafe.ge/",
+  "known": {
+   "phones": [
+    "+995595992266"
+   ],
+   "emails": [],
+   "socials": [
+    "https://www.facebook.com/175722760004942"
+   ]
+  }
+ },
+ {
+  "name": "DADI wine bar and shop",
+  "category": "wine_bar",
+  "address": "4 Shalva Dadiani St",
+  "url": "https://www.dadi.wine/",
+  "known": {
+   "phones": [
+    "+995591049868"
+   ],
+   "emails": [
+    "info@dadi.wine"
+   ],
+   "socials": [
+    "https://www.facebook.com/1406265242789133"
+   ]
+  }
+ },
+ {
+  "name": "Grand Hotel Mimino",
+  "category": "hotel",
+  "address": "3 Khivi Turn",
+  "url": "http://www.hotelmimino.com/",
+  "known": {
+   "phones": [
+    "+995322770017"
+   ],
+   "emails": [],
+   "socials": [
+    "https://www.facebook.com/1734454806662660"
+   ]
+  }
+ },
+ {
+  "name": "Sandali Metekhi",
+  "category": "hotel",
+  "address": "23 Viktor Jorbenadze St",
+  "url": "https://sandalihotel.com/",
+  "known": {
+   "phones": [
+    "+995596560033"
+   ],
+   "emails": [
+    "info@sandalihotel.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/102551927816991"
+   ]
+  }
+ },
+ {
+  "name": "Tiffany Bar and Terrace",
+  "category": "restaurant",
+  "address": "Mari Brose Street",
+  "url": "http://www.tiffany.ge/",
+  "known": {
+   "phones": [
+    "+995597976757"
+   ],
+   "emails": [
+    "info@riverside.ge"
+   ],
+   "socials": [
+    "https://www.facebook.com/107907438096691"
+   ]
+  }
+ },
+ {
+  "name": "Tone",
+  "category": "wine_bar",
+  "address": "8 Egnate Ninoshvili St",
+  "url": "http://tonefabrika.com/",
+  "known": {
+   "phones": [
+    "+995577202840"
+   ],
+   "emails": [
+    "natomakhaldiani@gmail.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/321467484890182"
+   ]
+  }
+ },
+ {
+  "name": "Soda",
+  "category": "bar",
+  "address": "20 Shalva Dadiani St",
+  "url": "https://www.sodabaraperitivo.com/",
+  "known": {
+   "phones": [],
+   "emails": [
+    "sodabartbilisi@gmail.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/285027079051829"
+   ]
+  }
+ },
+ {
+  "name": "American Hospital Tbilisi",
+  "category": "hospital",
+  "address": "17 Ushangi Chkheidze Street",
+  "url": "https://ahtbilisi.com/",
+  "known": {
+   "phones": [
+    "+995322009009"
+   ],
+   "emails": [
+    "info@ahtbilisi.com"
+   ],
+   "socials": [
+    "https://www.facebook.com/103718561204638"
+   ]
+  }
+ },
+ {
+  "name": "Castle in Old Town",
+  "category": "hotel",
+  "address": "3 Betlemi Rise",
+  "url": "http://www.castle.ge/",
+  "known": {
+   "phones": [
+    "+995555301060"
+   ],
+   "emails": [
+    "info@castle.ge"
+   ],
+   "socials": [
+    "https://www.facebook.com/261922604373801"
+   ]
+  }
+ },
+ {
+  "name": "Kani Clinic",
+  "category": "outpatient_care_facility",
+  "address": "11 გ. სააკაძის დაღმართი",
+  "url": "http://www.kani.ge/",
+  "known": {
+   "phones": [
+    "+995322434000"
+   ],
+   "emails": [
+    "info@kani.ge"
+   ],
+   "socials": [
+    "https://www.facebook.com/321505034686972"
+   ]
+  }
+ },
+ {
+  "name": "Theatre",
+  "category": "theatre_venue",
+  "address": "99 Akaki Beliashvili St",
+  "url": "https://teatri.ge/",
+  "known": {
+   "phones": [
+    "+995577000888"
+   ],
+   "emails": [
+    "info@teatri.ge"
+   ],
+   "socials": [
+    "https://www.facebook.com/111803745035213"
+   ]
+  }
+ },
+ {
+  "name": "Denta Plus Clinic",
+  "category": "dental_clinic",
+  "address": "38 Vazha Pshavela Ave",
+  "url": "http://www.dentaplus.ge/",
+  "known": {
+   "phones": [
+    "+995322395406"
+   ],
+   "emails": [
+    "info@dentaplus.ge"
+   ],
+   "socials": [
+    "https://www.facebook.com/118850058157630"
+   ]
+  }
+ }
+]
