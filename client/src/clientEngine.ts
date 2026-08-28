@@ -131,6 +131,43 @@ export interface RecentBusiness {
   ts: number;                          // when it completed (Date.now())
 }
 
+// ── Discovery progress (Discover Opportunities — full mode, no per-business enrichment) ──
+export interface DiscoveryProgress {
+  phase: 'osm' | 'categorize' | 'demand' | 'score' | 'ai' | 'done';
+  // OSM scanning
+  osmBatches: {
+    foodHealth:  { status: 'pending' | 'running' | 'done' | 'error'; found: number };
+    shopsRetail: { status: 'pending' | 'running' | 'done' | 'error'; found: number };
+    hotelsGyms:  { status: 'pending' | 'running' | 'done' | 'error'; found: number };
+    fallback?:   { status: 'pending' | 'running' | 'done' | 'error'; found: number };
+  };
+  totalFound: number;
+  // Demand signal collection per category (top-N)
+  demand: {
+    category: string;                  // category key
+    label: string;                     // human label
+    status: 'pending' | 'measuring' | 'done' | 'error';
+    score?: number;                    // demand score 0-100
+    sources?: string[];                // ['wikipedia','reddit','web'] actually measured
+  }[];
+  demandTotal: number;                 // total demand queries
+  demandDone: number;                  // completed
+  // Ranking leaderboard (top 5 so far)
+  topOpps: {
+    category: string;                  // category key — UI maps to color
+    categoryLabel: string;
+    existing: number;
+    gap: number;
+    score: number;
+  }[];
+  biggestGap?: { categoryLabel: string; gap: number; existing: number; score: number };
+  // AI analysis
+  ai: 'idle' | 'thinking' | 'done' | 'error';
+  aiPreview?: string;                  // first insight bullet preview
+  percent: number;                     // 0-100
+  recentQueries: string[];             // last few demand queries
+}
+
 export const CATEGORY_QUERIES: Record<string, { label: string }> = {
   cafe: { label: 'Cafe' },
   restaurant: { label: 'Restaurant' },
@@ -683,7 +720,8 @@ export async function queryBusinesses(
   onProgress?: (pct: number, msg: string) => void,
   categoryFilter?: string,
   skipEnrichment?: boolean,
-  onEnrichProgress?: (ep: EnrichmentProgress) => void
+  onEnrichProgress?: (ep: EnrichmentProgress) => void,
+  onDiscoverProgress?: (dp: DiscoveryProgress) => void
 ): Promise<Map<string, Business[]>> {
   const results = new Map<string, Business[]>();
   const south = lat - radiusMeters / 111000;
@@ -731,6 +769,34 @@ out center body;`;
 
   const allElements: any[] = [];
 
+  // ── Discovery progress tracker (only used by Discover Opportunities full mode) ──
+  const isFullMode = !categoryFilter || !CAT_OSM_FILTER[categoryFilter];
+  const _dp: DiscoveryProgress = {
+    phase: 'osm',
+    osmBatches: {
+      foodHealth:  { status: 'pending', found: 0 },
+      shopsRetail: { status: 'pending', found: 0 },
+      hotelsGyms:  { status: 'pending', found: 0 },
+    },
+    totalFound: 0,
+    demand: [],
+    demandTotal: 0,
+    demandDone: 0,
+    topOpps: [],
+    ai: 'idle',
+    percent: 0,
+    recentQueries: [],
+  };
+  function emitDP(overrides?: Partial<DiscoveryProgress>) {
+    if (!onDiscoverProgress) return;
+    onDiscoverProgress({ ..._dp, ...overrides,
+      osmBatches: { ..._dp.osmBatches },
+      demand: _dp.demand.slice(),
+      topOpps: _dp.topOpps.slice(),
+      recentQueries: _dp.recentQueries.slice(),
+    });
+  }
+
   // ── FOCUSED MODE: Single category query (much faster) ──
   if (categoryFilter && CAT_OSM_FILTER[categoryFilter]) {
     const filter = CAT_OSM_FILTER[categoryFilter];
@@ -766,22 +832,39 @@ out center body;`;
     }
   } else {
     // ── FULL MODE: All categories (for Discover Opportunities) ──
+    _dp.osmBatches.foodHealth.status = 'running';
+    emitDP({ percent: 8 });
     onProgress?.(10, 'Scanning food, healthcare & entertainment…');
     const d1 = await fetchOverpass(qFood, 90, (msg) => onProgress?.(15, msg));
     if (d1?.elements) allElements.push(...d1.elements);
+    _dp.osmBatches.foodHealth = { status: d1 ? 'done' : 'error', found: allElements.length };
+    _dp.totalFound = allElements.length;
+    emitDP({ percent: 22 });
 
     await wait(1500);
+    _dp.osmBatches.shopsRetail.status = 'running';
+    emitDP({ percent: 25 });
     onProgress?.(30, 'Scanning shops & retail…');
     const d2 = await fetchOverpass(qShops, 90, (msg) => onProgress?.(35, msg));
     if (d2?.elements) allElements.push(...d2.elements);
+    _dp.osmBatches.shopsRetail = { status: d2 ? 'done' : 'error', found: allElements.length - _dp.osmBatches.foodHealth.found };
+    _dp.totalFound = allElements.length;
+    emitDP({ percent: 38 });
 
     await wait(1500);
+    _dp.osmBatches.hotelsGyms.status = 'running';
+    emitDP({ percent: 42 });
     onProgress?.(50, 'Scanning hotels, gyms & services…');
     const d3 = await fetchOverpass(qOther, 60, (msg) => onProgress?.(55, msg));
     if (d3?.elements) allElements.push(...d3.elements);
+    _dp.osmBatches.hotelsGyms = { status: d3 ? 'done' : 'error', found: allElements.length - _dp.osmBatches.foodHealth.found - _dp.osmBatches.shopsRetail.found };
+    _dp.totalFound = allElements.length;
+    emitDP({ percent: 55 });
 
     // ── Tier 2: Fallback ──
     if (allElements.length === 0) {
+      _dp.osmBatches.fallback = { status: 'running', found: 0 };
+      emitDP({ percent: 60 });
       onProgress?.(60, 'Retrying with minimal query…');
       const qMin = `[out:json][timeout:60];
 (
@@ -793,6 +876,9 @@ out center body;`;
 out center body;`;
       const d4 = await fetchOverpass(qMin, 60, (msg) => onProgress?.(65, msg));
       if (d4?.elements) allElements.push(...d4.elements);
+      _dp.osmBatches.fallback = { status: d4 ? 'done' : 'error', found: allElements.length };
+      _dp.totalFound = allElements.length;
+      emitDP({ percent: 65 });
     }
   }
 
@@ -2962,6 +3048,127 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
 // Uses Pollinations (free, keyless LLM) for genuine model-generated
 // analysis. Falls back to a deterministic data brief (labeled as such by
 // the caller) — the two paths are visually distinguished in the UI.
+// ─── Discovery phases (Demand signals → Scoring → AI) ──────────
+// Streams DiscoveryProgress updates to onProgress so the UI can render
+// each phase in real time. Returns the final opportunity list.
+export async function runDiscoveryPhases(
+  businesses: Map<string, Business[]>,
+  population: number,
+  cityName: string,
+  countryName: string,
+  onProgress?: (dp: DiscoveryProgress) => void,
+  abortSignal?: AbortSignal,
+): Promise<{ opportunities: OpportunityResult[]; demandSignals: Map<string, DemandSignal>; aiInsights: string }> {
+  const isCancelled = () => abortSignal?.aborted ?? false;
+
+  // Identify top categories by existing business count
+  const topCats = Array.from(businesses.entries())
+    .sort((a, b) => b[1].length - a[1].length)
+    .slice(0, 6)
+    .map(([cat]) => cat);
+
+  const _dp: DiscoveryProgress = {
+    phase: 'demand',
+    osmBatches: {
+      foodHealth:  { status: 'done', found: 0 },
+      shopsRetail: { status: 'done', found: 0 },
+      hotelsGyms:  { status: 'done', found: 0 },
+    },
+    totalFound: Array.from(businesses.values()).reduce((s, a) => s + a.length, 0),
+    demand: topCats.map(c => ({ category: c, label: getCategoryLabel(c), status: 'pending' as const })),
+    demandTotal: topCats.length,
+    demandDone: 0,
+    topOpps: [],
+    ai: 'idle',
+    percent: 70,
+    recentQueries: [],
+  };
+  function emitDP(overrides?: Partial<DiscoveryProgress>) {
+    if (!onProgress) return;
+    onProgress({ ..._dp, ...overrides,
+      osmBatches: { ..._dp.osmBatches },
+      demand: _dp.demand.slice(),
+      topOpps: _dp.topOpps.slice(),
+      recentQueries: _dp.recentQueries.slice(),
+    });
+  }
+  emitDP();
+
+  // Phase B: measure demand signals in parallel (incremental)
+  const signals = new Map<string, DemandSignal>();
+  const catLabelFor = (cat: string) => getCategoryLabel(cat);
+  await Promise.all(topCats.map(async (cat, i) => {
+    if (isCancelled()) return;
+    _dp.demand[i] = { ..._dp.demand[i], status: 'measuring' };
+    const label = catLabelFor(cat);
+    const q = `${label} ${cityName}`;
+    _dp.recentQueries = [`[demand] ${q}`, ..._dp.recentQueries].slice(0, 8);
+    emitDP();
+    try {
+      const sig = await getDemandSignals(label, cityName);
+      signals.set(cat, sig);
+      const sources: string[] = [];
+      if (sig.wikipedia > 0) sources.push('wikipedia');
+      if (sig.reddit > 0) sources.push('reddit');
+      if (sig.webSearch > 0) sources.push('web');
+      _dp.demand[i] = { category: cat, label, status: 'done', score: sig.score, sources };
+    } catch {
+      _dp.demand[i] = { category: cat, label, status: 'error' };
+    }
+    _dp.demandDone++;
+    emitDP({ percent: 70 + Math.round(15 * _dp.demandDone / Math.max(_dp.demandTotal, 1)) });
+  }));
+  if (isCancelled()) return { opportunities: [], demandSignals: new Map(), aiInsights: '' };
+
+  // Phase C: compute opportunity scores (incremental — emit after each)
+  _dp.phase = 'score';
+  emitDP({ percent: 86 });
+  const opportunities = computeOpportunities(businesses, population, signals);
+
+  // Top-5 leaderboard + biggest-gap callout
+  const sorted = [...opportunities].sort((a, b) => b.score - a.score);
+  _dp.topOpps = sorted.slice(0, 5).map(o => ({
+    category: o.category,
+    categoryLabel: o.categoryLabel,
+    existing: o.existing,
+    gap: o.gap ?? 0,
+    score: o.score,
+  }));
+  const gapSorted = [...opportunities].filter(o => (o.gap ?? 0) > 0).sort((a, b) => (b.gap ?? 0) - (a.gap ?? 0));
+  const biggest = gapSorted[0];
+  if (biggest) {
+    _dp.biggestGap = {
+      categoryLabel: biggest.categoryLabel,
+      gap: biggest.gap ?? 0,
+      existing: biggest.existing,
+      score: biggest.score,
+    };
+  }
+  emitDP({ percent: 90 });
+
+  // Phase D: AI analysis
+  _dp.phase = 'ai';
+  _dp.ai = 'thinking';
+  emitDP({ percent: 92 });
+  let aiInsights = '';
+  try {
+    const topOpps = opportunities.slice(0, 8).map(o => ({
+      category: o.category,
+      label: o.categoryLabel,
+      existing: o.existing,
+      gap: o.gap ?? 0,
+      score: o.score,
+    }));
+    aiInsights = await getAIAnalysis(cityName, countryName, topOpps, population);
+    _dp.ai = 'done';
+    _dp.aiPreview = aiInsights ? aiInsights.split('\n')[0]?.replace(/^[^:]+:\s*/, '').slice(0, 140) || 'Analysis complete' : 'Analysis complete';
+  } catch {
+    _dp.ai = 'error';
+  }
+  emitDP({ percent: 100, phase: 'done' });
+  return { opportunities, demandSignals: signals, aiInsights };
+}
+
 export async function getAIAnalysis(
   cityName: string,
   countryName: string,

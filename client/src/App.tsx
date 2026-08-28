@@ -11,6 +11,8 @@ import {
   type Business,
   type DemandSignal,
   type OpportunityResult,
+  type DiscoveryProgress,
+  runDiscoveryPhases,
   type EnrichmentProgress,
   setScanContext, buildScanContext,
 } from './clientEngine';
@@ -128,6 +130,7 @@ export default function App() {
 
   const [businesses, setBusinesses] = useState<Map<string, Business[]>>(new Map());
   const [opportunities, setOpportunities] = useState<OpportunityResult[]>([]);
+  const [discoverProgress, setDiscoverProgress] = useState<DiscoveryProgress | null>(null);
   const [demandSignals, setDemandSignals] = useState<Map<string, DemandSignal>>(new Map());
   const [selectedOppCategory, setSelectedOppCategory] = useState<string | null>(null);
   const [showAllOpps, setShowAllOpps] = useState(false);
@@ -406,6 +409,7 @@ export default function App() {
     setSelectedOppCategory(null);
     setShowAllOpps(false);
     setEnrichProgress(null);
+    setDiscoverProgress(null);
 
     try {
       // Native-language context for this city (helps contact discovery)
@@ -413,7 +417,9 @@ export default function App() {
       const biz = await queryBusinesses(
         selectedCity.lat, selectedCity.lon, 10000,
         (pct, msg) => { setProgress(pct); setLoadingStage(msg); },
-        undefined, true
+        undefined, true,
+        undefined,
+        (dp) => setDiscoverProgress(dp),
       );
       setBusinesses(biz);
       setProgress(40);
@@ -424,34 +430,20 @@ export default function App() {
         return;
       }
 
-      setLoadingStage('Analyzing demand signals…');
-      const topCats = Array.from(biz.entries())
-        .sort((a, b) => b[1].length - a[1].length)
-        .slice(0, 6)
-        .map(([cat]) => cat);
-
-      const signals = new Map<string, DemandSignal>();
-      const demResults = await Promise.all(
-        topCats.map(cat => getDemandSignals(getCategoryLabel(cat), selectedCity!.name))
-      );
-      topCats.forEach((cat, i) => signals.set(cat, demResults[i]));
-      setDemandSignals(signals);
-      setProgress(80);
-
-      setLoadingStage('Computing opportunity scores…');
-      const opps = computeOpportunities(biz, selectedCity.population || 0, signals);
+      // Run demand signals + scoring + AI in one streamed pipeline.
+      // Each phase emits DiscoveryProgress updates for the live feed UI.
+      setLoadingStage('Measuring demand & computing opportunities…');
+      const { opportunities: opps, demandSignals: signals, aiInsights } =
+        await runDiscoveryPhases(
+          biz, selectedCity.population || 0,
+          selectedCity.name, selectedCity.country,
+          (dp) => setDiscoverProgress(dp),
+          ac.signal,
+        );
+      if (ac.signal.aborted) return;
       setOpportunities(opps);
-      setProgress(90);
-
-      setLoadingStage('AI analyzing opportunities…');
-      try {
-        const topOpps = opps.slice(0, 8).map(o => ({
-          category: o.category, label: o.categoryLabel,
-          existing: o.existing, gap: o.gap, score: o.score,
-        }));
-        const aiResult = await getAIAnalysis(selectedCity.name, selectedCity.country, topOpps, selectedCity.population || 0);
-        setAiInsights(aiResult);
-      } catch {}
+      setDemandSignals(signals);
+      if (aiInsights) setAiInsights(aiInsights);
       setProgress(100);
     } catch (e: any) {
       if (e.message !== 'Cancelled') setError(e.message || 'Analysis failed');
@@ -1002,6 +994,201 @@ export default function App() {
                       </div>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* ── Real-time Discovery Phases (Discover Opportunities full mode) ── */}
+              {discoverProgress && discoverProgress.percent > 0 && (
+                <div className="mt-3 overflow-hidden rounded-xl border border-cyan-500/20 bg-gradient-to-br from-cyan-500/[0.04] via-card/90 to-emerald-500/[0.04] backdrop-blur-sm">
+
+                  {/* ── Top bar ── */}
+                  <div className="flex items-center gap-3 border-b border-border/60 px-3 py-2.5">
+                    <div className="relative h-9 w-9 shrink-0">
+                      <div className="absolute inset-0 rounded-full bg-gradient-to-br from-cyan-500/30 to-emerald-500/30 animate-pulse" />
+                      <div className="absolute inset-0 rounded-full border border-cyan-400/40 animate-[ping_2.5s_linear_infinite]" />
+                      <div className="absolute inset-1.5 rounded-full border border-cyan-300/30 animate-[ping_2.5s_linear_infinite_0.4s]" />
+                      <div className="absolute inset-0 flex items-center justify-center text-base">🛰️</div>
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate text-xs font-semibold text-foreground">
+                          {discoverProgress.phase === 'osm' ? 'Phase 1: OpenStreetMap scanning' :
+                           discoverProgress.phase === 'demand' ? 'Phase 2: Demand signals' :
+                           discoverProgress.phase === 'score' ? 'Phase 3: Scoring opportunities' :
+                           discoverProgress.phase === 'ai' ? 'Phase 4: AI analysis' :
+                           'Discovery complete'}
+                        </span>
+                        <span className="shrink-0 rounded-full bg-cyan-500/15 px-1.5 py-0.5 text-[9px] font-medium text-cyan-300">
+                          {discoverProgress.totalFound} businesses
+                        </span>
+                      </div>
+                      <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-secondary/60">
+                        <div className="h-full rounded-full bg-gradient-to-r from-cyan-500 via-emerald-500 to-amber-500 transition-all duration-300" style={{width: `${discoverProgress.percent}%`}} />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* ── Three columns: OSM batches · demand signals · live ranking ── */}
+                  <div className="grid gap-3 px-3 py-2.5 lg:grid-cols-3">
+
+                    {/* Column A: OSM scanning batches */}
+                    <div className="space-y-1.5">
+                      <div className="text-[9px] uppercase tracking-wider text-muted-foreground/70">OSM batches</div>
+                      {([
+                        { key: 'foodHealth',  label: 'Food / Health / Entertainment', icon: '🍽️' },
+                        { key: 'shopsRetail', label: 'Shops & Retail',                  icon: '🛍️' },
+                        { key: 'hotelsGyms',  label: 'Hotels / Gyms / Services',        icon: '🏨' },
+                        ...(discoverProgress.osmBatches.fallback ? [{ key: 'fallback', label: 'Fallback retry', icon: '🔁' }] : []),
+                      ] as const).map(({ key, label, icon }) => {
+                        const b = discoverProgress.osmBatches[key as keyof typeof discoverProgress.osmBatches];
+                        if (!b) return null;
+                        const isRunning = b.status === 'running';
+                        const isDone = b.status === 'done';
+                        const isError = b.status === 'error';
+                        return (
+                          <div key={key} className={`flex items-center gap-2 rounded-md border px-2 py-1.5 transition-all ${
+                            isRunning ? 'border-cyan-500/40 bg-cyan-500/10' :
+                            isDone ? 'border-emerald-500/30 bg-emerald-500/5' :
+                            isError ? 'border-rose-500/30 bg-rose-500/5' :
+                            'border-border/60 bg-background/30'
+                          }`}>
+                            <span className="text-sm shrink-0">{icon}</span>
+                            <div className="min-w-0 flex-1">
+                              <div className={`truncate text-[11px] font-medium ${
+                                isRunning ? 'text-cyan-200' : 'text-foreground/90'
+                              }`}>{label}</div>
+                              <div className="text-[10px] text-muted-foreground/70 tabular-nums">
+                                {b.status === 'pending' ? 'waiting…' :
+                                 b.status === 'running' ? 'scanning…' :
+                                 b.status === 'done'    ? `+${b.found} found` :
+                                                          'failed'}
+                              </div>
+                            </div>
+                            {isRunning && <span className="inline-block h-2 w-2 rounded-full bg-cyan-400 animate-pulse shrink-0" />}
+                            {isDone && <span className="text-emerald-400 text-xs shrink-0">✓</span>}
+                            {isError && <span className="text-rose-400 text-xs shrink-0">✕</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Column B: demand signals */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <div className="text-[9px] uppercase tracking-wider text-muted-foreground/70">Demand signals</div>
+                        <div className="text-[9px] text-muted-foreground/60 tabular-nums">
+                          {discoverProgress.demandDone}/{discoverProgress.demandTotal}
+                        </div>
+                      </div>
+                      <div className="max-h-32 overflow-y-auto rounded-lg border border-border/50 bg-background/40 p-1.5 space-y-1 livefeed-scroll">
+                        {discoverProgress.demand.length === 0 && (
+                          <div className="flex h-12 items-center justify-center text-[10px] text-muted-foreground/60">
+                            starting measurements…
+                          </div>
+                        )}
+                        {discoverProgress.demand.map((d, i) => (
+                          <div key={i} className={`flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] transition-all ${
+                            d.status === 'measuring' ? 'bg-cyan-500/10 text-cyan-200' :
+                            d.status === 'done'      ? 'bg-emerald-500/5 text-foreground/90' :
+                            d.status === 'error'     ? 'bg-rose-500/5 text-rose-300/80' :
+                                                        'bg-background/20 text-muted-foreground/60'
+                          }`}>
+                            {d.status === 'measuring' && <span className="inline-block h-1.5 w-1.5 rounded-full bg-cyan-400 animate-pulse shrink-0" />}
+                            {d.status === 'done' && <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />}
+                            {d.status === 'pending' && <span className="inline-block h-1.5 w-1.5 rounded-full bg-muted-foreground/30 shrink-0" />}
+                            <span className="min-w-0 flex-1 truncate" title={d.label}>{d.label}</span>
+                            {d.sources && d.sources.length > 0 && (
+                              <span className="hidden sm:flex gap-0.5 shrink-0 text-[9px]">
+                                {d.sources.includes('wikipedia') && <span title="Wikipedia" className="opacity-70">📚</span>}
+                                {d.sources.includes('reddit')    && <span title="Reddit"    className="opacity-70">💬</span>}
+                                {d.sources.includes('web')       && <span title="Web"       className="opacity-70">🌐</span>}
+                              </span>
+                            )}
+                            {d.score != null && (
+                              <span className={`shrink-0 tabular-nums font-bold ${
+                                d.score > 50 ? 'text-emerald-400' :
+                                d.score > 20 ? 'text-amber-400' :
+                                                'text-muted-foreground'
+                              }`}>{d.score}</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Column C: live ranking leaderboard + biggest-gap callout */}
+                    <div className="space-y-1.5">
+                      <div className="text-[9px] uppercase tracking-wider text-muted-foreground/70">Live ranking</div>
+                      {discoverProgress.biggestGap && (
+                        <div className="overflow-hidden rounded-lg border border-amber-500/30 bg-gradient-to-br from-amber-500/10 to-orange-500/5 p-2 animate-[slidein_0.4s_ease-out]">
+                          <div className="flex items-center gap-1 text-[9px] uppercase tracking-wider text-amber-300/90">
+                            <span>🔥</span><span>Biggest gap</span>
+                          </div>
+                          <div className="mt-0.5 truncate text-xs font-bold text-foreground">{discoverProgress.biggestGap.categoryLabel}</div>
+                          <div className="mt-0.5 flex items-center gap-2 text-[10px] text-muted-foreground tabular-nums">
+                            <span className="text-amber-300">+{discoverProgress.biggestGap.gap}</span>
+                            <span>expected gap</span>
+                            <span className="ml-auto rounded-full bg-amber-500/15 px-1.5 py-px text-amber-300">
+                              score {discoverProgress.biggestGap.score}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+                      <div className="max-h-32 overflow-y-auto rounded-lg border border-border/50 bg-background/40 p-1.5 space-y-1 livefeed-scroll">
+                        {discoverProgress.topOpps.length === 0 && (
+                          <div className="flex h-12 items-center justify-center text-[10px] text-muted-foreground/60">
+                            waiting for scores…
+                          </div>
+                        )}
+                        {discoverProgress.topOpps.map((opp, i) => (
+                          <div key={opp.categoryLabel}
+                            className="flex items-center gap-1.5 rounded-md bg-background/30 px-2 py-1 text-[11px] animate-[slidein_0.3s_ease-out]"
+                            style={{ animationDelay: `${i * 60}ms` }}
+                          >
+                            <span className="w-1.5 h-1.5 shrink-0 rounded-full" style={{ background: (CAT_COLORS as Record<string,string>)[opp.category] || '#94a3b8' }} />
+                            <span className="min-w-0 flex-1 truncate text-foreground/90">{opp.categoryLabel}</span>
+                            <span className="shrink-0 text-[10px] text-muted-foreground/70 tabular-nums">{opp.existing}</span>
+                            <span className={`shrink-0 text-[10px] font-bold tabular-nums ${opp.score >= 60 ? 'text-emerald-400' : opp.score >= 40 ? 'text-amber-400' : 'text-muted-foreground'}`}>
+                              {opp.score}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* ── Bottom: AI status + recent queries ── */}
+                  <div className="flex flex-wrap items-center gap-2 border-t border-border/60 px-3 py-2">
+                    {discoverProgress.ai === 'thinking' && (
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-violet-500/15 px-2 py-0.5 text-[10px] text-violet-300">
+                        <span className="inline-block h-1.5 w-1.5 rounded-full bg-violet-400 animate-pulse" />
+                        AI thinking…
+                      </span>
+                    )}
+                    {discoverProgress.ai === 'done' && discoverProgress.aiPreview && (
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-violet-500/10 px-2 py-0.5 text-[10px] text-violet-200/90 max-w-full">
+                        <span>🧠</span>
+                        <span className="truncate max-w-[420px]" title={discoverProgress.aiPreview}>
+                          {discoverProgress.aiPreview}
+                        </span>
+                      </span>
+                    )}
+                    {discoverProgress.ai === 'error' && (
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-300">
+                        ⚠️ AI unavailable — using statistical insights
+                      </span>
+                    )}
+                    {discoverProgress.recentQueries.length > 0 && (
+                      <div className="flex flex-wrap gap-1 ml-auto">
+                        {discoverProgress.recentQueries.slice(0, 3).map((q, i) => (
+                          <span key={i} className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-background/40 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                            <span className="text-cyan-400">⌕</span>
+                            <span className="truncate max-w-[260px]" title={q}>{q}</span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
