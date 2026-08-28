@@ -1,10 +1,10 @@
-# 🌊 Blue Ocean v6.2.0
+# 🌊 Blue Ocean v6.4.0
 
 **Find What Your City Is Missing.**
 
 Discover underserved industries, compare business supply across similar cities, and uncover Blue Ocean opportunities using global open location data — all from your browser with zero backend.
 
-![Version](https://img.shields.io/badge/version-6.2.0-blue)
+![Version](https://img.shields.io/badge/version-6.4.0-blue)
 ![React](https://img.shields.io/badge/React-18-61DAFB)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.4-3178C6)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -12,6 +12,25 @@ Discover underserved industries, compare business supply across similar cities, 
 ## 🚀 Live Demo
 
 **https://devso3939.github.io/Blue-Ocean/**
+
+## 🆕 What's new in v6.4.0 (engine & parsing update)
+
+**Parsing / enrichment engine:**
+- Contact extraction hardened against real-world junk: dates, IP addresses, unix timestamps and coordinate floats no longer parse as phone numbers; image/file names no longer parse as emails; URL-encoded `tel:` values are decoded (verified against 42+ live business websites, 81–98% contact-extraction success)
+- Domain guessing now **verifies the page mentions the business** before attaching a website (no more cybersquatter sites)
+- New keyless data sources: **Wikidata SPARQL** official contacts, **Wayback Machine** recovery for dead websites, **Jina Reader** page fetching; dead 2026 services handled (allorigins demoted, DDG HTML avoided)
+- Overpass mirrors diversified (independent rate-limit pools) + loud rate-limit errors instead of silent zero results
+
+**Honesty / no fake data:**
+- No fabricated populations: without a known population, gap metrics are disabled (shown as "—") and an amber warning appears — never invented 500,000
+- "AI analysis" now uses a real free LLM (Pollinations); deterministic fallbacks are labeled `[data-derived]`, model output `[AI]`
+- Wikipedia demand signals use a rolling 12-month window (was frozen in time); failed demand fetches no longer drag scores
+- Methodology and footer text now accurately describe the scoring
+
+**Platform:**
+- CI compiles all three apps + backend unit tests on every push; **CodeQL security scanning** added
+- Backend: jobs survive restarts (SQLite persistence), `.env` loading fixed, exports auto-cleaned after 24h
+- Next.js frontend deep links work under static export + SPA fallback
 
 ---
 
