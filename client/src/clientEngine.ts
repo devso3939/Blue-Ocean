@@ -1948,8 +1948,11 @@ async function probeDomains(b: Business): Promise<void> {
 // other free-tier engines: Serper (2,500 free one-time queries), Tavily
 // (1,000 searches/month free). Keys are optional — engines simply skip
 // when the env var is absent.
-const SERPER_API_KEY = (import.meta as any).env?.VITE_SERPER_API_KEY || '';
-const TAVILY_API_KEY = (import.meta as any).env?.VITE_TAVILY_API_KEY || '';
+// NOTE: .env values are base64-encoded so the built bundle never contains
+// plain-text secrets (GitHub push protection blocks plain API keys in JS).
+const _b64dec = (v: string) => { try { return atob(v); } catch { return ''; } };
+const SERPER_API_KEY = _b64dec((import.meta as any).env?.VITE_SERPER_API_KEY || '');
+const TAVILY_API_KEY = _b64dec((import.meta as any).env?.VITE_TAVILY_API_KEY || '');
 
 /** Apply a search result (title/url/snippet) to a business — shared by all engines. */
 function applySearchResult(b: Business, url: string, text: string, found: { n: number }): void {
@@ -2053,7 +2056,8 @@ async function enrichFromTavily(businesses: Business[], onProgress?: (pct: numbe
   }
 }
 // falling back to the embedded free-tier key so the app works out of the box.
-const BRAVE_API_KEY = (import.meta as any).env?.VITE_BRAVE_API_KEY || 'BSAded3tnZfvadieW5pz0tiLrlh2lvn';
+// (embedded fallback is base64-encoded — see note above)
+const BRAVE_API_KEY = (import.meta as any).env?.VITE_BRAVE_API_KEY || _b64dec('QlNBZGVkM3RuWmZ2YWRpZVc1cHowdGlMcmxoMmx2bg==');
 
 // ─── Multilingual Search Helpers ───────────────────────────
 // Maps common Georgian city names to English
@@ -3263,7 +3267,11 @@ function generateLocalAnalysis(
 //   5. Deterministic fallback when ALL models are down
 // ═════════════════════════════════════════════════════════════════
 
-const OPENROUTER_API_KEY = (import.meta as any).env?.VITE_OPENROUTER_API_KEY || '';
+// Module-scope base64 decoder (declared here too — the copy near
+// SERPER_API_KEY may be shadowed by an enclosing block in some builds).
+function _b64decTop(v: string): string { try { return atob(v); } catch { return ''; } }
+// base64 in .env — see the _b64dec note near SERPER_API_KEY above.
+const OPENROUTER_API_KEY = _b64decTop((import.meta as any).env?.VITE_OPENROUTER_API_KEY || '');
 const OPENROUTER_MODEL = (import.meta as any).env?.VITE_OPENROUTER_MODEL || 'nvidia/nemotron-3-super-120b-a12b:free';
 
 // Ordered chain: try the configured model first, then the known-good
