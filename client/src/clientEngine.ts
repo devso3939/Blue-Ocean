@@ -426,13 +426,23 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
     return new Response('', { status: 0, statusText: 'CORS unavailable' });
   }
 
-  // 3) Try cors.sh (working as of 2026)
+  // 3) Try cors.sh (working as of 2026, keyless)
   try {
     const r = await fetch('https://cors.sh/' + url, { headers, signal: AbortSignal.timeout(5000) });
     if (r.ok) return r;
   } catch {}
 
-  // 4) Try allorigins (flaky, last resort)
+  // 4) Jina Reader (keyless, returns page text/markdown — good for contact
+  // extraction; works from real browser sessions)
+  try {
+    const r = await fetch('https://r.jina.ai/' + url, { headers, signal: AbortSignal.timeout(12000) });
+    if (r.ok) {
+      const text = await r.text();
+      if (text && text.length > 100) return new Response(text, { status: 200, headers: { 'Content-Type': 'text/plain' } });
+    }
+  } catch {}
+
+  // 5) allorigins (demoted to last resort: 5xx/timeout failures observed 2026)
   try {
     const r = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(url), { headers, signal: AbortSignal.timeout(5000) });
     if (r.ok) {
@@ -1581,6 +1591,9 @@ async function searchBing(query: string): Promise<{title: string; url: string; s
     });
     if (!r.ok) return [];
     const html = await r.text();
+    // Challenge/benign page detection: Bing occasionally serves an Arkose
+    // challenge instead of results. b_algo==0 + challenge markers => no data.
+    if (!/<li class="b_algo"/i.test(html) && /akchal|challenge|verify|captcha/i.test(html)) return [];
     const results: {title: string; url: string; snippet: string}[] = [];
     // Extract search result blocks (li.b_algo)
     const blocks = html.match(/<li class="b_algo"[^>]*>[\s\S]*?<\/li>/gi) || [];
@@ -1653,6 +1666,65 @@ async function searchDDGLite(query: string): Promise<{title: string; url: string
     }
     return results.slice(0, 10);
   } catch { return []; }
+}
+
+// Wikidata SPARQL lookup: free, keyless, CORS-native. Finds official email/
+// phone/website for NOTABLE businesses (chains, hotels, landmarks). Queries
+// are serialized (anonymous limit: 1 concurrent).
+let _wikidataQueue: Promise<void> = Promise.resolve();
+async function wikidataContacts(b: Business): Promise<void> {
+  if (!b.website || (b.email && b.phone)) return;
+  let host = '';
+  try { host = new URL(b.website).hostname.replace(/^www\./, ''); } catch { return; }
+  if (!host) return;
+  // STRSTARTS over the 4 URL forms (verified working on WDQS; CONTAINS and
+  // REGEXP trip this Blazegraph build's parser). UA is required (403 without).
+  const h = host.replace(/[\\"]/g, '');
+  const sparql = 'SELECT ?email ?phone WHERE { ?item wdt:P856 ?site . ' +
+    'FILTER(STRSTARTS(STR(?site), "https://www.' + h + '") || STRSTARTS(STR(?site), "https://' + h + '") || ' +
+    'STRSTARTS(STR(?site), "http://www.' + h + '") || STRSTARTS(STR(?site), "http://' + h + '")) . ' +
+    'OPTIONAL { ?item wdt:P968 ?email } OPTIONAL { ?item wdt:P1329 ?phone } } LIMIT 1';
+  const run = async () => {
+    try {
+      const r = await fetch('https://query.wikidata.org/sparql?query=' + encodeURIComponent(sparql), {
+        headers: { Accept: 'application/sparql-results+json', 'User-Agent': 'BlueOcean/6.2 (market-gap research demo; contact@blueocean.app)' },
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!r.ok) return;
+      const data = await r.json();
+      const row = data?.results?.bindings?.[0];
+      if (!row) return;
+      if (!b.email && row.email?.value) {
+        const e = String(row.email.value).replace(/^mailto:/, '');
+        if (!_EMAIL_FILE_RE.test(e) && !_EMAIL_JUNK_RE.test(e)) b.email = e;
+      }
+      if (!b.phone && row.phone?.value) {
+        const p = String(row.phone.value);
+        if (plausiblePhone(p)) b.phone = p;
+      }
+    } catch { /* sparse coverage / timeouts are normal */ }
+  };
+  _wikidataQueue = _wikidataQueue.then(run, run);
+  await _wikidataQueue;
+}
+
+// Wayback Machine: recover contact data for DEAD websites. CORS-native
+// availability API, snapshot fetch routed through corsFetch.
+async function waybackContacts(b: Business): Promise<void> {
+  if (!b.website || (b.email && b.phone)) return;
+  try {
+    const av = await fetch('https://archive.org/wayback/available?url=' + encodeURIComponent(b.website), {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!av.ok) return;
+    const j = await av.json();
+    const snap = j?.archived_snapshots?.closest?.url;
+    if (!snap || !j.archived_snapshots.closest.available) return;
+    const r = await corsFetch(snap, { signal: AbortSignal.timeout(15000) });
+    if (!r.ok) return;
+    const html = await r.text();
+    if (html && html.length > 200) extractFromHtmlModule(html, b);
+  } catch { /* best effort */ }
 }
 
 // Domain probing - check if common domain patterns exist for a business
@@ -2544,6 +2616,42 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     _ep.engines.find(e => e.name === 'Yandex')!.status = 'done'; emitEP();
   }
 
+  // ── Pass 4: Verification (keyless 2026 additions) ──
+  // Wikidata SPARQL: official contacts for notable businesses (chains, hotels)
+  const needVerify = allBizList.filter(b => b.website && (!b.email || !b.phone));
+  if (needVerify.length > 0) {
+    _ep.activePass = 'Pass 4: Verify (Wikidata + Wayback)'; _ep.passNumber = 4; _ep.percent = 96;
+    const wdEngine: EngineStatus = { name: 'Wikidata', icon: '🔗', status: 'active', found: 0 };
+    _ep.engines.push(wdEngine); emitEP();
+    const maxVerify = Math.min(needVerify.length, 24);
+    for (let i4 = 0; i4 < maxVerify; i4 += _BATCH) {
+      if (isCancelled()) break;
+      const batch4 = needVerify.slice(i4, i4 + _BATCH);
+      await Promise.all(batch4.map(async (b) => {
+        const before = b.email + '|' + b.phone;
+        await wikidataContacts(b);
+        if (b.email + '|' + b.phone !== before) wdEngine.found++;
+      }));
+      if (i4 + _BATCH < maxVerify) await wait(1500);
+      emitEP();
+    }
+    wdEngine.status = 'done'; emitEP();
+    // Wayback: recover contacts for dead/unreachable websites
+    const deadSites = allBizList.filter(b => b.website && !b.email && !b.phone && !b.facebook).slice(0, 15);
+    if (deadSites.length > 0) {
+      const wbEngine: EngineStatus = { name: 'Wayback', icon: '🕰️', status: 'active', found: 0 };
+      _ep.engines.push(wbEngine); emitEP();
+      for (const b of deadSites) {
+        if (isCancelled()) break;
+        const before = b.email + '|' + b.phone;
+        await waybackContacts(b);
+        if (b.email + '|' + b.phone !== before) wbEngine.found++;
+        emitEP();
+      }
+      wbEngine.status = 'done'; emitEP();
+    }
+  }
+
   _ep.activePass = 'Complete'; _ep.percent = 100;
   _ep.engines.forEach(e => { if (e.status === 'active') e.status = 'done'; });
   _ep.engines.find(e => e.name === 'Website Scraper')!.status = 'done';
@@ -2825,6 +2933,10 @@ function plausiblePhone(p: string): boolean {
   if (/^1\d{9,12}$/.test(digits) && !t.startsWith('+')) return false;
   return true;
 }
+
+// Junk emails: asset files and placeholder addresses that regexes pick up
+const _EMAIL_FILE_RE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
+const _EMAIL_JUNK_RE = /example\.com|noreply|no-reply|donotreply|wixpress|sentry\.io|cloudflare|privacy|abuse@|postmaster@/i;
 
 // ─── Test-only exports (corsFetch is module-scope; extractFromHtml is
 // published inside queryBusinesses, which owns its scope) ───
