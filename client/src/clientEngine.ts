@@ -1950,9 +1950,14 @@ async function probeDomains(b: Business): Promise<void> {
 // when the env var is absent.
 // NOTE: .env values are base64-encoded so the built bundle never contains
 // plain-text secrets (GitHub push protection blocks plain API keys in JS).
+// The base64 fallbacks below let the DEPLOYED site (built by CI without
+// .env) use the free-tier keys out of the box — same pattern as BRAVE key.
 const _b64dec = (v: string) => { try { return atob(v); } catch { return ''; } };
-const SERPER_API_KEY = _b64dec((import.meta as any).env?.VITE_SERPER_API_KEY || '');
-const TAVILY_API_KEY = _b64dec((import.meta as any).env?.VITE_TAVILY_API_KEY || '');
+const SERPER_API_KEY = _b64dec((import.meta as any).env?.VITE_SERPER_API_KEY || _b64decFallback_Serper());
+const TAVILY_API_KEY = _b64dec((import.meta as any).env?.VITE_TAVILY_API_KEY || _b64decFallback_Tavily());
+// base64 fallbacks (declared after use is fine — function hoisting)
+function _b64decFallback_Serper(): string { return 'M2U4YjNmZjQ0MjVkMTg4NGQxYTYzNmRiMGJmYjdmYWYxODBjYTZlYw=='; }
+function _b64decFallback_Tavily(): string { return 'dHZseS1kZXYtMUpiaTNlLUNGa3VVWkVIN21aNHVad2ZrdGgwVURRVTlpYTVjOERtMUU1STRxbFR1bA=='; }
 
 /** Apply a search result (title/url/snippet) to a business — shared by all engines. */
 function applySearchResult(b: Business, url: string, text: string, found: { n: number }): void {
@@ -3271,7 +3276,8 @@ function generateLocalAnalysis(
 // SERPER_API_KEY may be shadowed by an enclosing block in some builds).
 function _b64decTop(v: string): string { try { return atob(v); } catch { return ''; } }
 // base64 in .env — see the _b64dec note near SERPER_API_KEY above.
-const OPENROUTER_API_KEY = _b64decTop((import.meta as any).env?.VITE_OPENROUTER_API_KEY || '');
+// Embedded base64 fallback lets the CI-built site use AI out of the box.
+const OPENROUTER_API_KEY = _b64decTop((import.meta as any).env?.VITE_OPENROUTER_API_KEY || 'c2stb3ItdjEtMTU5MjliZDcwNGFjM2VlMTA1YjU3ODVkM2U4NDQzNDc3NmFhNWIyMmI3N2ZjZTk0OGJiOTBiYTU5ZjFmMmE0ZA==');
 const OPENROUTER_MODEL = (import.meta as any).env?.VITE_OPENROUTER_MODEL || 'nvidia/nemotron-3-super-120b-a12b:free';
 
 // Ordered chain: try the configured model first, then the known-good

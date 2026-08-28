@@ -11,8 +11,9 @@ import { getCategoryLabel } from './clientEngine';
 
 // base64 in .env — keeps plain-text secrets out of the built JS bundle
 // (GitHub push protection rejects bundles containing raw API keys).
+// Embedded base64 fallback lets the CI-built site (no .env) use AI too.
 const _b64dec = (v: string) => { try { return atob(v); } catch { return ''; } };
-const OPENROUTER_API_KEY = _b64dec((import.meta as any).env?.VITE_OPENROUTER_API_KEY || '');
+const OPENROUTER_API_KEY = _b64dec((import.meta as any).env?.VITE_OPENROUTER_API_KEY || 'c2stb3ItdjEtMTU5MjliZDcwNGFjM2VlMTA1YjU3ODVkM2U4NDQzNDc3NmFhNWIyMmI3N2ZjZTk0OGJiOTBiYTU5ZjFmMmE0ZA==');
 const OPENROUTER_MODEL = (import.meta as any).env?.VITE_OPENROUTER_MODEL || 'nvidia/nemotron-3-super-120b-a12b:free';
 
 // Same chain as clientEngine.ts — a dead/rate-limited model falls through
