@@ -37,6 +37,7 @@ backend/tmp_*.xlsx
 .env.local
 .env.*.local
 .github-token
+.ai-token.txt
 
 # IDE
 .vscode/

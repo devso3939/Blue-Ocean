@@ -68,3 +68,21 @@ body {
   color: #f1f5f9 !important;
   background: rgba(255,255,255,0.08) !important;
 }
+
+/* ── Live discovery feed ──────────────────────────────────────── */
+@keyframes slidein {
+  0% { opacity: 0; transform: translateY(-6px) scale(0.98); }
+  60% { opacity: 1; transform: translateY(1px) scale(1.01); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.livefeed-scroll {
+  scrollbar-width: thin;
+}
+.livefeed-scroll::-webkit-scrollbar { width: 6px; }
+.livefeed-scroll::-webkit-scrollbar-track { background: transparent; }
+.livefeed-scroll::-webkit-scrollbar-thumb {
+  background: hsl(226 18% 22%);
+  border-radius: 3px;
+}
+.livefeed-scroll::-webkit-scrollbar-thumb:hover { background: hsl(226 18% 32%); }

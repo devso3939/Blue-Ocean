@@ -816,58 +816,192 @@ export default function App() {
                 <div className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 transition-all duration-500" style={{width: `${progress}%`}} />
               </div>
 
-              {/* ── Real-time Enrichment Progress Panel ── */}
+              {/* ── Real-time Live Discovery Feed ── */}
               {enrichProgress && enrichProgress.percent > 0 && (
-                <div className="mt-3 rounded-lg border border-border bg-card/90 backdrop-blur-sm p-3">
-                  {/* Pass progress bar */}
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-semibold text-foreground">{enrichProgress.activePass}</span>
-                    <span className="text-[10px] text-muted-foreground">Pass {enrichProgress.passNumber}/{enrichProgress.totalPasses}</span>
-                  </div>
-                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary mb-3">
-                    <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-cyan-500 transition-all duration-300" style={{width: `${enrichProgress.percent}%`}} />
+                <div className="mt-3 overflow-hidden rounded-xl border border-violet-500/20 bg-gradient-to-br from-violet-500/[0.04] via-card/90 to-cyan-500/[0.04] backdrop-blur-sm">
+
+                  {/* ── Top bar: scanning radar + pass + counters ── */}
+                  <div className="flex items-center gap-3 border-b border-border/60 px-3 py-2.5">
+                    {/* Animated scanning radar */}
+                    <div className="relative h-9 w-9 shrink-0">
+                      <div className="absolute inset-0 rounded-full bg-gradient-to-br from-violet-500/30 to-cyan-500/30 animate-pulse" />
+                      <div className="absolute inset-0 rounded-full border border-violet-400/40 animate-[ping_2.5s_linear_infinite]" />
+                      <div className="absolute inset-1.5 rounded-full border border-violet-300/30 animate-[ping_2.5s_linear_infinite_0.4s]" />
+                      <div className="absolute inset-0 flex items-center justify-center text-base">
+                        {(() => {
+                          const active = enrichProgress.engines.find(e => e.status === 'active');
+                          return active?.icon ?? '🔎';
+                        })()}
+                      </div>
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate text-xs font-semibold text-foreground">{enrichProgress.activePass}</span>
+                        <span className="shrink-0 rounded-full bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-medium text-violet-300">
+                          Pass {enrichProgress.passNumber}/{enrichProgress.totalPasses}
+                        </span>
+                      </div>
+                      <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-secondary/60">
+                        <div className="h-full rounded-full bg-gradient-to-r from-violet-500 via-fuchsia-500 to-cyan-500 transition-all duration-300" style={{width: `${enrichProgress.percent}%`}} />
+                      </div>
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <div className="text-[10px] text-muted-foreground">processed</div>
+                      <div className="text-xs font-bold tabular-nums text-foreground">
+                        {enrichProgress.businessesProcessed}<span className="text-muted-foreground/60">/{enrichProgress.businessesTotal}</span>
+                      </div>
+                    </div>
                   </div>
 
-                  {/* Search engines status */}
-                  <div className="flex flex-wrap gap-1.5 mb-3">
-                    {enrichProgress.engines.map((eng) => (
+                  {/* ── Engine leaderboard ── */}
+                  <div className="flex flex-wrap gap-1 border-b border-border/60 px-3 py-2">
+                    {[...enrichProgress.engines].sort((a,b) => b.found - a.found).map((eng) => (
                       <span
                         key={eng.name}
                         className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium transition-all duration-300
-                          ${eng.status === 'active' ? 'bg-emerald-500/20 text-emerald-400 ring-1 ring-emerald-500/40 animate-pulse' :
+                          ${eng.status === 'active' ? 'bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/40' :
                             eng.status === 'done' ? 'bg-muted/50 text-muted-foreground' :
-                            eng.status === 'error' ? 'bg-rose-500/20 text-rose-400' :
-                            'bg-muted/30 text-muted-foreground/50'}`}
+                            eng.status === 'error' ? 'bg-rose-500/15 text-rose-400' :
+                            'bg-muted/30 text-muted-foreground/40'}`}
+                        title={`${eng.name}: ${eng.found} contacts found`}
                       >
                         <span>{eng.icon}</span>
                         <span>{eng.name}</span>
+                        {eng.found > 0 && <span className="tabular-nums font-bold text-foreground/80">{eng.found}</span>}
                         {eng.status === 'active' && <span className="ml-0.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />}
                       </span>
                     ))}
                   </div>
 
-                  {/* Live contact counters */}
-                  <div className="flex items-center gap-3 text-[11px]">
-                    <span className="flex items-center gap-1">
-                      <span className="text-muted-foreground">📧</span>
-                      <span className={`font-bold tabular-nums ${enrichProgress.contacts.emails > 0 ? 'text-emerald-400' : 'text-muted-foreground'}`}>{enrichProgress.contacts.emails}</span>
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className="text-muted-foreground">📞</span>
-                      <span className={`font-bold tabular-nums ${enrichProgress.contacts.phones > 0 ? 'text-emerald-400' : 'text-muted-foreground'}`}>{enrichProgress.contacts.phones}</span>
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className="text-muted-foreground">🌐</span>
-                      <span className={`font-bold tabular-nums ${enrichProgress.contacts.websites > 0 ? 'text-emerald-400' : 'text-muted-foreground'}`}>{enrichProgress.contacts.websites}</span>
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <span className="text-muted-foreground">👤</span>
-                      <span className={`font-bold tabular-nums ${enrichProgress.contacts.social > 0 ? 'text-emerald-400' : 'text-muted-foreground'}`}>{enrichProgress.contacts.social}</span>
-                    </span>
-                    <span className="ml-auto text-muted-foreground/60">
-                      {enrichProgress.businessesProcessed}/{enrichProgress.businessesTotal} processed
-                    </span>
+                  {/* ── Two-column body: coverage heatmap + live stream ── */}
+                  <div className="grid gap-3 px-3 py-2.5 sm:grid-cols-[1fr_1.4fr]">
+
+                    {/* Coverage heatmap (left) */}
+                    <div className="space-y-1.5">
+                      <div className="text-[9px] uppercase tracking-wider text-muted-foreground/70">Coverage</div>
+                      {(() => {
+                        const total = Math.max(enrichProgress.businessesProcessed, 1);
+                        const types = [
+                          { key: 'emails', icon: '📧', color: 'from-emerald-500 to-cyan-500' },
+                          { key: 'phones', icon: '📞', color: 'from-violet-500 to-fuchsia-500' },
+                          { key: 'websites', icon: '🌐', color: 'from-amber-500 to-orange-500' },
+                          { key: 'social', icon: '👤', color: 'from-pink-500 to-rose-500' },
+                        ] as const;
+                        return types.map(t => {
+                          const count = enrichProgress.contacts[t.key];
+                          const pct = Math.round((count / total) * 100);
+                          return (
+                            <div key={t.key} className="flex items-center gap-2">
+                              <span className="w-4 shrink-0 text-xs">{t.icon}</span>
+                              <div className="relative h-4 flex-1 overflow-hidden rounded-md bg-secondary/60">
+                                <div
+                                  className={`h-full rounded-md bg-gradient-to-r ${t.color} transition-all duration-500`}
+                                  style={{width: `${Math.min(pct, 100)}%`}}
+                                />
+                                <div className="absolute inset-0 flex items-center px-2 text-[10px] font-semibold text-foreground/90">
+                                  <span className="tabular-nums">{count}</span>
+                                  <span className="ml-1 text-muted-foreground/70">({pct}%)</span>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        });
+                      })()}
+
+                      {/* Currently parsing card */}
+                      {enrichProgress.currentBusiness && (
+                        <div className="mt-2 overflow-hidden rounded-lg border border-violet-500/30 bg-violet-500/5 p-2">
+                          <div className="flex items-center gap-1.5 text-[9px] uppercase tracking-wider text-violet-300/80">
+                            <span className="inline-block h-1.5 w-1.5 rounded-full bg-violet-400 animate-pulse" />
+                            Parsing now
+                          </div>
+                          <div className="mt-0.5 truncate text-xs font-medium text-foreground" title={enrichProgress.currentBusiness.name}>
+                            {enrichProgress.currentBusiness.name}
+                          </div>
+                          <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                            {enrichProgress.currentBusiness.engine && (
+                              <span className="rounded-full bg-violet-500/15 px-1.5 py-px text-violet-300">
+                                via {enrichProgress.currentBusiness.engine}
+                              </span>
+                            )}
+                            <span className="text-violet-300/80">→ {enrichProgress.currentBusiness.stage}</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Live stream (right) */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <div className="text-[9px] uppercase tracking-wider text-muted-foreground/70">
+                          Live stream
+                        </div>
+                        <div className="text-[9px] text-muted-foreground/60 tabular-nums">
+                          {enrichProgress.recentBusinesses.length} / {enrichProgress.businessesTotal}
+                        </div>
+                      </div>
+                      <div className="max-h-44 overflow-y-auto rounded-lg border border-border/50 bg-background/40 p-1.5 space-y-1 livefeed-scroll">
+                        {enrichProgress.recentBusinesses.length === 0 && (
+                          <div className="flex h-16 items-center justify-center text-[10px] text-muted-foreground/60">
+                            waiting for first parse…
+                          </div>
+                        )}
+                        {enrichProgress.recentBusinesses.map((rb) => (
+                          <div
+                            key={rb.id}
+                            className={`flex items-center gap-2 rounded-md border px-2 py-1 text-[11px] transition-all duration-300 animate-[slidein_0.3s_ease-out] ${
+                              rb.status === 'parsing' ? 'border-violet-500/40 bg-violet-500/10' :
+                              rb.status === 'enriched' ? 'border-emerald-500/30 bg-emerald-500/5' :
+                              rb.status === 'partial' ? 'border-amber-500/30 bg-amber-500/5' :
+                              'border-border/60 bg-background/30'
+                            }`}
+                          >
+                            {rb.status === 'parsing' && (
+                              <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-violet-400 animate-pulse" />
+                            )}
+                            {rb.status !== 'parsing' && (
+                              <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${
+                                rb.status === 'enriched' ? 'bg-emerald-400' :
+                                rb.status === 'partial' ? 'bg-amber-400' :
+                                'bg-muted-foreground/40'
+                              }`} />
+                            )}
+                            <span className={`min-w-0 flex-1 truncate font-medium ${
+                              rb.status === 'parsing' ? 'text-violet-200' : 'text-foreground/90'
+                            }`} title={rb.name}>
+                              {rb.name}
+                            </span>
+                            <div className="flex shrink-0 items-center gap-1">
+                              <span className={`text-[10px] ${rb.hasPhone ? 'opacity-100' : 'opacity-25'}`} title="phone">📞</span>
+                              <span className={`text-[10px] ${rb.hasEmail ? 'opacity-100' : 'opacity-25'}`} title="email">📧</span>
+                              <span className={`text-[10px] ${rb.hasWebsite ? 'opacity-100' : 'opacity-25'}`} title="website">🌐</span>
+                              <span className={`text-[10px] ${rb.hasSocial ? 'opacity-100' : 'opacity-25'}`} title="social">👤</span>
+                            </div>
+                            {rb.viaEngine && (
+                              <span className="hidden sm:inline shrink-0 rounded-full bg-muted/60 px-1.5 py-px text-[9px] text-muted-foreground">
+                                {rb.viaEngine}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   </div>
+
+                  {/* ── Query log strip ── */}
+                  {enrichProgress.recentQueries.length > 0 && (
+                    <div className="border-t border-border/60 px-3 py-2">
+                      <div className="text-[9px] uppercase tracking-wider text-muted-foreground/70 mb-1">Recent queries</div>
+                      <div className="flex flex-wrap gap-1">
+                        {enrichProgress.recentQueries.slice(0, 4).map((q, i) => (
+                          <span key={i} className="inline-flex max-w-full items-center gap-1 rounded-md border border-border/60 bg-background/40 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                            <span className="text-cyan-400">⌕</span>
+                            <span className="truncate max-w-[280px]" title={q}>{q}</span>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

@@ -106,6 +106,29 @@ export interface EnrichmentProgress {
   businessesProcessed: number;
   businessesTotal: number;
   percent: number;
+  // ── New: live discovery feed ──────────────────────────────────
+  recentBusinesses: RecentBusiness[];   // last ~30 businesses as they're parsed
+  currentBusiness?: {                  // the one currently being processed
+    id: string;
+    name: string;
+    engine?: string;                   // which engine is parsing it right now
+    stage: 'address' | 'phone' | 'email' | 'website' | 'social' | 'done';
+  };
+  recentQueries: string[];             // last ~12 search queries sent (audit trail)
+}
+
+export interface RecentBusiness {
+  id: string;
+  name: string;
+  category?: string;                   // e.g. 'cafe', 'gym'
+  status: 'parsing' | 'enriched' | 'partial' | 'minimal';
+  // what got found for this business
+  hasEmail: boolean;
+  hasPhone: boolean;
+  hasWebsite: boolean;
+  hasSocial: boolean;
+  viaEngine?: string;                  // which engine supplied the data
+  ts: number;                          // when it completed (Date.now())
 }
 
 export const CATEGORY_QUERIES: Record<string, { label: string }> = {
@@ -1350,7 +1373,10 @@ function isLikelyBusinessWebsite(url: string, businessName: string): boolean {
 }
 
 // ── Unified extraction: pull phone, email, website, social from any HTML/text ──
-function extractFromHtml(html: string, b: Business): void {  const JUNK = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|duckduckgo|schema\.org|privacy.*policy|terms.*service|cookie/i;
+function extractFromHtml(html: string, b: Business): boolean {
+  // Snapshot before so caller can know whether anything was extracted
+  const before = `${b.phone}|${b.email}|${b.website}|${b.facebook}|${b.instagram}|${b.twitter}|${b.pinterest}|${b.rating ?? ''}|${b.reviewCount ?? ''}`;
+  const JUNK = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|duckduckgo|schema\.org|privacy.*policy|terms.*service|cookie/i;
   const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
 
   // Phone: tel: links, then text regex
@@ -1542,6 +1568,8 @@ function extractFromHtml(html: string, b: Business): void {  const JUNK = /examp
       if (val > 0 && val < 100000) b.reviewCount = val;
     }
   }
+  const after = `${b.phone}|${b.email}|${b.website}|${b.facebook}|${b.instagram}|${b.twitter}|${b.pinterest}|${b.rating ?? ''}|${b.reviewCount ?? ''}`;
+  return before !== after;
 }
 
 // Try common email patterns by fetching the contact page
@@ -1587,22 +1615,23 @@ async function tryCommonEmailPatterns(b: Business): Promise<void> {
 }
 
 // ── Extract from plain text (e.g. Brave search descriptions) ──
-function extractFromText(text: string, b: Business): void {
+function extractFromText(text: string, b: Business): boolean {
+  let touched = false;
   if (!b.phone) {
     const m = text.match(/\+?\d[\d\s\-\.\(\)]{7,18}/);
-    if (m && m[0].length >= 8) b.phone = m[0].trim();
+    if (m && m[0].length >= 8) { b.phone = m[0].trim(); touched = true; }
   }
   if (!b.email) {
     const m = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-    if (m && !m[0].includes('example.com') && !m[0].includes('google') && !m[0].includes('facebook') && !m[0].includes('instagram')) b.email = m[0];
+    if (m && !m[0].includes('example.com') && !m[0].includes('google') && !m[0].includes('facebook') && !m[0].includes('instagram')) { b.email = m[0]; touched = true; }
   }
   if (!b.facebook) {
     const m = text.match(/facebook\.com\/([a-zA-Z0-9._]+)/);
-    if (m && !m[0].includes('login') && !m[0].includes('sharer')) b.facebook = 'https://facebook.com/' + m[1];
+    if (m && !m[0].includes('login') && !m[0].includes('sharer')) { b.facebook = 'https://facebook.com/' + m[1]; touched = true; }
   }
   if (!b.instagram) {
     const m = text.match(/instagram\.com\/([a-zA-Z0-9._]+)/);
-    if (m && !m[0].includes('accounts')) b.instagram = 'https://instagram.com/' + m[1];
+    if (m && !m[0].includes('accounts')) { b.instagram = 'https://instagram.com/' + m[1]; touched = true; }
   }
   // Extract rating (e.g. "4.5 stars" or "4.5/5" or "Rating: 4.5")
   if (!b.rating) {
@@ -1630,8 +1659,9 @@ function extractFromText(text: string, b: Business): void {
   // LinkedIn as website fallback
   if (!b.website) {
     const m = text.match(/linkedin\.com\/(?:company|school)\/([a-zA-Z0-9._-]+)/i);
-    if (m) b.website = 'https://linkedin.com/company/' + m[1];
+    if (m) { b.website = 'https://linkedin.com/company/' + m[1]; touched = true; }
   }
+  return touched;
 }
 
 // ─── Brave Search Enrichment ───────────────────────────────────
@@ -2492,7 +2522,51 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     businessesProcessed: 0,
     businessesTotal: allBizList.length,
     percent: 0,
+    recentBusinesses: [],
+    currentBusiness: undefined,
+    recentQueries: [],
   };
+
+  // Helper: log a search query (audit trail in the live feed)
+  function logQuery(q: string, engine?: string) {
+    if (!q) return;
+    const prefix = engine ? `[${engine}] ` : '';
+    _ep.recentQueries = [`${prefix}${q}`, ..._ep.recentQueries].slice(0, 12);
+  }
+
+  // Helper: record a business as it's being parsed / finished
+  const _lastEngineByBiz = new WeakMap<Business, string>();
+  function lastSuccessfulEngineFor(b: Business): string | undefined {
+    return _lastEngineByBiz.get(b);
+  }
+  function markEngine(b: Business, engine: string) {
+    _lastEngineByBiz.set(b, engine);
+  }
+
+  function recordBusiness(b: Business, status: 'parsing' | 'enriched' | 'partial' | 'minimal', engine?: string) {
+    const hasEmail = !!b.email;
+    const hasPhone = !!b.phone;
+    const hasWebsite = !!b.website;
+    const hasSocial = !!(b.facebook || b.instagram);
+    const entry: RecentBusiness = {
+      id: b.id,
+      name: b.name || 'Unnamed',
+      category: b.category,
+      status,
+      hasEmail, hasPhone, hasWebsite, hasSocial,
+      viaEngine: engine,
+      ts: Date.now(),
+    };
+    // Remove any prior entry for same id (status update)
+    _ep.recentBusinesses = [entry, ..._ep.recentBusinesses.filter(r => r.id !== b.id)].slice(0, 30);
+    _ep.currentBusiness = status === 'parsing' ? {
+      id: b.id,
+      name: b.name || 'Unnamed',
+      engine,
+      stage: !hasPhone ? 'phone' : !hasEmail ? 'email' : !hasWebsite ? 'website' : !hasSocial ? 'social' : 'done',
+    } : undefined;
+  }
+
   function emitEP() {
     // Recount contacts from live data
     _ep.contacts.emails = allBizList.filter(b => b.email).length;
@@ -2500,7 +2574,13 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     _ep.contacts.websites = allBizList.filter(b => b.website).length;
     _ep.contacts.social = allBizList.filter(b => b.facebook || b.instagram).length;
     _ep.contacts.total = _ep.contacts.emails + _ep.contacts.phones + _ep.contacts.websites + _ep.contacts.social;
-    onEnrichProgress?.({ ..._ep, engines: _ep.engines.map(e => ({ ...e })) });
+    onEnrichProgress?.({
+      ..._ep,
+      engines: _ep.engines.map(e => ({ ...e })),
+      recentBusinesses: _ep.recentBusinesses.slice(),
+      recentQueries: _ep.recentQueries.slice(),
+      currentBusiness: _ep.currentBusiness ? { ..._ep.currentBusiness } : undefined,
+    });
   }
 
   _ep.activePass = 'Filling missing addresses'; _ep.passNumber = 0; _ep.percent = 70; emitEP();
@@ -2556,6 +2636,9 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   for (let i = 0; i < maxEnrich; i += _BATCH) {
     if (isCancelled()) break;
     const batch = NEEDS_ENRICHMENT.slice(i, i + _BATCH);
+    // ── Live discovery feed: mark these businesses as currently being parsed ──
+    batch.forEach(b => recordBusiness(b, 'parsing'));
+    logQuery(buildSearchQuery(batch[0]), `${batch.length} businesses`);
     await Promise.all(batch.map(async (b) => {
       try {
         // Helper: check if business has sufficient data (phone OR email + website)
@@ -2584,11 +2667,13 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               });
               if (r.ok) {
                 const data = await r.json();
+                let touched = false;
                 for (const res of (data.web?.results || [])) {
-                  extractFromText((res.description || '') + ' ' + (res.title || ''), b);
+                  if (extractFromText((res.description || '') + ' ' + (res.title || ''), b)) touched = true;
                   if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('google.com/maps') && isLikelyBusinessWebsite(res.url, b.name)) b.website = res.url;
                 }
                 if (!b.website && data.knowledge_graph?.url && !_EXCLUDE.test(data.knowledge_graph.url)) b.website = data.knowledge_graph.url;
+                if (touched || b.website) markEngine(b, 'Brave');
               }
             } catch {}
           })(),
@@ -2599,33 +2684,47 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                 headers: { 'User-Agent': 'Mozilla/5.0' },
                 signal: AbortSignal.timeout(4000),
               });
-              if (r.ok) extractFromHtml(await r.text(), b);
+              if (r.ok && extractFromHtml(await r.text(), b)) markEngine(b, 'DuckDuckGo');
             } catch {}
           })(),
           // Bing
           (async () => {
             try {
               const bingResults = await searchBing(q);
+              let touched = false;
               for (const res of bingResults) {
-                extractFromText((res.snippet || '') + ' ' + (res.title || ''), b);
+                if (extractFromText((res.snippet || '') + ' ' + (res.title || ''), b)) touched = true;
                 if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('bing.com') && isLikelyBusinessWebsite(res.url, b.name)) b.website = res.url;
               }
+              if (touched || b.website) markEngine(b, 'Bing');
             } catch {}
           })(),
           // DDG Lite
           (async () => {
             try {
               const spResults = await searchDDGLite(decodeURIComponent(q));
+              let touched = false;
               for (const res of spResults) {
-                extractFromText((res.snippet || '') + ' ' + (res.title || ''), b);
+                if (extractFromText((res.snippet || '') + ' ' + (res.title || ''), b)) touched = true;
                 if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('duckduckgo.com/lite') && isLikelyBusinessWebsite(res.url, b.name)) b.website = res.url;
               }
+              if (touched || b.website) markEngine(b, 'DDG Lite');
             } catch {}
           })(),
           // Serper (Google SERP API — free tier, optional key)
-          ...(SERPER_API_KEY ? [enrichFromSerper([b])] : []),
+          ...(SERPER_API_KEY ? [(async () => {
+            const before = `${b.website||''}|${b.phone||''}|${b.email||''}`;
+            await enrichFromSerper([b]);
+            const after = `${b.website||''}|${b.phone||''}|${b.email||''}`;
+            if (before !== after) markEngine(b, 'Serper');
+          })()] : []),
           // Tavily (AI search API — free tier, optional key)
-          ...(TAVILY_API_KEY ? [enrichFromTavily([b])] : []),
+          ...(TAVILY_API_KEY ? [(async () => {
+            const before = `${b.website||''}|${b.phone||''}|${b.email||''}`;
+            await enrichFromTavily([b]);
+            const after = `${b.website||''}|${b.phone||''}|${b.email||''}`;
+            if (before !== after) markEngine(b, 'Tavily');
+          })()] : []),
         ]);
 
         // ═══ PHASE 2: Scrape website ONCE ═══
@@ -2707,6 +2806,11 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         }
 
         if (b.phone || b.email || b.website) enrichedCount++;
+        // ── Live discovery feed: record finished business ──
+        const fieldsFound = [b.email, b.phone, b.website, b.facebook || b.instagram].filter(Boolean).length;
+        const finalStatus: 'parsing' | 'enriched' | 'partial' | 'minimal' =
+          fieldsFound >= 3 ? 'enriched' : fieldsFound >= 1 ? 'partial' : 'minimal';
+        recordBusiness(b, finalStatus, lastSuccessfulEngineFor(b));
       } catch {}
     }));
 
