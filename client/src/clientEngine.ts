@@ -1294,7 +1294,7 @@ function extractFromHtml(html: string, b: Business): void {  const JUNK = /examp
   if (!b.phone) {
     // 1. tel: links (most reliable)
     const telM = html.match(/href="tel:([^"]+)"/);
-    if (telM) b.phone = telM[1].trim();
+    if (telM) b.phone = (() => { try { return decodeURIComponent(telM[1]).trim(); } catch { return telM[1].trim(); } })();
     // 2. Country-specific formats
     if (!b.phone) {
       const geoM = html.match(/\+995\s?\d{3}\s?\d{2}\s?\d{2}\s?\d{2}/);
@@ -1317,11 +1317,14 @@ function extractFromHtml(html: string, b: Business): void {  const JUNK = /examp
       const labeledPh = html.match(/(?:phone|tel|telephone|mobile|cell|fax|calls?|whatsapp|viber|contact)\s*[:;=\s"'>]*([+\d][\d\s\-\.()]{7,18})/i);
       if (labeledPh && labeledPh[1].replace(/[^\d]/g, '').length >= 8 && plausiblePhone(labeledPh[1])) b.phone = labeledPh[1].trim();
     }
-    // 4. General phone regex (fallback)
+    // 4. General phone regex (fallback). Unlabeled text is noisy: require a
+    // leading '+' so floats/coordinates (2.3333…), IDs and fragments don't
+    // match. Labeled/tel: paths above stay permissive for local formats.
     if (!b.phone) {
       const phM = html.match(/(?:\+?\d[\d\s\-\.\(\)]{7,18})/g);
       if (phM) {
         for (const p of phM) {
+          if (!p.includes('+')) continue;
           const digits = p.replace(/[^\d+]/g, '');
           if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(p) && !JUNK.test(p)) { b.phone = p.trim(); break; }
         }
@@ -2840,7 +2843,7 @@ function extractFromHtmlModule(html: string, b: Business): void {
   if (!b.phone) {
     // 1. tel: links (most reliable)
     const telM = html.match(/href="tel:([^"]+)"/);
-    if (telM) b.phone = telM[1].trim();
+    if (telM) b.phone = (() => { try { return decodeURIComponent(telM[1]).trim(); } catch { return telM[1].trim(); } })();
     // 2. Country-specific formats
     if (!b.phone) {
       const geoM = html.match(/\+995\s?\d{3}\s?\d{2}\s?\d{2}\s?\d{2}/);
@@ -2863,11 +2866,14 @@ function extractFromHtmlModule(html: string, b: Business): void {
       const labeledPh = html.match(/(?:phone|tel|telephone|mobile|cell|fax|calls?|whatsapp|viber|contact)\s*[:;=\s"'>]*([+\d][\d\s\-\.()]{7,18})/i);
       if (labeledPh && labeledPh[1].replace(/[^\d]/g, '').length >= 8 && plausiblePhone(labeledPh[1])) b.phone = labeledPh[1].trim();
     }
-    // 4. General phone regex (fallback)
+    // 4. General phone regex (fallback). Unlabeled text is noisy: require a
+    // leading '+' so floats/coordinates (2.3333…), IDs and fragments don't
+    // match. Labeled/tel: paths above stay permissive for local formats.
     if (!b.phone) {
       const phM = html.match(/(?:\+?\d[\d\s\-\.\(\)]{7,18})/g);
       if (phM) {
         for (const p of phM) {
+          if (!p.includes('+')) continue;
           const digits = p.replace(/[^\d+]/g, '');
           if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(p) && !JUNK.test(p)) { b.phone = p.trim(); break; }
         }

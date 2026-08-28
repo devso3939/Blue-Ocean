@@ -63,5 +63,13 @@ run('ip-not-phone', `<div>Server 23.58.223.22</div><span>Phone +995 32 215 88 88
 run('timestamp-not-phone', `<div>id=1787851477009</div><span>Tel: +995599112233</span>`, { phone: (p) => !p.includes('1787851') && p.includes('995') });
 run('image-not-email', `<img src="logo-ka@2x.png"><a href="mailto:info@libertybank.ge">mail</a>`, { email: 'info@libertybank.ge' });
 
+// 15. unlabeled fallback: floats/coords/IDs never become phones...
+run('float-not-phone', `<div>ratio 2.3333333333333 latitude 47.256267</div>`, { phone: '' });
+// ...but labeled local formats still work
+run('labeled-local-ok', `<div>Phone: +32 215 88 88</div>`, { phone: (p) => p.replace(/\D/g, '').endsWith('2158888') });
+
+// 17. URL-encoded tel: values decode to real numbers
+run('tel-encoded', `<a href="tel:+032%202%20009%20009">call</a>`, { phone: (p) => p.includes('+032 2 009 009') });
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
