@@ -1,42 +1,65 @@
 /**
- * AI Analysis Module — Blue Ocean v6.3.0
- * Genuine LLM analysis via Pollinations (free, keyless), with deterministic
- * data-derived fallbacks. Model output and data-derived output are labeled
- * differently by the UI so users always know the provenance.
+ * AI Analysis Module — Blue Ocean v6.8.0
+ * Shared Smart AI Engine (OpenRouter free-tier model chain with fallback +
+ * retries), with deterministic data-derived fallbacks. Model output and
+ * data-derived output are labeled differently by the UI so users always
+ * know the provenance.
  */
 
 import type { OpportunityResult } from './clientEngine';
 import { getCategoryLabel } from './clientEngine';
 
-// Pollinations text API (free, keyless): GET https://text.pollinations.ai/<prompt>
-// OpenRouter (optional key): VITE_OPENROUTER_API_KEY enables free models
-// (e.g. meta-llama/llama-3.1-8b-instruct:free, ~50 requests/day free tier).
 const OPENROUTER_API_KEY = (import.meta as any).env?.VITE_OPENROUTER_API_KEY || '';
-const OPENROUTER_MODEL = (import.meta as any).env?.VITE_OPENROUTER_MODEL || 'meta-llama/llama-3.1-8b-instruct:free';
+const OPENROUTER_MODEL = (import.meta as any).env?.VITE_OPENROUTER_MODEL || 'nvidia/nemotron-3-super-120b-a12b:free';
 
-async function callLLM(prompt: string, timeoutMs = 30000): Promise<string | null> {
+// Same chain as clientEngine.ts — a dead/rate-limited model falls through
+// to the next one automatically.
+const AI_MODEL_CHAIN: string[] = [
+  OPENROUTER_MODEL,
+  'google/gemma-4-31b-it:free',
+  'minimax/minimax-m2.7:free',
+  'z-ai/glm-5.2:free',
+];
+
+async function callLLM(prompt: string, timeoutMs = 60000): Promise<string | null> {
   // Prefer OpenRouter when a key is provided (better quality + reliability)
   if (OPENROUTER_API_KEY) {
-    try {
-      const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: OPENROUTER_MODEL,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      if (r.ok) {
-        const data = await r.json();
-        const text = (data.choices?.[0]?.message?.content || '').trim();
-        if (text && text.length > 40 && !/^\s*<!doctype|<html/i.test(text)) return text;
+    for (let mi = 0; mi < AI_MODEL_CHAIN.length; mi++) {
+      const model = AI_MODEL_CHAIN[mi];
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model,
+              messages: [{ role: 'user', content: prompt }],
+              max_tokens: 1500,
+              temperature: 0.4,
+            }),
+            signal: AbortSignal.timeout(timeoutMs),
+          });
+          if (r.ok) {
+            const data = await r.json();
+            const text = (data.choices?.[0]?.message?.content || '').trim();
+            if (text && text.length > 40 && !/^\s*<!doctype|<html/i.test(text)) return text;
+            break; // empty reply → try next model
+          }
+          if (r.status === 429 || r.status >= 500) {
+            await new Promise(res => setTimeout(res, 1500 * (attempt + 1)));
+            continue; // backoff then retry
+          }
+          break; // 4xx (model gone/forbidden) → next model
+        } catch {
+          // network/timeout → next attempt/model
+        }
       }
-    } catch { /* fall through to Pollinations */ }
+    }
   }
+  // Final fallback: Pollinations (free, keyless) for short prompts
   try {
     const r = await fetch('https://text.pollinations.ai/' + encodeURIComponent(prompt), {
       signal: AbortSignal.timeout(timeoutMs),

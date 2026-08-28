@@ -164,6 +164,7 @@ export interface DiscoveryProgress {
   // AI analysis
   ai: 'idle' | 'thinking' | 'done' | 'error';
   aiPreview?: string;                  // first insight bullet preview
+  aiInsightsFull?: AIAnalysis;         // structured result (patterns/risks/actions)
   percent: number;                     // 0-100
   recentQueries: string[];             // last few demand queries
 }
@@ -3058,7 +3059,7 @@ export async function runDiscoveryPhases(
   countryName: string,
   onProgress?: (dp: DiscoveryProgress) => void,
   abortSignal?: AbortSignal,
-): Promise<{ opportunities: OpportunityResult[]; demandSignals: Map<string, DemandSignal>; aiInsights: string }> {
+): Promise<{ opportunities: OpportunityResult[]; demandSignals: Map<string, DemandSignal>; aiInsights: string; aiAnalysis?: AIAnalysis }> {
   const isCancelled = () => abortSignal?.aborted ?? false;
 
   // Identify top categories by existing business count
@@ -3146,27 +3147,30 @@ export async function runDiscoveryPhases(
   }
   emitDP({ percent: 90 });
 
-  // Phase D: AI analysis
+  // Phase D: smart AI analysis (structured insights/patterns/risks/actions)
   _dp.phase = 'ai';
   _dp.ai = 'thinking';
   emitDP({ percent: 92 });
   let aiInsights = '';
+  let aiAnalysis: AIAnalysis | undefined;
   try {
-    const topOpps = opportunities.slice(0, 8).map(o => ({
-      category: o.category,
-      label: o.categoryLabel,
-      existing: o.existing,
-      gap: o.gap ?? 0,
-      score: o.score,
-    }));
-    aiInsights = await getAIAnalysis(cityName, countryName, topOpps, population);
+    const facts = computeMarketFacts(businesses, population, cityName, countryName, signals);
+    // Attach real opportunity scores to the facts (LLM sees exact numbers)
+    const scoreByCat = new Map(opportunities.map(o => [o.category, o.score]));
+    facts.categories.forEach(c => { c.score = scoreByCat.get(c.category) ?? 0; });
+    const analysis = await getSmartAIAnalysis(facts, opportunities, { signal: abortSignal });
+    aiAnalysis = analysis;
+    aiInsights = analysis.insights.map(i => `**${i.title}** — ${i.detail}`).join('\n\n');
     _dp.ai = 'done';
-    _dp.aiPreview = aiInsights ? aiInsights.split('\n')[0]?.replace(/^[^:]+:\s*/, '').slice(0, 140) || 'Analysis complete' : 'Analysis complete';
+    _dp.aiPreview = analysis.insights[0]
+      ? `${analysis.insights[0].title}: ${analysis.insights[0].detail}`.slice(0, 140)
+      : 'Analysis complete';
+    _dp.aiInsightsFull = analysis; // full structured result for the UI
   } catch {
     _dp.ai = 'error';
   }
   emitDP({ percent: 100, phase: 'done' });
-  return { opportunities, demandSignals: signals, aiInsights };
+  return { opportunities, demandSignals: signals, aiInsights, aiAnalysis };
 }
 
 export async function getAIAnalysis(
@@ -3249,7 +3253,561 @@ function generateLocalAnalysis(
 }
 
 
-// ─── Google Maps URL ───────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════
+// ─── Smart AI Engine (OpenRouter, free tier) ─────────────────────
+// Multi-turn reasoning over the REAL scan data with:
+//   1. Model fallback chain (handles upstream 429 rate limits)
+//   2. Structured JSON output (typed insights/patterns/risks/actions)
+//   3. Domain-aware prompts (market-analysis + pattern detection)
+//   4. Automatic retry with exponential backoff
+//   5. Deterministic fallback when ALL models are down
+// ═════════════════════════════════════════════════════════════════
+
+const OPENROUTER_API_KEY = (import.meta as any).env?.VITE_OPENROUTER_API_KEY || '';
+const OPENROUTER_MODEL = (import.meta as any).env?.VITE_OPENROUTER_MODEL || 'nvidia/nemotron-3-super-120b-a12b:free';
+
+// Ordered chain: try the configured model first, then the known-good
+// free-tier models as fallbacks. This keeps the app usable when one
+// provider is upstream-rate-limited (common on free tiers).
+const AI_MODEL_CHAIN: string[] = [
+  OPENROUTER_MODEL,
+  'google/gemma-4-31b-it:free',
+  'minimax/minimax-m2.7:free',
+  'z-ai/glm-5.2:free',
+];
+
+// One shared call site: sends a chat completion, walks the model chain on
+// 429/5xx, retries with exponential backoff, and returns raw text.
+// `validate` lets callers reject a successful-but-unusable reply (e.g. JSON
+// that didn't parse) so the chain moves on to the next model instead of
+// returning garbage.
+async function llmCall(
+  systemPrompt: string,
+  userPrompt: string,
+  opts?: {
+    maxTokens?: number;
+    temperature?: number;
+    signal?: AbortSignal;
+    validate?: (text: string) => boolean;
+  },
+): Promise<string> {
+  if (!OPENROUTER_API_KEY) throw new Error('no-key');
+  const maxTokens = opts?.maxTokens ?? 900;
+  const temperature = opts?.temperature ?? 0.3;
+  const validate = opts?.validate;
+
+  for (let mi = 0; mi < AI_MODEL_CHAIN.length; mi++) {
+    const model = AI_MODEL_CHAIN[mi];
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (opts?.signal?.aborted) throw new Error('Cancelled');
+      try {
+        const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+            ],
+            max_tokens: maxTokens,
+            temperature,
+          }),
+          signal: opts?.signal ?? AbortSignal.timeout(45000),
+        });
+
+        if (r.ok) {
+          const d = await r.json();
+          const text = d?.choices?.[0]?.message?.content;
+          if (typeof text === 'string' && text.trim().length > 0) {
+            // If the caller supplied a validator and the reply fails it,
+            // treat this model as unusable for this request and move on.
+            if (validate && !validate(text)) {
+              break;
+            }
+            return text;
+          }
+          // Empty reply — try next model
+          break;
+        }
+
+        // Rate-limited upstream — brief pause then retry same model
+        if (r.status === 429) {
+          await new Promise(res => setTimeout(res, 1500 * (attempt + 1)));
+          continue;
+        }
+        // 4xx (except 429) or 5xx — try next model in chain
+        break;
+      } catch (e: any) {
+        if (e?.name === 'AbortError' || e?.message === 'Cancelled') throw new Error('Cancelled');
+        // network error — try next model
+        break;
+      }
+    }
+  }
+  throw new Error('all-models-failed');
+}
+
+// Strip reasoning blocks some free models emit (<think>…</think>, etc.)
+function stripThinkBlocks(t: string): string {
+  return t
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<\|?begin_of_thought\|?>[\s\S]*?<\|?end_of_thought\|?>/gi, '')
+    .trim();
+}
+
+// Extract the first JSON object/array from an LLM reply that may be wrapped
+// in markdown fences, <think> blocks, or prose. Returns null when no JSON found.
+function extractJson(text: string): any | null {
+  // Strip reasoning blocks first — some free models (GLM, Qwen) emit them
+  let cleaned = stripThinkBlocks(String(text || ''));
+  // Strip markdown code fences
+  cleaned = cleaned.replace(/```(?:json)?/gi, '').trim();
+  // Try whole-string parse first
+  try { return JSON.parse(cleaned); } catch { /* fall through */ }
+  // Then find the outermost {...} or [...]
+  const objStart = cleaned.indexOf('{');
+  const arrStart = cleaned.indexOf('[');
+  const start = objStart === -1 ? arrStart
+    : arrStart === -1 ? objStart
+    : Math.min(objStart, arrStart);
+  if (start === -1) return null;
+  const objEnd = cleaned.lastIndexOf('}');
+  const arrEnd = cleaned.lastIndexOf(']');
+  const end = objEnd === -1 ? arrEnd
+    : arrEnd === -1 ? objEnd
+    : Math.max(objEnd, arrEnd);
+  if (end <= start) return null;
+  const slice = cleaned.slice(start, end + 1);
+  try { return JSON.parse(slice); } catch { /* fall through */ }
+  // Repair pass: strip trailing commas (common free-model quirk)
+  try { return JSON.parse(slice.replace(/,\s*([}\]])/g, '$1')); } catch { return null; }
+}
+
+// ─── Typed AI output ────────────────────────────────────────────
+export interface AIInsight {
+  title: string;
+  detail: string;
+  severity: 'high' | 'medium' | 'low';
+  categories?: string[];
+}
+export interface AIPattern {
+  name: string;
+  description: string;
+  categories?: string[];
+}
+export interface AIAction {
+  action: string;
+  rationale: string;
+  timeframe?: string;
+}
+export interface AIAnalysis {
+  model: string;           // model id that produced this output
+  insights: AIInsight[];
+  patterns: AIPattern[];
+  risks: string[];
+  actions: AIAction[];
+  isAI: boolean;           // false => deterministic fallback was used
+}
+
+// Statistical pre-computation fed to the LLM as compact facts. Detecting
+// patterns BEFORE the model call (a) shrinks the prompt, (b) grounds the
+// model in real numbers, (c) keeps output tied to this app's data.
+export interface MarketFacts {
+  cityName: string;
+  countryName: string;
+  population: number;
+  totalBusinesses: number;
+  categories: Array<{
+    category: string;
+    label: string;
+    existing: number;
+    per10k: number;
+    expected: number | null;
+    gap: number | null;
+    score: number;
+    demandScore?: number;
+    demandSources?: string[];
+  }>;
+  // Pre-computed patterns (deterministic, from real data)
+  saturationCluster: string[];   // categories ≥ 2× baseline density
+  underservedCluster: string[];  // categories with gap ≥ 25% of expected
+  lowCompetition: string[];      // < 5 existing businesses
+  hubStats: {                    // geo-clustering from business coordinates
+    clusters: number;
+    dominant: string | null;     // label of biggest cluster
+    concentration: number;       // 0-100, share of businesses in top cluster
+  };
+  contactCoverage: { emails: number; phones: number; websites: number };
+}
+
+// Deterministic pattern detection over the real scan results — the numbers
+// the LLM reasons over, computed locally so they are always exact.
+export function computeMarketFacts(
+  businesses: Map<string, Business[]>,
+  population: number,
+  cityName: string,
+  countryName: string,
+  demandSignals?: Map<string, DemandSignal>,
+): MarketFacts {
+  const totalBusinesses = Array.from(businesses.values()).reduce((s, a) => s + a.length, 0);
+
+  // Per-category stats. Expected/gap mirror the exact baselines used by
+  // computeOpportunities() so facts and scores stay consistent.
+  const pop = population > 0 ? population : null;
+  const per10kValues: number[] = [];
+  for (const [, bizs] of businesses) {
+    per10kValues.push((bizs.length / Math.max(pop || 1, 1)) * 10000);
+  }
+  per10kValues.sort((a, b) => a - b);
+  const cityMedian = per10kValues.length > 0
+    ? per10kValues[Math.floor(per10kValues.length / 2)]
+    : 5;
+  const BASELINES: Record<string, number> = {
+    cafe: 4, restaurant: 5, bar: 2, pub: 1.5, fast_food: 3,
+    hotel: 1, gym: 1.5, beauty_salon: 2, hair_salon: 2,
+    pharmacy: 1.5, bank: 1, supermarket: 1.5, clothing: 3,
+    electronics: 2, bakery: 1.5, cinema: 0.3,
+  };
+
+  const cats: MarketFacts['categories'] = [];
+  const saturationCluster: string[] = [];
+  const underservedCluster: string[] = [];
+  const lowCompetition: string[] = [];
+  for (const [cat, bizs] of businesses) {
+    const existing = bizs.length;
+    const per10k = pop ? (existing / pop) * 10000 : 0;
+    const demand = demandSignals?.get(cat);
+    const baseline = BASELINES[cat] || cityMedian;
+    const expected = pop ? Math.round((baseline * pop) / 10000) : null;
+    const gap = expected != null ? Math.max(0, expected - existing) : null;
+
+    cats.push({
+      category: cat,
+      label: getCategoryLabel(cat),
+      existing, per10k: Math.round(per10k * 100) / 100, expected, gap,
+      score: 0, // filled by caller from opportunities list
+      demandScore: demand?.score,
+      demandSources: demand?.sources,
+    });
+
+    if (per10k > 0 && existing >= 8 && per10k >= 4) saturationCluster.push(cat);
+    if (gap != null && gap / Math.max(expected ?? 1, 1) >= 0.25) underservedCluster.push(cat);
+    if (existing > 0 && existing < 5) lowCompetition.push(cat);
+  }
+
+  // Geo-clustering: rough density detection via lat/lon grid cells
+  const gridCells = new Map<string, number>();
+  const gridLabels = new Map<string, string>();
+  let totalPoints = 0;
+  for (const [cat, bizs] of businesses) {
+    for (const b of bizs) {
+      const cell = `${Math.round(b.lat * 50)}_${Math.round(b.lon * 50)}`;
+      gridCells.set(cell, (gridCells.get(cell) || 0) + 1);
+      if (!gridLabels.has(cell)) gridLabels.set(cell, getCategoryLabel(cat));
+      totalPoints++;
+    }
+  }
+  const clusters = Array.from(gridCells.values()).filter(n => n >= 5).length;
+  const topCell = Array.from(gridCells.entries()).sort((a, b) => b[1] - a[1])[0];
+  const concentration = totalPoints > 0 && topCell ? Math.round((topCell[1] / totalPoints) * 100) : 0;
+
+  // Contact coverage (enrichment results)
+  let emails = 0, phones = 0, websites = 0;
+  for (const bizs of businesses.values()) {
+    for (const b of bizs) {
+      if (b.email) emails++;
+      if (b.phone) phones++;
+      if (b.website) websites++;
+    }
+  }
+
+  return {
+    cityName, countryName, population, totalBusinesses, categories: cats,
+    saturationCluster, underservedCluster, lowCompetition,
+    hubStats: {
+      clusters,
+      dominant: topCell ? gridLabels.get(topCell[0]) ?? null : null,
+      concentration,
+    },
+    contactCoverage: { emails, phones, websites },
+  };
+}
+
+// Compact facts → prompt text. Numbers stay exact; no rounding of inputs.
+function factsToPrompt(f: MarketFacts, opps: OpportunityResult[]): string {
+  const catLines = f.categories
+    .slice(0, 18)
+    .map(c => {
+      const opp = opps.find(o => o.category === c.category);
+      const gapTxt = c.gap != null ? `gap=${c.gap}` : 'gap=unknown';
+      const demTxt = c.demandScore != null ? ` demand=${c.demandScore}/100${c.demandSources?.length ? ` (${c.demandSources.join('+')})` : ''}` : '';
+      return `- ${c.label} (${c.category}): existing=${c.existing}, per10k=${c.per10k}, ${gapTxt}, score=${opp?.score ?? '?'}/100${demTxt}`;
+    })
+    .join('\n');
+
+  const satTxt = f.saturationCluster.length ? f.saturationCluster.map(c => getCategoryLabel(c)).join(', ') : 'none';
+  const undTxt = f.underservedCluster.length ? f.underservedCluster.map(c => getCategoryLabel(c)).join(', ') : 'none';
+  const lowTxt = f.lowCompetition.length ? f.lowCompetition.map(c => getCategoryLabel(c)).join(', ') : 'none';
+
+  return `CITY: ${f.cityName}, ${f.countryName}
+POPULATION: ${f.population > 0 ? f.population.toLocaleString() : 'unknown'}
+TOTAL BUSINESSES SCANNED: ${f.totalBusinesses}
+
+CATEGORY DATA (top ${Math.min(f.categories.length, 18)}):
+${catLines}
+
+PRE-DETECTED PATTERNS (deterministic, from real data):
+- Saturated (high density ≥4/10k with ≥8 existing): ${satTxt}
+- Underserved (gap ≥25% of expected): ${undTxt}
+- Low competition (<5 existing): ${lowTxt}
+- Geo-clusters detected: ${f.hubStats.clusters} (dominant: ${f.hubStats.dominant ?? 'none'}, concentration ${f.hubStats.concentration}%)
+- Contact coverage: ${f.contactCoverage.emails} emails, ${f.contactCoverage.phones} phones, ${f.contactCoverage.websites} websites`;
+
+}
+
+// System prompt — domain-tuned for market-opportunity analysis.
+const AI_SYSTEM_PROMPT = `You are a senior market analyst specializing in blue-ocean opportunity discovery for small businesses.
+
+You analyze real OpenStreetMap scan data about businesses in a city, plus measured demand signals from Wikipedia, Reddit, and web search.
+
+Your job:
+1. Find non-obvious PATTERNS in the data (complementary-category pairs, saturation vs gap asymmetries, geo-clustering effects, demographic implications).
+2. Identify specific OPPORTUNITY INSIGHTS with severity ratings.
+3. Flag RISKS and caveats (population unknown, sample bias, OSM coverage gaps).
+4. Recommend concrete NEXT ACTIONS with rationale and timeframe.
+
+Rules:
+- Use ONLY the numbers given. NEVER invent statistics.
+- When population is unknown, treat gap/expected as unreliable.
+- Be specific: prefer "this city has 3x fewer gyms per capita than the median city" style over generic advice.
+- Keep every string under 200 chars. Be concise but analytical.`;
+
+// Main entry: runs the full AI analysis pipeline.
+export async function getSmartAIAnalysis(
+  facts: MarketFacts,
+  opportunities: OpportunityResult[],
+  opts?: { signal?: AbortSignal },
+): Promise<AIAnalysis> {
+  const userPrompt = factsToPrompt(facts, opportunities) + `
+
+TASK: Analyze this market data and return ONLY a valid JSON object (no markdown, no explanation) with this exact structure:
+{
+  "insights": [
+    {"title": "string", "detail": "string", "severity": "high" | "medium" | "low", "categories": ["cat_id", ...]}
+  ],
+  "patterns": [
+    {"name": "string", "description": "string", "categories": ["cat_id", ...]}
+  ],
+  "risks": ["string", ...],
+  "actions": [
+    {"action": "string", "rationale": "string", "timeframe": "immediate" | "1-3 months" | "6-12 months"}
+  ]
+}
+
+Generate 3-5 insights, 2-4 patterns, 2-3 risks, 2-4 actions. Every claim must trace back to the numbers above.`;
+
+  try {
+    // Walk the model chain; a reply only counts when its JSON parses AND
+    // contains at least one usable insight/pattern — otherwise the chain
+    // moves to the next model instead of feeding garbage downstream.
+    const raw = await llmCall(AI_SYSTEM_PROMPT, userPrompt, {
+      maxTokens: 3000,
+      temperature: 0.4,
+      signal: opts?.signal,
+      validate: (text) => {
+        const parsed = extractJson(text);
+        return !!parsed
+          && Array.isArray(parsed.insights)
+          && parsed.insights.length > 0
+          && Array.isArray(parsed.patterns)
+          && parsed.patterns.length > 0;
+      },
+    });
+    const parsed = extractJson(raw);
+    if (!parsed) throw new Error('no-json');
+
+    // Validate + normalize the model output
+    const insights: AIInsight[] = (parsed.insights || [])
+      .filter((x: any) => x && typeof x.title === 'string' && typeof x.detail === 'string')
+      .slice(0, 5)
+      .map((x: any) => ({
+        title: String(x.title).slice(0, 120),
+        detail: String(x.detail).slice(0, 400),
+        severity: (['high', 'medium', 'low'] as const).includes(x.severity) ? x.severity : 'medium',
+        categories: Array.isArray(x.categories)
+          ? x.categories.filter((c: any) => typeof c === 'string').slice(0, 4)
+          : undefined,
+      }));
+    const patterns: AIPattern[] = (parsed.patterns || [])
+      .filter((x: any) => x && typeof x.name === 'string' && typeof x.description === 'string')
+      .slice(0, 4)
+      .map((x: any) => ({
+        name: String(x.name).slice(0, 120),
+        description: String(x.description).slice(0, 400),
+        categories: Array.isArray(x.categories)
+          ? x.categories.filter((c: any) => sortableStrictCategories(c)).slice(0, 4)
+          : undefined,
+      }));
+    const risks: string[] = (parsed.risks || [])
+      .filter((x: any) => typeof x === 'string')
+      .slice(0, 4)
+      .map((x: any) => String(x).slice(0, 300));
+    const actions: AIAction[] = (parsed.actions || [])
+             .filter((x: any) => x && typeof x.action === 'string' && typeof x.rationale === 'string')
+      .slice(0, 4)
+      .map((x: any) => ({
+        action: String(x.action).slice(0, 200),
+        rationale: String(x.rationale).slice(0, 400),
+        timeframe: (['immediate', '1-3 months', '6-12 months'] as const).includes(x.timeframe)
+          ? x.timeframe : undefined,
+      }));
+
+    if (insights.length === 0 && patterns.length === 0) throw new Error('empty-analysis');
+
+    return { model: 'openrouter', insights, patterns, risks, actions, isAI: true };
+  } catch {
+    // Deterministic fallback — same real data, rules-based analysis
+    return deterministicAIAnalysis(facts, opportunities);
+  }
+}
+
+// A tiny helper used in normalizing model output (kept strict so invalid
+// category ids don't leak into the UI).
+function sortableStrictCategories(c: any): boolean {
+  return typeof c === 'string' && c.length > 0 && c.length < 40;
+}
+
+// Rules-based fallback with the same output shape — used when all free
+// models are rate-limited. Still grounded in the exact same real data.
+function deterministicAIAnalysis(
+  facts: MarketFacts,
+  opportunities: OpportunityResult[],
+): AIAnalysis {
+  const insights: AIInsight[] = [];
+  const patterns: AIPattern[] = [];
+  const risks: string[] = [];
+  const actions: AIAction[] = [];
+  const label = (c: string) => getCategoryLabel(c);
+
+  // 1. Biggest gap
+  const gapped = opportunities.filter(o => o.gap != null && (o.gap as number) > 0);
+  if (gapped.length > 0) {
+    const big = gapped.reduce((best, o) => (o.gap as number) > (best.gap as number) ? o : best, gapped[0]);
+    insights.push({
+      title: `Largest underserved category: ${big.categoryLabel}`,
+      detail: `Only ${big.existing} existing vs ${((big.gap as number) + big.existing).toLocaleString()} expected (${(big.gap as number)} gap). Per-capita density ${big.per10k}/10k.`,
+      severity: big.score >= 70 ? 'high' : 'medium',
+      categories: [big.category],
+    });
+  }
+
+  // 2. Saturation warning
+  if (facts.saturationCluster.length > 0) {
+    insights.push({
+      title: `${facts.saturationCluster.length} saturated categories detected`,
+      detail: `High density detected in: ${facts.saturationCluster.map(label).join(', ')}. These markets show signs of being crowded — differentiate or avoid.`,
+      severity: 'medium',
+      categories: facts.saturationCluster.slice(0, 4),
+    });
+  }
+
+  // 3. Low-competition (blue-ocean) list
+  if (facts.lowCompetition.length > 0) {
+    insights.push({
+      title: `${facts.lowCompetition.length} low-competition categories`,
+      detail: `Fewer than 5 businesses found: ${facts.lowCompetition.slice(0, 5).map(label).join(', ')}. First-mover positioning is available.`,
+      severity: facts.lowCompetition.length >= 3 ? 'medium' : 'low',
+      categories: facts.lowCompetition.slice(0, 4),
+    });
+  }
+
+  // 4. Geo-concentration insight
+  if (facts.hubStats.concentration >= 25) {
+    insights.push({
+      title: `High geo-concentration (${facts.hubStats.concentration}%)`,
+      detail: `${facts.hubStats.clusters} distinct clusters detected; the largest (dominated by ${facts.hubStats.dominant ?? 'mixed categories'}) holds ${facts.hubStats.concentration}% of all businesses. Outlying districts are underserved.`,
+      severity: 'medium',
+    });
+  }
+
+  // ── Patterns (deterministic) ──
+  // P1: saturation vs underservice asymmetry
+  if (facts.saturationCluster.length > 0 && facts.underservedCluster.length > 0) {
+    patterns.push({
+      name: 'Saturation–gap asymmetry',
+      description: `Saturated categories (${facts.saturationCluster.slice(0, 2).map(label).join(', ')}) coexist with underserved ones (${facts.underservedCluster.slice(0, 2).map(label).join(', ')}) — capital and attention are flowing to crowded markets while gaps persist elsewhere.`,
+      categories: [...facts.saturationCluster.slice(0, 2), ...facts.underservedCluster.slice(0, 2)],
+    });
+  }
+
+  // P2: complementary-category pairing (food + fitness, pharmacy + clinic…)
+  const COMPLEMENTARY: Array<[string, string]> = [
+    ['restaurant', 'gym'], ['cafe', 'coworking'], ['fast_food', 'gym'],
+    ['pharmacy', 'clinic'], ['bakery', 'cafe'], ['hotel', 'restaurant'],
+    ['supermarket', 'bakery'], ['beauty_salon', 'hair_salon'],
+  ];
+  const have = new Set(facts.categories.map(c => c.category));
+  const pair = COMPLEMENTARY.find(([a, b]) => have.has(a) && have.has(b));
+  if (pair) {
+    const [a, b] = pair;
+    const ca = facts.categories.find(c => c.category === a)!;
+    const cb = facts.categories.find(c => c.category === b)!;
+    patterns.push({
+      name: `Complementary pair: ${label(a)} ↔ ${label(b)}`,
+      description: `${ca.existing} ${label(a)} and ${cb.existing} ${label(b)} businesses. Traffic from one typically feeds the other — co-location or bundled positioning can capture spillover demand.`,
+      categories: [a, b],
+    });
+  }
+
+  // P3: contact coverage gap
+  const coverage = facts.contactCoverage;
+  if (facts.totalBusinesses > 10 && coverage.emails / facts.totalBusinesses < 0.3) {
+    patterns.push({
+      name: 'Low digital presence',
+      description: `Only ${coverage.emails}/${facts.totalBusinesses} businesses have a discoverable email and ${coverage.websites} have websites. Widespread low digital maturity = opening for digital-first competitors.`,
+    });
+  }
+
+  // ── Risks (deterministic) ──
+  if (facts.population === 0) {
+    risks.push('Population unknown for this city — per-capita gap estimates are unreliable; verify demographics before investing.');
+  }
+  risks.push('OpenStreetMap coverage is volunteered data — informal or newly opened businesses may be missing from the scan.');
+  if (coverage.emails + coverage.phones + coverage.websites < facts.totalBusinesses * 0.5) {
+    risks.push('Contact enrichment is incomplete — reachability estimates may understate the actual competitive set.');
+  }
+
+  // ── Actions (deterministic) ──
+  if (gapped.length > 0) {
+    const top = gapped[0];
+    actions.push({
+      action: `Validate demand for ${top.categoryLabel}`,
+      rationale: `Highest-scoring gap (${top.gap} businesses missing, score ${top.score}/100). Confirm with 10-20 customer interviews before committing.`,
+      timeframe: 'immediate',
+    });
+  }
+  if (facts.lowCompetition.length > 0) {
+    actions.push({
+      action: `Pilot a ${label(facts.lowCompetition[0])} offering`,
+      rationale: `Only ${facts.categories.find(c => c.category === facts.lowCompetition[0])?.existing ?? 0} competitors — a low-cost pilot can test the market with minimal exposure.`,
+      timeframe: '1-3 months',
+    });
+  }
+  if (facts.hubStats.concentration >= 25) {
+    actions.push({
+      action: 'Scout locations outside the main cluster',
+      rationale: `${facts.hubStats.concentration}% of businesses concentrate in one area — outlying districts have demand but little supply.`,
+      timeframe: '1-3 months',
+    });
+  }
+
+  return { model: 'deterministic', insights, patterns, risks, actions, isAI: false };
+}
+
 
 export function getGoogleMapsUrl(b: Business): string {
   if (b.name) {

@@ -12,6 +12,7 @@ import {
   type DemandSignal,
   type OpportunityResult,
   type DiscoveryProgress,
+  type AIAnalysis,
   runDiscoveryPhases,
   type EnrichmentProgress,
   setScanContext, buildScanContext,
@@ -135,6 +136,7 @@ export default function App() {
   const [selectedOppCategory, setSelectedOppCategory] = useState<string | null>(null);
   const [showAllOpps, setShowAllOpps] = useState(false);
   const [aiInsights, setAiInsights] = useState('');
+  const [aiAnalysis, setAiAnalysis] = useState<AIAnalysis | null>(null);
   const [selectedBiz, setSelectedBiz] = useState<{name:string;category:string;categoryLabel:string;color:string;phone:string;email:string;website:string;address:string;facebook:string;instagram:string;linkedin:string;youtube:string;tiktok:string;twitter:string;pinterest:string;rating:number;reviewCount:number;hours:string;lat:number;lon:number}|null>(null);
   const [enrichProgress, setEnrichProgress] = useState<EnrichmentProgress | null>(null);
 
@@ -410,6 +412,7 @@ export default function App() {
     setShowAllOpps(false);
     setEnrichProgress(null);
     setDiscoverProgress(null);
+    setAiAnalysis(null);
 
     try {
       // Native-language context for this city (helps contact discovery)
@@ -433,7 +436,7 @@ export default function App() {
       // Run demand signals + scoring + AI in one streamed pipeline.
       // Each phase emits DiscoveryProgress updates for the live feed UI.
       setLoadingStage('Measuring demand & computing opportunities…');
-      const { opportunities: opps, demandSignals: signals, aiInsights } =
+      const { opportunities: opps, demandSignals: signals, aiInsights, aiAnalysis: analysis } =
         await runDiscoveryPhases(
           biz, selectedCity.population || 0,
           selectedCity.name, selectedCity.country,
@@ -444,6 +447,7 @@ export default function App() {
       setOpportunities(opps);
       setDemandSignals(signals);
       if (aiInsights) setAiInsights(aiInsights);
+      setAiAnalysis(analysis ?? null);
       setProgress(100);
     } catch (e: any) {
       if (e.message !== 'Cancelled') setError(e.message || 'Analysis failed');
@@ -1256,14 +1260,105 @@ export default function App() {
           </div>
 
           {/* AI Insights */}
-          {aiInsights && (
+          {(aiAnalysis || aiInsights) && (
             <div className="rounded-xl border border-emerald-500/30 bg-gradient-to-br from-emerald-500/10 to-transparent p-5">
-              <h3 className="text-sm font-bold mb-2">🤖 AI Market Analysis <span className="font-normal text-muted-foreground">(model-generated from live scan data)</span></h3>
-              <div className="text-xs text-muted-foreground leading-relaxed whitespace-pre-line">
-                {aiInsights.split('\n').map((line, i) => (
-                  <p key={i} className="mb-2" dangerouslySetInnerHTML={{ __html: escapeHtml(line).replace(/\*\*(.*?)\*\*/g, '<strong class="text-foreground">$1</strong>') }} />
-                ))}
-              </div>
+              <h3 className="text-sm font-bold mb-3 flex items-center gap-2 flex-wrap">
+                🤖 AI Market Analysis
+                <span className="font-normal text-muted-foreground">
+                  {aiAnalysis
+                    ? aiAnalysis.isAI
+                      ? `(model-generated from live scan data · ${aiAnalysis.model})`
+                      : '(deterministic analysis — AI models unavailable, same real data)'
+                    : '(model-generated from live scan data)'}
+                </span>
+              </h3>
+
+              {aiAnalysis ? (
+                <div className="space-y-4">
+                  {/* Insights */}
+                  {aiAnalysis.insights.length > 0 && (
+                    <div>
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-emerald-400/80 mb-1.5">Key Insights</div>
+                      <div className="space-y-2">
+                        {aiAnalysis.insights.map((ins, i) => (
+                          <div key={i} className="flex gap-2.5 items-start rounded-lg bg-background/40 px-3 py-2 border border-border/50">
+                            <span className={`mt-0.5 shrink-0 inline-block h-2 w-2 rounded-full ${ins.severity === 'high' ? 'bg-red-400' : ins.severity === 'medium' ? 'bg-amber-400' : 'bg-emerald-400'}`} />
+                            <div className="min-w-0">
+                              <div className="text-xs font-semibold text-foreground">
+                                {ins.title}
+                                {ins.severity === 'high' && <span className="ml-1.5 text-[10px] text-red-400 font-bold">HIGH</span>}
+                                {ins.categories && ins.categories.length > 0 && (
+                                  <span className="ml-1.5 text-[10px] text-muted-foreground">
+                                    · {ins.categories.map(c => getCategoryLabel(c)).join(', ')}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-xs text-muted-foreground leading-relaxed mt-0.5">{ins.detail}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Patterns */}
+                  {aiAnalysis.patterns.length > 0 && (
+                    <div>
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-cyan-400/80 mb-1.5">🔍 Detected Patterns</div>
+                      <div className="grid sm:grid-cols-2 gap-2">
+                        {aiAnalysis.patterns.map((p, i) => (
+                          <div key={i} className="rounded-lg bg-cyan-500/5 border border-cyan-500/20 px-3 py-2">
+                            <div className="text-xs font-semibold text-cyan-200">{p.name}</div>
+                            <div className="text-[11px] text-muted-foreground leading-relaxed mt-0.5">{p.description}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Risks */}
+                  {aiAnalysis.risks.length > 0 && (
+                    <div>
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-amber-400/80 mb-1.5">⚠️ Risks & Caveats</div>
+                      <ul className="space-y-1">
+                        {aiAnalysis.risks.map((r, i) => (
+                          <li key={i} className="text-xs text-muted-foreground leading-relaxed flex gap-2">
+                            <span className="text-amber-400/70 shrink-0">•</span>
+                            <span>{r}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Actions */}
+                  {aiAnalysis.actions.length > 0 && (
+                    <div>
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-violet-400/80 mb-1.5">🎯 Recommended Actions</div>
+                      <div className="space-y-2">
+                        {aiAnalysis.actions.map((a, i) => (
+                          <div key={i} className="flex gap-2.5 items-start rounded-lg bg-violet-500/5 border border-violet-500/20 px-3 py-2">
+                            <span className="shrink-0 mt-0.5 text-xs text-violet-300 font-bold">{i + 1}</span>
+                            <div className="min-w-0">
+                              <div className="text-xs font-semibold text-foreground">
+                                {a.action}
+                                {a.timeframe && <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded-full bg-violet-500/15 text-violet-300 font-normal">{a.timeframe}</span>}
+                              </div>
+                              <div className="text-[11px] text-muted-foreground leading-relaxed mt-0.5">{a.rationale}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="text-xs text-muted-foreground leading-relaxed whitespace-pre-line">
+                  {aiInsights.split('\n').map((line, i) => (
+                    <p key={i} className="mb-2" dangerouslySetInnerHTML={{ __html: escapeHtml(line).replace(/\*\*(.*?)\*\*/g, '<strong class="text-foreground">$1</strong>') }} />
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
