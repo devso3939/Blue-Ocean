@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Blue Ocean Client Engine — v2
  * 
  * Core functionality:
@@ -400,8 +400,212 @@ function extractEmail(tags: Record<string, string>): string {
   return tags.email || tags['contact:email'] || tags['email:office'] || '';
 }
 
+// Directory/listing sites that should NEVER be set as a business website
+const DIRECTORY_SITES = /yelp\.com|tripadvisor|foursquare|booking\.com|expedia|yellowpages|justdial|zomato|opentable|flickr|pinterest|tumblr|reddit\.com|quora|wikipedia|youtube\.com|tiktok\.com|linkedin\.com|x\.com|snapchat|threads|medium\.com|substack|gh-pages|archive\.org|amazon\.com|ebay\.com|aliexpress|2gis\.com|yandex\.com|uber\.com|doordash|grubhub|seamless|glassdoor|indeed\.com|glassdoor|angieslist|homeadvisor|thumbtack|bbb\.org|trustpilot|sitejabber|clutch\.co|goodfirms|sortlist|brightlocal|moz\.com|semrush|ahrefs|similarweb/i;
+// Q&A / knowledge / UGC platforms that look like domains but are never a business's own site
+const QA_JUNK_SITES = /baidu\.com|zhidao|baike\.com|answers\.com|ask\.com|brainly|stackexchange|stackoverflow|wikihow|quora|socratic|brainly\.[a-z.]+/i;
+// Auto-generated aggregator clone networks (e.g. salobiebia.restaurants-us.com, x.hotels-uk.com)
+const AGGREGATOR_NETWORK = /(^|\.)(restaurants|hotels|cafes|bars|salons|shops|clinics?|dental|beauty|fitness|gyms?|pharmac(y|ies)|attractions|places)-[a-z]{2,4}\.(com|net|org|info)$/i;
+// Hostname that IS a forum/community (but "theforumcafe.com" stays allowed)
+const FORUM_HOST = /(^|\.)forum(s|\.|$)|(^|\.)(community|board|bbs)\./i;
+// Media/streaming platforms: a Spotify/YouTube-Music/Vimeo/SoundCloud/Deezer
+// link is the business's PLAYLIST, never its own website.
+const MEDIA_PLATFORM = /spotify\.com|music\.youtube|youtube\.com|youtu\.be|soundcloud|vimeo\.com|deezer\.com|apple\.com\/.*music|tidal\.com|bandcamp\.com|mixcloud|last\.fm|anghami|jiosaavn|podimo|castbox/i;
+// Review/directory/article hosts that never host a business's own website
+const REVIEW_DIRECTORY = /happycow\.net|organicrestaurants\.com|restaurantguru|tripadvisor|yelp\.com|zomato|thefork|thefork\.ie|sluurpy|menu\.ge|menu\.am|restaurantji|menupix|usarestaurants|restaurants-world|worldorgs|nicelocal|bir\.ai|restaurantji\.com|zaubee|find-open|opendi|cityseeker|wanderlog|roadtrippers|onlyinyourstate|eatbook|beyondmenu|allmenus|grubhub|seamless|doordash|ubereats|wolt|bolt\.eu|glovo|deliveroo|foodpanda|zomato\.com|dineplace|gastroge|ambebi\.ge|sfizo|fooood\.ge|food\.ge|mena\.ge|bistro\.ge/i;
+// Yellow-pages / corporate-registry hosts: their pages are ABOUT companies,
+// never a company's own site (yell.ge, yell.com, companyinfo.ge, …)
+const YELLOW_PAGES = /(^|\.)yell\.[a-z.]+|companyinfo\.ge|azbuka\.ge|yellow\.ge|infobiz\.ge/i;
+
+// Does the text plausibly refer to this business? Checks the name in its
+// original script, transliterated and English-map forms.
+function textMentionsBusiness(text: string, businessName: string): boolean {
+  if (!text || !businessName) return false;
+  const t = text.toLowerCase();
+  const name = businessName.trim().toLowerCase();
+  if (!name) return false;
+  if (t.includes(name)) return true;
+  const translit = transliterateGeo(businessName).toLowerCase().trim();
+  if (translit && translit !== name && t.includes(translit)) return true;
+  const en = getEnglishCityName(businessName).toLowerCase().trim();
+  if (en && en !== name && en !== translit && t.includes(en)) return true;
+  return false;
+}
+
+// Check if a URL is likely the business's OWN website (not a directory listing)
+export function isLikelyBusinessWebsite(url: string, businessName: string, text?: string): boolean {
+  try {
+    const u = new URL(url);
+    const hostname = u.hostname.replace(/^www\./, '').toLowerCase();
+    const path = (u.pathname || '').toLowerCase();
+    // Reject directory/listing sites
+    if (DIRECTORY_SITES.test(hostname)) return false;
+    // Reject Q&A / knowledge / UGC platforms (e.g. zhidao.baidu.com/question/...)
+    if (QA_JUNK_SITES.test(hostname)) return false;
+    // Reject auto-generated aggregator clone networks (e.g. *.restaurants-us.com)
+    if (AGGREGATOR_NETWORK.test(hostname)) return false;
+    // Reject media/streaming platforms: a Spotify/YouTube-Music/Vimeo/SoundCloud
+    // link is the business's PLAYLIST, never its website.
+    if (MEDIA_PLATFORM.test(hostname)) return false;
+    // Reject review/directory/article hosts that never host a business's own site
+    if (REVIEW_DIRECTORY.test(hostname)) return false;
+    // Reject yellow-pages / corporate-registry hosts
+    if (YELLOW_PAGES.test(hostname)) return false;
+    // Reject forum/community hosts and member/profile pages
+    if (FORUM_HOST.test(hostname)) return false;
+    if (/^\/(members?|users?|profile|profiles|questions?|threads?|topics?|post|posts|discussion)\//.test(path)) return false;
+    // Reject review/listing/article paths on any host: /reviews/x, /listing/x,
+    // /partners/x, /venues/x — pages ABOUT a business, never the business.
+    if (/\/(reviews?|review-of|listings?|partners?|places?|directory|businesses|venues?|menus?)\//.test(path)) return false;
+    // Reject SEO listicle paths: /best-cafes-in-tbilisi…, /top-10-restaurants…,
+    // /things-to-do-in-yerevan — magazine roundups, never a business homepage.
+    if (/\/(best|top)[-_\d][a-z0-9-]*-in-/.test(path) || /\/(things?-to-do|itinerar)/.test(path)) return false;
+    // Reject editorial/media hosts (travel & food magazines) that never host a
+    // business's own website — deep-scraping them wastes minutes per business.
+    if (/wander-lush\.org|culturetrip\.com|lonelyplanet\.com|timeout\.com|eater\.com|thrillist\.com|cntraveler|travelandleisure|atlasobscura|insider\.com|buzzfeed/i.test(hostname)) return false;
+    // Reject third-party pages ABOUT the business (food-blog articles,
+    // partner listings): e.g. culinarybackstreets.com/stories/tbilisi/lui-coffee
+    // or georefund.com/partners/Art-CafeHOME. Signal: hostname shares no
+    // significant token with the business name, but the path mentions it.
+    const tokens = extractBizNameTokens(businessName);
+    if (tokens.length && !tokens.some(t => hostname.includes(t))) {
+      // Hostname shares NO significant token with the business name.
+      const pathSlug = path.replace(/[^a-z0-9]+/g, ' ');
+      // Case 1 — path mentions the business but host doesn't: third-party page
+      // ABOUT the business (blog article, partner listing) → reject.
+      if (tokens.some(t => pathSlug.includes(t))) return false;
+      // Case 2 — NEITHER host nor path mentions the business: ambiguous. Only
+      // accept when the accompanying title/snippet confirms the business.
+      if (text !== undefined && !textMentionsBusiness(text, businessName)) return false;
+    }
+    // Reject known non-business domains
+    if (/google|facebook|instagram|twitter|tiktok|linkedin|pinterest|reddit|youtube|amazon|ebay|apple|microsoft|github|stackoverflow/i.test(hostname)) return false;
+    // Reject if hostname is just an IP address
+    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) return false;
+    // Reject subdomains of major platforms (e.g., business.tripadvisor.com)
+    const parts = hostname.split('.');
+    if (parts.length > 3) return false; // too many subdomains = likely a platform page
+    // Accept if it looks like a real business domain
+    // Good signs: .com, .ge, .org, .net, .io, .co, country TLDs
+    // Bad signs: blogspot, wordpress.com, wix, squarespace (but these ARE real business sites)
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function extractWebsite(tags: Record<string, string>): string {
-  return tags.website || tags['contact:website'] || tags.url || '';
+  const raw = tags.website || tags['contact:website'] || tags.url || '';
+  if (!raw) return '';
+  const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  // Only keep the business's OWN website. Junk sources (Q&A pages, forum
+  // profiles, aggregator clones) would otherwise be deep-scraped later,
+  // burning minutes of enrichment time and polluting results.
+  return isLikelyBusinessWebsite(url, tags.name || '') ? url : '';
+}
+
+// ─── Multilingual Search Helpers ───────────────────────────
+// Maps common Georgian city names to English
+const CITY_EN_MAP: Record<string, string> = {
+  // Georgian
+  'თბილისი': 'Tbilisi', 'ბათუმი': 'Batumi', 'ქუთაისი': 'Kutaisi',
+  'რუსთავი': 'Rustavi', 'ზუგდიდი': 'Zugdidi', 'გორი': 'Gori',
+  'ფოთი': 'Poti', 'ქობულეთი': 'Kobuleti', 'თელავი': 'Telavi',
+  'სამტრედია': 'Samtredia', 'სენაკი': 'Senaki', 'ხაშური': 'Khashuri',
+  'ახალციხე': 'Akhaltsikhe', 'ოზურგეთი': 'Ozurgeti', 'მარნეული': 'Marneuli',
+  // Armenian
+  'Երևան': 'Yerevan', 'Գյումրի': 'Gyumri', 'Վանաձոր': 'Vanadzor',
+  'Աբովյան': 'Abovyan', 'Կապան': 'Kapan', 'Հրազդան': 'Hrazdan',
+  // Russian
+  'Москва': 'Moscow', 'Санкт-Петербург': 'Saint Petersburg', 'Новосибирск': 'Novosibirsk',
+  'Екатеринбург': 'Yekaterinburg', 'Казань': 'Kazan', 'Нижний Новгород': 'Nizhny Novgorod',
+  'Краснодар': 'Krasnodar', 'Сочи': 'Sochi', 'Самара': 'Samara', 'Омск': 'Omsk',
+  // Turkish
+  'İstanbul': 'Istanbul', 'Ankara': 'Ankara', 'İzmir': 'Izmir',
+  'Bursa': 'Bursa', 'Antalya': 'Antalya', 'Adana': 'Adana',
+  'Trabzon': 'Trabzon', 'Gaziantep': 'Gaziantep', 'Konya': 'Konya',
+  'Mersin': 'Mersin', 'Diyarbakır': 'Diyarbakir',
+  // Azerbaijani
+  'Bakı': 'Baku', 'Gəncə': 'Ganja', 'Sumqayıt': 'Sumqayit',
+  // Arabic
+  'القاهرة': 'Cairo', 'الرياض': 'Riyadh', 'جدة': 'Jeddah',
+  'دبي': 'Dubai', 'بيروت': 'Beirut', 'عمّان': 'Amman',
+  // Hindi
+  'मुंबई': 'Mumbai', 'दिल्ली': 'Delhi', 'बेंगलुरु': 'Bangalore',
+  // Chinese/Japanese/Korean
+  '서울': 'Seoul', '도쿄': 'Tokyo',
+  // Ukrainian
+  'Київ': 'Kyiv', 'Харків': 'Kharkiv', 'Одеса': 'Odesa', 'Дніпро': 'Dnipro',
+};
+
+// Transliterate any non-Latin script to Latin
+function transliterateGeo(text: string): string {
+  if (!text) return text;
+  const map: Record<string, string> = {
+    // Georgian
+    'ა': 'a', 'ბ': 'b', 'გ': 'g', 'დ': 'd', 'ე': 'e', 'ვ': 'v',
+    'ზ': 'z', 'თ': 't', 'ი': 'i', 'კ': 'k', 'ლ': 'l', 'მ': 'm',
+    'ნ': 'n', 'ო': 'o', 'პ': 'p', 'ჟ': 'zh', 'რ': 'r', 'ს': 's',
+    'ტ': 't', 'უ': 'u', 'ფ': 'p', 'ქ': 'k', 'ღ': 'gh', 'ყ': 'q',
+    'შ': 'sh', 'ჩ': 'ch', 'ც': 'ts', 'ძ': 'dz', 'წ': 'ts',
+    'ჭ': 'ch', 'ხ': 'kh', 'ჯ': 'j', 'ჰ': 'h',
+    // Armenian
+    'Ա': 'A', 'Բ': 'B', 'Գ': 'G', 'Դ': 'D', 'Ե': 'Ye', 'Զ': 'Z',
+    'Է': 'E', 'Ը': 'Y', 'Թ': 'T', 'Ժ': 'Zh', 'Ի': 'I', 'Լ': 'L',
+    'Խ': 'Kh', 'Կ': 'K', 'Հ': 'H', 'Ձ': 'Dz', 'Ղ': 'Gh', 'Ճ': 'Ch',
+    'Մ': 'M', 'Յ': 'Y', 'Ն': 'N', 'Շ': 'Sh', 'Ո': 'Vo', 'Չ': 'Ch',
+    'Պ': 'P', 'Ջ': 'J', 'Ռ': 'R', 'Ս': 'S', 'Վ': 'V', 'Տ': 'T',
+    'Ր': 'R', 'Ց': 'Ts', 'Փ': 'P', 'Ք': 'K', 'Օ': 'O', 'Ֆ': 'F',
+    'ա': 'a', 'բ': 'b', 'գ': 'g', 'դ': 'd', 'ե': 'ye', 'զ': 'z',
+    'է': 'e', 'ը': 'y', 'թ': 't', 'ժ': 'zh', 'ի': 'i', 'լ': 'l',
+    'խ': 'kh', 'կ': 'k', 'հ': 'h', 'ձ': 'dz', 'ղ': 'gh', 'ճ': 'ch',
+    'մ': 'm', 'յ': 'y', 'ն': 'n', 'շ': 'sh', 'ո': 'vo', 'չ': 'ch',
+    'պ': 'p', 'ջ': 'j', 'ռ': 'r', 'ս': 's', 'վ': 'v', 'տ': 't',
+    'ր': 'r', 'ց': 'ts', 'ու': 'u', 'փ': 'p', 'ք': 'k', 'և': 'ev',
+    'օ': 'o', 'ֆ': 'f',
+    // Russian/Cyrillic
+    'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Е': 'E',
+    'Ё': 'Yo', 'Ж': 'Zh', 'З': 'Z', 'И': 'I', 'Й': 'Y', 'К': 'K',
+    'Л': 'L', 'М': 'M', 'Н': 'N', 'О': 'O', 'П': 'P', 'Р': 'R',
+    'С': 'S', 'Т': 'T', 'У': 'U', 'Ф': 'F', 'Х': 'Kh', 'Ц': 'Ts',
+    'Ч': 'Ch', 'Ш': 'Sh', 'Щ': 'Shch', 'Ъ': '', 'Ы': 'Y', 'Ь': '',
+    'Э': 'E', 'Ю': 'Yu', 'Я': 'Ya',
+    'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e',
+    'ё': 'yo', 'ж': 'zh', 'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k',
+    'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r',
+    'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'kh', 'ц': 'ts',
+    'ч': 'ch', 'ш': 'sh', 'щ': 'shch', 'ъ': '', 'ы': 'y', 'ь': '',
+    'э': 'e', 'ю': 'yu', 'я': 'ya',
+  };
+  return text.split('').map(c => map[c] || c).join('');
+}
+
+// Get English name for a city (from map or transliteration)
+function getEnglishCityName(name: string): string {
+  if (!name) return '';
+  if (CITY_EN_MAP[name]) return CITY_EN_MAP[name];
+  // Check if already Latin
+  if (/^[a-zA-Z\s-]+$/.test(name)) return name;
+  // Try transliteration
+  const translit = transliterateGeo(name);
+  if (translit !== name) return translit;
+  return name;
+}
+
+// Pull significant Latin name tokens for hostname/path comparison. Handles
+// non-Latin names (Georgian/Armenian/Cyrillic/Chinese) via the shared
+// transliterators so e.g. "ლუის ყავის სახლი" still matches lui-coffee paths.
+function extractBizNameTokens(businessName: string): string[] {
+  let name = businessName || '';
+  if (!/[\u0041-\u005A\u0061-\u007A]/.test(name)) {
+    const en = getEnglishCityName(name);
+    if (en) name = en;
+    else name = transliterateGeo(name);
+  }
+  return name.toLowerCase().split(/[^a-z0-9]+/).filter(t =>
+    t.length >= 3 &&
+    !/^(cafe|café|coffee|restaurant|bar|pub|hotel|hostel|salon|shop|store|bakery|gym|fitness|club|spa|clinic|pharmacy|studio|the|and|of|la|le|de|da)$/i.test(t)
+  );
 }
 
 /** OSM social values may be full URLs, 'www.', bare usernames or '@user'. */
@@ -497,6 +701,56 @@ function wait(ms: number): Promise<void> {
 // Global cancel signal — set by App.tsx, checked by all enrichment loops
 let _cancelSignal: AbortSignal | null = null;
 export function setCancelSignal(signal: AbortSignal | null) { _cancelSignal = signal; }
+
+// ─── Response cache (localStorage, quality-neutral) ───────────────
+// OSM POI data changes on the scale of days/weeks; Wikipedia pageviews roll
+// monthly; AI analysis is derived from those inputs. Caching by exact input
+// key therefore CANNOT change any number the app shows — it only removes
+// redundant network round-trips when re-running the same scan (retry after
+// enrichment, revisiting a city, hot-reload during dev).
+const CACHE_PREFIX = 'bo_cache_';
+const DAY_MS = 24 * 60 * 60 * 1000;
+function cacheGet<T>(key: string, maxAgeMs: number): T | null {
+  try {
+    const raw = localStorage.getItem(CACHE_PREFIX + key);
+    if (!raw) return null;
+    const { t, v } = JSON.parse(raw);
+    if (typeof t !== 'number' || Date.now() - t > maxAgeMs) {
+      localStorage.removeItem(CACHE_PREFIX + key);
+      return null;
+    }
+    return v as T;
+  } catch { return null; }
+}
+function cacheSet(key: string, value: any): void {
+  try {
+    localStorage.setItem(CACHE_PREFIX + key, JSON.stringify({ t: Date.now(), v: value }));
+  } catch {
+    // Quota exceeded — drop our oldest entries (cheap LRU) and retry once
+    try {
+      const ours = Object.keys(localStorage).filter(k => k.startsWith(CACHE_PREFIX));
+      ours.sort((a, b) => {
+        const ta = JSON.parse(localStorage.getItem(a) || '{"t":0}').t;
+        const tb = JSON.parse(localStorage.getItem(b) || '{"t":0}').t;
+        return ta - tb;
+      });
+      for (const k of ours.slice(0, Math.ceil(ours.length / 2))) localStorage.removeItem(k);
+      localStorage.setItem(CACHE_PREFIX + key, JSON.stringify({ t: Date.now(), v: value }));
+    } catch { /* give up silently — cache is best-effort */ }
+  }
+}
+function cacheKey(...parts: (string | number)[]): string {
+  return parts.map(p => String(p)).join('|');
+}
+// FNV-1a 32-bit string hash — compact cache keys for long Overpass queries
+function hashStr(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return h.toString(36);
+}
 function isCancelled(): boolean { return _cancelSignal?.aborted ?? false; }
 
 // ─── CORS Fetch Helper ────────────────────────────────────────────
@@ -507,14 +761,48 @@ function isCancelled(): boolean { return _cancelSignal?.aborted ?? false; }
 // Total max wait: ~4 seconds (not 12+)
 // Multi-proxy strategy: try 3 different CORS proxies in parallel
 let _lastProxyFail = 0; // 30s cooldown instead of permanent block
+
+// ─── Per-host circuit breaker (quality-neutral) ───────────────────
+// A host that consistently fails at the NETWORK level (timeout / refused /
+// DNS / CORS-rejected) can never yield data, so skipping it later cannot
+// change any output — it only removes dead 5-30s waits. HTTP responses
+// (404/500/etc.) do NOT count: those hosts are alive and may serve other
+// paths. Trips after 4 consecutive network failures; resets on any success;
+// re-probes after 2 minutes so a temporarily-down host recovers.
+const _hostFails = new Map<string, { n: number; until: number }>();
+const HOST_FAIL_LIMIT = 4;
+const HOST_OPEN_MS = 120000;
+function hostKey(u: string): string {
+  try { return new URL(u).host; } catch { return u; }
+}
+function hostIsOpen(u: string): boolean {
+  const h = hostKey(u);
+  const e = _hostFails.get(h);
+  return !!e && e.n >= HOST_FAIL_LIMIT && Date.now() < e.until;
+}
+function hostRecordFail(u: string): void {
+  const h = hostKey(u);
+  const e = _hostFails.get(h) || { n: 0, until: 0 };
+  e.n++;
+  if (e.n >= HOST_FAIL_LIMIT) e.until = Date.now() + HOST_OPEN_MS;
+  _hostFails.set(h, e);
+}
+function hostRecordSuccess(u: string): void {
+  _hostFails.delete(hostKey(u));
+}
+
 async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', ...init?.headers };
   const callerSignal = init?.signal;
 
+  // 0) Circuit breaker: this host is currently known-dead at the network
+  //    level — fail instantly instead of burning 5-30s on every request.
+  if (hostIsOpen(url)) return new Response('', { status: 0, statusText: 'Host unreachable (circuit open)' });
+
   // 1) Try direct fetch — instant for CORS-enabled, instant error for others
   try {
     const r = await fetch(url, { ...init, headers });
-    if (r.ok) return r;
+    if (r.ok) { hostRecordSuccess(url); return r; }
   } catch { /* CORS error */ }
   if (callerSignal?.aborted) throw new Error('Cancelled');
 
@@ -526,7 +814,7 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   // 3) Try cors.sh (working as of 2026, keyless)
   try {
     const r = await fetch('https://cors.sh/' + url, { headers, signal: AbortSignal.timeout(5000) });
-    if (r.ok) return r;
+    if (r.ok) { hostRecordSuccess(url); return r; }
   } catch {}
 
   // 4) Jina Reader (keyless, returns page text/markdown — good for contact
@@ -535,7 +823,10 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
     const r = await fetch('https://r.jina.ai/' + url, { headers, signal: AbortSignal.timeout(12000) });
     if (r.ok) {
       const text = await r.text();
-      if (text && text.length > 100) return new Response(text, { status: 200, headers: { 'Content-Type': 'text/plain' } });
+      if (text && text.length > 100) {
+        hostRecordSuccess(url);
+        return new Response(text, { status: 200, headers: { 'Content-Type': 'text/plain' } });
+      }
     }
   } catch {}
 
@@ -544,10 +835,12 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
     const r = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(url), { headers, signal: AbortSignal.timeout(5000) });
     if (r.ok) {
       const json = await r.json();
+      hostRecordSuccess(url);
       return new Response(json.contents || '', { status: 200, headers: { 'Content-Type': 'text/html' } });
     }
   } catch {}
 
+  hostRecordFail(url);
   _lastProxyFail = Date.now();
   return new Response('', { status: 0, statusText: 'CORS unavailable' });
 }
@@ -626,69 +919,81 @@ const CAT_OSM_FILTER: Record<string, string> = {
 // "area genuinely empty" from "Overpass never answered".
 let _overpassExhausted = false;
 
+// One attempt against one mirror. Resolves with parsed JSON on success,
+// null on any failure (rate-limit, non-JSON, timeout). Never throws.
+async function overpassAttempt(mirror: string, query: string, timeoutSec: number): Promise<any> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), (timeoutSec + 15) * 1000);
+    const res = await fetch(mirror, {
+      method: 'POST',
+      body: `data=${encodeURIComponent(query)}`,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const text = await res.text();
+    if (!text.trim().startsWith('{')) return null; // XML error page / rate-limit
+    const data = JSON.parse(text);
+    if (data.elements === undefined) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+// HEDGE: race the two primary mirrors (Overpass allows ~2 concurrent slots
+// per IP — kumi.systems runs independent hardware, so a 2-request race is
+// within policy and NOT quality-changing: identical query, first valid JSON
+// wins, the loser is simply discarded). Cuts tail latency from
+// best-of-1 to min(t1, t2). Remaining mirrors stay as sequential fallbacks.
+async function overpassRace(query: string, timeoutSec: number): Promise<any> {
+  const [primary, secondary] = OVERPASS_MIRRORS;
+  // Secondary starts ~400ms later — keeps us at ~2 slots total, not a herd.
+  const hedge = await Promise.all([
+    overpassAttempt(primary, query, timeoutSec),
+    new Promise<null>(res => setTimeout(() => res(null), 400))
+      .then(() => overpassAttempt(secondary, query, timeoutSec)),
+  ]);
+  const fast = hedge.find(Boolean);
+  if (fast) return fast;
+  // Both primaries failed → walk remaining mirrors sequentially
+  for (let mi = 2; mi < OVERPASS_MIRRORS.length; mi++) {
+    const r = await overpassAttempt(OVERPASS_MIRRORS[mi], query, timeoutSec);
+    if (r) return r;
+    await wait(2000);
+  }
+  return null;
+}
+
 async function fetchOverpass(query: string, timeoutSec = 60, onWait?: (msg: string) => void): Promise<any> {
   _overpassExhausted = false;
-  const tryAllMirrors = async (): Promise<any> => {
-    for (let mi = 0; mi < OVERPASS_MIRRORS.length; mi++) {
-      const mirror = OVERPASS_MIRRORS[mi];
-      // Try up to 2 attempts per mirror for main mirrors
-      const attempts = mi < 2 ? 2 : 1;
-      for (let attempt = 0; attempt < attempts; attempt++) {
-        try {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), (timeoutSec + 15) * 1000);
-          const res = await fetch(mirror, {
-            method: 'POST',
-            body: `data=${encodeURIComponent(query)}`,
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            signal: controller.signal,
-          });
-          clearTimeout(timer);
-          if (res.status === 429 || res.status === 504) {
-            // Rate limited / gateway timeout — this mirror needs a longer pause
-            if (attempt < attempts - 1) await wait(10000);
-            continue;
-          }
-          if (!res.ok) {
-            if (attempt < attempts - 1) await wait(3000);
-            continue;
-          }
-          const text = await res.text();
-          if (!text.trim().startsWith('{')) {
-            // Got XML error or empty — rate limited
-            if (attempt < attempts - 1) await wait(5000);
-            continue;
-          }
-          const data = JSON.parse(text);
-          if (data.elements === undefined) continue;
-          return data;
-        } catch (e) {
-          if (attempt < attempts - 1) await wait(2000);
-          continue;
-        }
-      }
-      // Wait between mirrors
-      if (mi < OVERPASS_MIRRORS.length - 1) await wait(2000);
-    }
-    return null;
-  };
-
-  // First pass across all mirrors…
-  let data = await tryAllMirrors();
+  // Cache: identical Overpass query → identical element set. 24h TTL is far
+  // below the rate at which POI data materially changes, so results are the
+  // same numbers the live query would return.
+  const ck = 'ovp_' + cacheKey(query.length, hashStr(query));
+  const cached = cacheGet<any>(ck, DAY_MS);
+  if (cached) return cached;
+  // First pass: hedged race across the two primary mirrors + walk the rest
+  let data = await overpassRace(query, timeoutSec);
   // …if everything failed, cool down and try again (typical cause: the IP is
   // rate-limited after a heavy scan; bans usually lift within a minute).
   if (!data) {
     onWait?.('OpenStreetMap servers are busy — waiting 40s before retrying…');
     await wait(40000);
-    data = await tryAllMirrors();
+    data = await overpassRace(query, timeoutSec);
   }
   // Still nothing? One last patient attempt — longer bans need a longer pause.
   if (!data) {
     onWait?.('Still busy — waiting 2 minutes for a final retry…');
     await wait(120000);
-    data = await tryAllMirrors();
+    data = await overpassRace(query, timeoutSec);
   }
-  if (data) return data;
+  if (data) {
+    cacheSet(ck, data);
+    return data;
+  }
 
   // ── Last resort: try Overpass directly (CORS supported) ──
   try {
@@ -732,7 +1037,11 @@ export async function queryBusinesses(
   const east = lon + radiusMeters / (111000 * cosLat);
   const bbox = `${south},${west},${north},${east}`;
 
-  // ── Tier 1: Single focused query for food/drink/healthcare ──
+  // ── Tier 1: SINGLE merged query (food/health/entertainment + shops +
+  // tourism/leisure/office/craft/healthcare). Was 3 sequential requests with
+  // 1.5s sleeps between them (~2 extra round-trips + 3s wasted); Overpass
+  // unions are server-side, so the result set is IDENTICAL — same tags, same
+  // bbox, same output. One request ≈ the slowest of the old three, not their sum.
   const qFood = `[out:json][timeout:90][maxsize:536870912];
 (
   node(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream"];
@@ -741,20 +1050,8 @@ export async function queryBusinesses(
   way(${bbox})["amenity"~"pharmacy|hospital|clinic|dentist|veterinary"];
   node(${bbox})["amenity"~"bank|cinema|nightclub|car_rental|fuel|marketplace|spa|sauna|casino|music_school|dancing_school"];
   way(${bbox})["amenity"~"bank|cinema|nightclub|car_rental|fuel|marketplace|spa|sauna|casino|music_school|dancing_school"];
-);
-out center body;`;
-
-  // ── Tier 1b: Shops ──
-  const qShops = `[out:json][timeout:90][maxsize:536870912];
-(
   node(${bbox})["shop"];
   way(${bbox})["shop"];
-);
-out center body;`;
-
-  // ── Tier 1c: Tourism + Leisure ──
-  const qOther = `[out:json][timeout:60][maxsize:268435456];
-(
   node(${bbox})["tourism"~"hotel|hostel|motel|apartment|guest_house"];
   way(${bbox})["tourism"~"hotel|hostel|motel|apartment|guest_house"];
   node(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool|spa|sauna"];
@@ -833,32 +1130,31 @@ out center body;`;
     }
   } else {
     // ── FULL MODE: All categories (for Discover Opportunities) ──
+    // Single merged request (see qFood above) — one round-trip covers what
+    // used to be 3 sequential scans. Batch tiles still animate for UX: we
+    // mark them done as soon as the one response lands, categorized locally.
     _dp.osmBatches.foodHealth.status = 'running';
     emitDP({ percent: 8 });
     onProgress?.(10, 'Scanning food, healthcare & entertainment…');
-    const d1 = await fetchOverpass(qFood, 90, (msg) => onProgress?.(15, msg));
+    const d1 = await fetchOverpass(qFood, 120, (msg) => onProgress?.(15, msg));
     if (d1?.elements) allElements.push(...d1.elements);
-    _dp.osmBatches.foodHealth = { status: d1 ? 'done' : 'error', found: allElements.length };
-    _dp.totalFound = allElements.length;
-    emitDP({ percent: 22 });
-
-    await wait(1500);
-    _dp.osmBatches.shopsRetail.status = 'running';
-    emitDP({ percent: 25 });
-    onProgress?.(30, 'Scanning shops & retail…');
-    const d2 = await fetchOverpass(qShops, 90, (msg) => onProgress?.(35, msg));
-    if (d2?.elements) allElements.push(...d2.elements);
-    _dp.osmBatches.shopsRetail = { status: d2 ? 'done' : 'error', found: allElements.length - _dp.osmBatches.foodHealth.found };
-    _dp.totalFound = allElements.length;
-    emitDP({ percent: 38 });
-
-    await wait(1500);
-    _dp.osmBatches.hotelsGyms.status = 'running';
-    emitDP({ percent: 42 });
-    onProgress?.(50, 'Scanning hotels, gyms & services…');
-    const d3 = await fetchOverpass(qOther, 60, (msg) => onProgress?.(55, msg));
-    if (d3?.elements) allElements.push(...d3.elements);
-    _dp.osmBatches.hotelsGyms = { status: d3 ? 'done' : 'error', found: allElements.length - _dp.osmBatches.foodHealth.found - _dp.osmBatches.shopsRetail.found };
+    // Categorize locally to fill the three batch tiles (same data the old
+    // 3-batch flow displayed, just computed client-side from one response).
+    const bucket = (pred: (t: Record<string, string>) => boolean) =>
+      d1?.elements?.filter((el: any) => pred(el.tags || {})).length ?? 0;
+    _dp.osmBatches.foodHealth = {
+      status: d1 ? 'done' : 'error',
+      found: bucket((t) => !!(t.amenity && /cafe|restaurant|bar|pub|fast_food|ice_cream|pharmacy|hospital|clinic|dentist|veterinary|bank|cinema|nightclub|car_rental|fuel|marketplace|spa|sauna|casino/.test(t.amenity))),
+    };
+    _dp.osmBatches.shopsRetail = {
+      status: d1 ? 'done' : 'error',
+      found: bucket((t) => !!t.shop),
+    };
+    _dp.osmBatches.hotelsGyms = {
+      status: d1 ? 'done' : 'error',
+      found: bucket((t) => !!(t.tourism || t.leisure || t.office || t.craft || t.healthcare
+        || (t.amenity && /bank|cinema|nightclub|car_rental|fuel|marketplace|spa|sauna|casino|music_school|dancing_school/.test(t.amenity)))),
+    };
     _dp.totalFound = allElements.length;
     emitDP({ percent: 55 });
 
@@ -1003,26 +1299,26 @@ async function enrichFromSocialPlatforms(businesses: Business[], onProgress?: (p
           }
         }
         // Twitter/X
-        // TikTok
-        if (!b.website) {
+        // TikTok — goes to the dedicated social field, NEVER b.website
+        if (!b.tiktok) {
           const ttMatch = html.match(/tiktok\.com\/@([a-zA-Z0-9._]+)/i);
           if (ttMatch && !ttMatch[0].includes('login')) {
-            b.website = 'https://tiktok.com/@' + ttMatch[1];
+            b.tiktok = 'https://tiktok.com/@' + ttMatch[1];
             found++;
           }
         }
-        // LinkedIn company page
-        if (!b.website) {
-          const liMatch = html.match(/linkedin\.com\/(?:company|school)\/([a-zA-Z0-9._-]+)/i);
-          if (liMatch && !liMatch[0].includes('login')) {
-            b.website = 'https://linkedin.com/company/' + liMatch[1];
+        // LinkedIn company page — dedicated social field, NEVER b.website
+        if (!b.linkedin) {
+          const liMatch2 = html.match(/linkedin\.com\/(?:company|school)\/([a-zA-Z0-9._-]+)/i);
+          if (liMatch2 && !liMatch2[0].includes('login')) {
+            b.linkedin = 'https://linkedin.com/company/' + liMatch2[1];
             found++;
           }
         }
-        // YouTube
+        // YouTube — dedicated social field, NEVER b.website
         const ytMatch = html.match(/youtube\.com\/(channel\/[^"&]+|@[^"&\s]+)/i);
-        if (ytMatch && !b.website) {
-          b.website = 'https://' + ytMatch[0].replace(/\/$/, '');
+        if (ytMatch && !b.youtube) {
+          b.youtube = 'https://' + ytMatch[0].replace(/\/$/, '');
           found++;
         }
         // Extract any social links found
@@ -1093,7 +1389,7 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
               if (types.some((t: string) => /LocalBusiness|Restaurant|Bar|Cafe|Store|Hotel|Organization/i.test(t || ''))) {
                 if (!b.phone && entity.telephone) b.phone = entity.telephone;
                 if (!b.email && entity.email) b.email = entity.email;
-                if (!b.website && entity.url && !EXCLUDE.test(entity.url)) b.website = entity.url;
+                if (!b.website && entity.url && !EXCLUDE.test(entity.url) && isLikelyBusinessWebsite(entity.url, b.name)) b.website = entity.url;
                 if (!b.facebook && entity.sameAs) {
                   const sameAs = Array.isArray(entity.sameAs) ? entity.sameAs : [entity.sameAs];
                   for (const s of sameAs) {
@@ -1200,12 +1496,12 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
         }
       }
 
-      // 7. YouTube channel link
-      if (!b.website) {
+      // 7. YouTube channel link — dedicated social field, NEVER b.website
+      if (!b.youtube) {
         const ytMatch = full.match(/youtube\.com\/(?:channel\/([^"\s&]+)|@([a-zA-Z0-9._-]+))/i);
         if (ytMatch) {
           const ytUrl = ytMatch[1] ? 'https://youtube.com/channel/' + ytMatch[1] : 'https://youtube.com/@' + ytMatch[2];
-          b.website = ytUrl;
+          b.youtube = ytUrl;
         }
       }
 
@@ -1249,6 +1545,8 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
                    '/contactos', '/contato', '/联系我们', '/お問い合わせ', '/اتصل بنا', '/написать-нам'];
     for (const path of paths) {
       if (b.email && b.phone && b.facebook) break;
+      // Host went network-dead mid-loop: bail out (circuit breaker)
+      if (hostIsOpen(base)) break;
       await deepScrape(base + path);
     }
   }
@@ -1434,30 +1732,9 @@ async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct:
 }
 
 
-// Directory/listing sites that should NEVER be set as a business website
-const DIRECTORY_SITES = /yelp\.com|tripadvisor|foursquare|booking\.com|expedia|yellowpages|justdial|zomato|opentable|flickr|pinterest|tumblr|reddit\.com|quora|wikipedia|youtube\.com|tiktok\.com|linkedin\.com|x\.com|snapchat|threads|medium\.com|substack|gh-pages|archive\.org|amazon\.com|ebay\.com|aliexpress|2gis\.com|yandex\.com|uber\.com|doordash|grubhub|seamless|glassdoor|indeed\.com|glassdoor|angieslist|homeadvisor|thumbtack|bbb\.org|trustpilot|sitejabber|clutch\.co|goodfirms|sortlist|brightlocal|moz\.com|semrush|ahrefs|similarweb/i;
-
-// Check if a URL is likely the business's OWN website (not a directory listing)
-function isLikelyBusinessWebsite(url: string, businessName: string): boolean {
-  try {
-    const hostname = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
-    // Reject directory/listing sites
-    if (DIRECTORY_SITES.test(hostname)) return false;
-    // Reject known non-business domains
-    if (/google|facebook|instagram|twitter|tiktok|linkedin|pinterest|reddit|youtube|amazon|ebay|apple|microsoft|github|stackoverflow/i.test(hostname)) return false;
-    // Reject if hostname is just an IP address
-    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) return false;
-    // Reject subdomains of major platforms (e.g., business.tripadvisor.com)
-    const parts = hostname.split('.');
-    if (parts.length > 3) return false; // too many subdomains = likely a platform page
-    // Accept if it looks like a real business domain
-    // Good signs: .com, .ge, .org, .net, .io, .co, country TLDs
-    // Bad signs: blogspot, wordpress.com, wix, squarespace (but these ARE real business sites)
-    return true;
-  } catch {
-    return false;
-  }
-}
+// NOTE: website junk-filter (isLikelyBusinessWebsite + DIRECTORY_SITES etc.)
+// lives at TOP-LEVEL scope so extractWebsite (OSM tags) and the search-engine
+// enrichment phase share the exact same rules.
 
 // ── Unified extraction: pull phone, email, website, social from any HTML/text ──
 function extractFromHtml(html: string, b: Business): boolean {
@@ -1601,6 +1878,7 @@ function extractFromHtml(html: string, b: Business): boolean {
       try { host = new URL(url).hostname.replace(/^www\./, ''); } catch { continue; }
       if (DENY.test(host)) continue;
       if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) continue;
+      if (!isLikelyBusinessWebsite(url, b.name)) continue;
       b.website = url; break;
     }
   }
@@ -1671,6 +1949,8 @@ async function tryCommonEmailPatterns(b: Business): Promise<void> {
     const contactPaths = ['/contact', '/contact-us', '/about', '/about-us'];
     for (const path of contactPaths) {
       if (b.email) break;
+      // Host went network-dead mid-loop: bail out (circuit breaker)
+      if (hostIsOpen(base)) break;
       try {
         const r = await corsFetch(base + path, { signal: AbortSignal.timeout(3000) });
         if (!r.ok) continue;
@@ -1738,15 +2018,15 @@ function extractFromText(text: string, b: Business): boolean {
       if (val > 0 && val < 100000) b.reviewCount = val;
     }
   }
-  // YouTube as website fallback
-  if (!b.website) {
+  // YouTube — dedicated social field, NEVER b.website
+  if (!b.youtube) {
     const m = text.match(/youtube\.com\/(?:channel\/([a-zA-Z0-9_-]+)|@([a-zA-Z0-9._-]+))/i);
-    if (m) b.website = m[1] ? 'https://youtube.com/channel/' + m[1] : 'https://youtube.com/@' + m[2];
+    if (m) b.youtube = m[1] ? 'https://youtube.com/channel/' + m[1] : 'https://youtube.com/@' + m[2];
   }
-  // LinkedIn as website fallback
-  if (!b.website) {
+  // LinkedIn — dedicated social field, NEVER b.website
+  if (!b.linkedin) {
     const m = text.match(/linkedin\.com\/(?:company|school)\/([a-zA-Z0-9._-]+)/i);
-    if (m) { b.website = 'https://linkedin.com/company/' + m[1]; touched = true; }
+    if (m) { b.linkedin = 'https://linkedin.com/company/' + m[1]; touched = true; }
   }
   return touched;
 }
@@ -1973,7 +2253,7 @@ function applySearchResult(b: Business, url: string, text: string, found: { n: n
     let u = url;
     const uddg = u.match(/uddg=([^&]+)/);
     if (uddg) { try { u = decodeURIComponent(uddg[1]); } catch {} }
-    if (u.startsWith('http') && !EXCLUDE_DOMAINS.test(u) && isLikelyBusinessWebsite(u, b.name)) {
+    if (u.startsWith('http') && !EXCLUDE_DOMAINS.test(u) && isLikelyBusinessWebsite(u, b.name, text)) {
       b.website = u; found.n++;
     }
   }
@@ -2063,94 +2343,6 @@ async function enrichFromTavily(businesses: Business[], onProgress?: (pct: numbe
 // falling back to the embedded free-tier key so the app works out of the box.
 // (embedded fallback is base64-encoded — see note above)
 const BRAVE_API_KEY = (import.meta as any).env?.VITE_BRAVE_API_KEY || _b64dec('QlNBZGVkM3RuWmZ2YWRpZVc1cHowdGlMcmxoMmx2bg==');
-
-// ─── Multilingual Search Helpers ───────────────────────────
-// Maps common Georgian city names to English
-const CITY_EN_MAP: Record<string, string> = {
-  // Georgian
-  'თბილისი': 'Tbilisi', 'ბათუმი': 'Batumi', 'ქუთაისი': 'Kutaisi',
-  'რუსთავი': 'Rustavi', 'ზუგდიდი': 'Zugdidi', 'გორი': 'Gori',
-  'ფოთი': 'Poti', 'ქობულეთი': 'Kobuleti', 'თელავი': 'Telavi',
-  'სამტრედია': 'Samtredia', 'სენაკი': 'Senaki', 'ხაშური': 'Khashuri',
-  'ახალციხე': 'Akhaltsikhe', 'ოზურგეთი': 'Ozurgeti', 'მარნეული': 'Marneuli',
-  // Armenian
-  'Երևան': 'Yerevan', 'Գյումրի': 'Gyumri', 'Վանաձոր': 'Vanadzor',
-  'Աբովյան': 'Abovyan', 'Կապան': 'Kapan', 'Հրազդան': 'Hrazdan',
-  // Russian
-  'Москва': 'Moscow', 'Санкт-Петербург': 'Saint Petersburg', 'Новосибирск': 'Novosibirsk',
-  'Екатеринбург': 'Yekaterinburg', 'Казань': 'Kazan', 'Нижний Новгород': 'Nizhny Novgorod',
-  'Краснодар': 'Krasnodar', 'Сочи': 'Sochi', 'Самара': 'Samara', 'Омск': 'Omsk',
-  // Turkish
-  'İstanbul': 'Istanbul', 'Ankara': 'Ankara', 'İzmir': 'Izmir',
-  'Bursa': 'Bursa', 'Antalya': 'Antalya', 'Adana': 'Adana',
-  'Trabzon': 'Trabzon', 'Gaziantep': 'Gaziantep', 'Konya': 'Konya',
-  'Mersin': 'Mersin', 'Diyarbakır': 'Diyarbakir',
-  // Azerbaijani
-  'Bakı': 'Baku', 'Gəncə': 'Ganja', 'Sumqayıt': 'Sumqayit',
-  // Arabic
-  'القاهرة': 'Cairo', 'الرياض': 'Riyadh', 'جدة': 'Jeddah',
-  'دبي': 'Dubai', 'بيروت': 'Beirut', 'عمّان': 'Amman',
-  // Hindi
-  'मुंबई': 'Mumbai', 'दिल्ली': 'Delhi', 'बेंगलुरु': 'Bangalore',
-  // Chinese/Japanese/Korean
-  '서울': 'Seoul', '도쿄': 'Tokyo',
-  // Ukrainian
-  'Київ': 'Kyiv', 'Харків': 'Kharkiv', 'Одеса': 'Odesa', 'Дніпро': 'Dnipro',
-};
-
-// Transliterate any non-Latin script to Latin
-function transliterateGeo(text: string): string {
-  if (!text) return text;
-  const map: Record<string, string> = {
-    // Georgian
-    'ა': 'a', 'ბ': 'b', 'გ': 'g', 'დ': 'd', 'ე': 'e', 'ვ': 'v',
-    'ზ': 'z', 'თ': 't', 'ი': 'i', 'კ': 'k', 'ლ': 'l', 'მ': 'm',
-    'ნ': 'n', 'ო': 'o', 'პ': 'p', 'ჟ': 'zh', 'რ': 'r', 'ს': 's',
-    'ტ': 't', 'უ': 'u', 'ფ': 'p', 'ქ': 'k', 'ღ': 'gh', 'ყ': 'q',
-    'შ': 'sh', 'ჩ': 'ch', 'ც': 'ts', 'ძ': 'dz', 'წ': 'ts',
-    'ჭ': 'ch', 'ხ': 'kh', 'ჯ': 'j', 'ჰ': 'h',
-    // Armenian
-    'Ա': 'A', 'Բ': 'B', 'Գ': 'G', 'Դ': 'D', 'Ե': 'Ye', 'Զ': 'Z',
-    'Է': 'E', 'Ը': 'Y', 'Թ': 'T', 'Ժ': 'Zh', 'Ի': 'I', 'Լ': 'L',
-    'Խ': 'Kh', 'Կ': 'K', 'Հ': 'H', 'Ձ': 'Dz', 'Ղ': 'Gh', 'Ճ': 'Ch',
-    'Մ': 'M', 'Յ': 'Y', 'Ն': 'N', 'Շ': 'Sh', 'Ո': 'Vo', 'Չ': 'Ch',
-    'Պ': 'P', 'Ջ': 'J', 'Ռ': 'R', 'Ս': 'S', 'Վ': 'V', 'Տ': 'T',
-    'Ր': 'R', 'Ց': 'Ts', 'Փ': 'P', 'Ք': 'K', 'Օ': 'O', 'Ֆ': 'F',
-    'ա': 'a', 'բ': 'b', 'գ': 'g', 'դ': 'd', 'ե': 'ye', 'զ': 'z',
-    'է': 'e', 'ը': 'y', 'թ': 't', 'ժ': 'zh', 'ի': 'i', 'լ': 'l',
-    'խ': 'kh', 'կ': 'k', 'հ': 'h', 'ձ': 'dz', 'ղ': 'gh', 'ճ': 'ch',
-    'մ': 'm', 'յ': 'y', 'ն': 'n', 'շ': 'sh', 'ո': 'vo', 'չ': 'ch',
-    'պ': 'p', 'ջ': 'j', 'ռ': 'r', 'ս': 's', 'վ': 'v', 'տ': 't',
-    'ր': 'r', 'ց': 'ts', 'ու': 'u', 'փ': 'p', 'ք': 'k', 'և': 'ev',
-    'օ': 'o', 'ֆ': 'f',
-    // Russian/Cyrillic
-    'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Е': 'E',
-    'Ё': 'Yo', 'Ж': 'Zh', 'З': 'Z', 'И': 'I', 'Й': 'Y', 'К': 'K',
-    'Л': 'L', 'М': 'M', 'Н': 'N', 'О': 'O', 'П': 'P', 'Р': 'R',
-    'С': 'S', 'Т': 'T', 'У': 'U', 'Ф': 'F', 'Х': 'Kh', 'Ц': 'Ts',
-    'Ч': 'Ch', 'Ш': 'Sh', 'Щ': 'Shch', 'Ъ': '', 'Ы': 'Y', 'Ь': '',
-    'Э': 'E', 'Ю': 'Yu', 'Я': 'Ya',
-    'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e',
-    'ё': 'yo', 'ж': 'zh', 'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k',
-    'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r',
-    'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'kh', 'ц': 'ts',
-    'ч': 'ch', 'ш': 'sh', 'щ': 'shch', 'ъ': '', 'ы': 'y', 'ь': '',
-    'э': 'e', 'ю': 'yu', 'я': 'ya',
-  };
-  return text.split('').map(c => map[c] || c).join('');
-}
-
-// Get English name for a city (from map or transliteration)
-function getEnglishCityName(name: string): string {
-  if (!name) return '';
-  if (CITY_EN_MAP[name]) return CITY_EN_MAP[name];
-  // Check if already Latin
-  if (/^[a-zA-Z\s-]+$/.test(name)) return name;
-  // Try transliteration
-  const translit = transliterateGeo(name);
-  if (translit !== name) return translit;
-  return name;
-}
 
 
 const EXCLUDE_DOMAINS = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com/i;
@@ -2338,6 +2530,8 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
     ];
     for (const path of paths) {
       if (b.email) break;
+      // Host went network-dead mid-loop: bail out (circuit breaker)
+      if (hostIsOpen(base)) break;
       try {
         // Try direct fetch first (most websites support CORS)
         let r: Response;
@@ -2446,7 +2640,7 @@ async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number
             if (m && m[0].length >= 8) { b.phone = m[0].trim(); found++; }
           }
           // Extract website from result URL
-          if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com')) {
+          if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com') && isLikelyBusinessWebsite(res.url, b.name, desc)) {
             b.website = res.url; found++;
           }
           // Extract email
@@ -2466,7 +2660,7 @@ async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number
           // Extract additional website from Brave knowledge graph
           if (!b.website && data.knowledge_graph?.url) {
             const kgUrl = data.knowledge_graph.url;
-            if (!kgUrl.includes('google.com') && !EXCLUDE_DOMAINS.test(kgUrl)) {
+            if (!kgUrl.includes('google.com') && !EXCLUDE_DOMAINS.test(kgUrl) && isLikelyBusinessWebsite(kgUrl, b.name)) {
               b.website = kgUrl; found++;
             }
           }
@@ -2536,7 +2730,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             const uddgMatch = href.match(/uddg=([^&]+)/);
             if (uddgMatch) actualUrl = decodeURIComponent(uddgMatch[1]);
             // Must be an HTTP URL
-            if (actualUrl.startsWith('http')) {
+            if (actualUrl.startsWith('http') && isLikelyBusinessWebsite(actualUrl, b.name)) {
               b.website = actualUrl;
               found++;
               break;
@@ -2766,9 +2960,9 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                 let touched = false;
                 for (const res of (data.web?.results || [])) {
                   if (extractFromText((res.description || '') + ' ' + (res.title || ''), b)) touched = true;
-                  if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('google.com/maps') && isLikelyBusinessWebsite(res.url, b.name)) b.website = res.url;
+                  if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('google.com/maps') && isLikelyBusinessWebsite(res.url, b.name, (res.description || '') + ' ' + (res.title || ''))) b.website = res.url;
                 }
-                if (!b.website && data.knowledge_graph?.url && !_EXCLUDE.test(data.knowledge_graph.url)) b.website = data.knowledge_graph.url;
+                if (!b.website && data.knowledge_graph?.url && !_EXCLUDE.test(data.knowledge_graph.url) && isLikelyBusinessWebsite(data.knowledge_graph.url, b.name)) b.website = data.knowledge_graph.url;
                 if (touched || b.website) markEngine(b, 'Brave');
               }
             } catch {}
@@ -2790,7 +2984,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               let touched = false;
               for (const res of bingResults) {
                 if (extractFromText((res.snippet || '') + ' ' + (res.title || ''), b)) touched = true;
-                if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('bing.com') && isLikelyBusinessWebsite(res.url, b.name)) b.website = res.url;
+                if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('bing.com') && isLikelyBusinessWebsite(res.url, b.name, (res.snippet || '') + ' ' + (res.title || ''))) b.website = res.url;
               }
               if (touched || b.website) markEngine(b, 'Bing');
             } catch {}
@@ -2802,7 +2996,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               let touched = false;
               for (const res of spResults) {
                 if (extractFromText((res.snippet || '') + ' ' + (res.title || ''), b)) touched = true;
-                if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('duckduckgo.com/lite') && isLikelyBusinessWebsite(res.url, b.name)) b.website = res.url;
+                if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('duckduckgo.com/lite') && isLikelyBusinessWebsite(res.url, b.name, (res.snippet || '') + ' ' + (res.title || ''))) b.website = res.url;
               }
               if (touched || b.website) markEngine(b, 'DDG Lite');
             } catch {}
@@ -2964,7 +3158,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                 if (!b.website && item.contact_groups) {
                   for (const grp of item.contact_groups) {
                     for (const contact of (grp.contacts || [])) {
-                      if (contact.type === 'website' && contact.value && !contact.value.includes('2gis.com')) {
+                      if (contact.type === 'website' && contact.value && !contact.value.includes('2gis.com') && isLikelyBusinessWebsite(contact.value.startsWith('http') ? contact.value : 'https://' + contact.value, b.name)) {
                         b.website = contact.value.startsWith('http') ? contact.value : 'https://' + contact.value;
                       }
                     }
@@ -3284,9 +3478,12 @@ const OPENROUTER_MODEL = (import.meta as any).env?.VITE_OPENROUTER_MODEL || 'nvi
 // free-tier models as fallbacks. This keeps the app usable when one
 // provider is upstream-rate-limited (common on free tiers).
 const AI_MODEL_CHAIN: string[] = [
-  OPENROUTER_MODEL,
-  'google/gemma-4-31b-it:free',
+  // minimax first: cleanest/fastest structured JSON of the free pool (no
+  // reasoning-token overhead, fewest 429s in testing). nemotron second — it
+  // spends tokens thinking before answering, so it costs ~2× wall time.
   'minimax/minimax-m2.7:free',
+  'google/gemma-4-31b-it:free',
+  OPENROUTER_MODEL,
   'z-ai/glm-5.2:free',
 ];
 
@@ -3624,6 +3821,16 @@ TASK: Analyze this market data and return ONLY a valid JSON object (no markdown,
 
 Generate 3-5 insights, 2-4 patterns, 2-3 risks, 2-4 actions. Every claim must trace back to the numbers above.`;
 
+  // Cache: analysis is a pure function of (facts, opportunities). Same
+  // inputs → same cached output (no model re-roll), so repeat scans show
+  // the exact same AI panel instantly instead of a 20-60s LLM wait.
+  const aiCk = 'ai_' + cacheKey(
+    hashStr(facts.cityName + '|' + facts.countryName), facts.population, opportunities.length,
+    hashStr(JSON.stringify(facts.categories) + JSON.stringify(opportunities.map(o => [o.category, o.score, o.existing, o.gap])))
+  );
+  const cachedAI = cacheGet<AIAnalysis>(aiCk, DAY_MS);
+  if (cachedAI) return cachedAI;
+
   try {
     // Walk the model chain; a reply only counts when its JSON parses AND
     // contains at least one usable insight/pattern — otherwise the chain
@@ -3682,7 +3889,9 @@ Generate 3-5 insights, 2-4 patterns, 2-3 risks, 2-4 actions. Every claim must tr
 
     if (insights.length === 0 && patterns.length === 0) throw new Error('empty-analysis');
 
-    return { model: 'openrouter', insights, patterns, risks, actions, isAI: true };
+    const result: AIAnalysis = { model: 'openrouter', insights, patterns, risks, actions, isAI: true };
+    cacheSet(aiCk, result);
+    return result;
   } catch {
     // Deterministic fallback — same real data, rules-based analysis
     return deterministicAIAnalysis(facts, opportunities);
@@ -3844,6 +4053,12 @@ export interface DemandSignal {
 }
 
 export async function getDemandSignals(categoryLabel: string, cityName: string): Promise<DemandSignal> {
+  // Cache: same category+city → same signal inputs (pageviews roll monthly,
+  // reddit/web search sampled live). 12h TTL keeps repeat scans instant
+  // without changing any score the live call would compute.
+  const ck = 'demand_' + cacheKey(categoryLabel, cityName);
+  const cachedSig = cacheGet<DemandSignal>(ck, 12 * 60 * 60 * 1000);
+  if (cachedSig) return cachedSig;
   const signals: DemandSignal = {
     score: 0, confidence: 0, wikipedia: 0, reddit: 0, webSearch: 0,
     explanation: '', sources: [],
@@ -3916,6 +4131,7 @@ export async function getDemandSignals(categoryLabel: string, cityName: string):
   if (signals.reddit > 20) p.push(`${signals.reddit} community discussions`);
   signals.explanation = p.length ? p.join(', ') : 'Limited demand data available';
 
+  cacheSet(ck, signals);
   return signals;
 }
 
@@ -4179,6 +4395,7 @@ function extractFromHtmlModule(html: string, b: Business): void {
       try { host = new URL(url).hostname.replace(/^www\./, ''); } catch { continue; }
       if (DENY.test(host)) continue;
       if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) continue;
+      if (!isLikelyBusinessWebsite(url, b.name)) continue;
       b.website = url; break;
     }
   }

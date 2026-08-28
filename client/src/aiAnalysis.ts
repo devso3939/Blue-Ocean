@@ -17,11 +17,11 @@ const OPENROUTER_API_KEY = _b64dec((import.meta as any).env?.VITE_OPENROUTER_API
 const OPENROUTER_MODEL = (import.meta as any).env?.VITE_OPENROUTER_MODEL || 'nvidia/nemotron-3-super-120b-a12b:free';
 
 // Same chain as clientEngine.ts — a dead/rate-limited model falls through
-// to the next one automatically.
+// to the next one automatically. minimax leads: fastest clean JSON.
 const AI_MODEL_CHAIN: string[] = [
-  OPENROUTER_MODEL,
-  'google/gemma-4-31b-it:free',
   'minimax/minimax-m2.7:free',
+  'google/gemma-4-31b-it:free',
+  OPENROUTER_MODEL,
   'z-ai/glm-5.2:free',
 ];
 

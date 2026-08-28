@@ -529,6 +529,10 @@ export default function App() {
   const [bizSearch, setBizSearch] = useState('');
   const [sortCol, setSortCol] = useState<string>('name');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+  // Lazy table rendering — initial row cap to keep the main thread responsive
+  const [bizTableLimit, setBizTableLimit] = useState(200);
+  // Reset pagination when switching categories or re-running a scan
+  useEffect(() => { setBizTableLimit(200); }, [selectedOppCategory, businesses]);
 
   const filteredBiz = categoryBusinesses
     .filter(b =>
@@ -1591,7 +1595,7 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredBiz.map((b, i) => {
+                    {filteredBiz.slice(0, bizTableLimit).map((b, i) => {
                       const gmapsUrl = getGoogleMapsUrl(b);
                       return (
                         <tr key={b.id} className="border-b border-border/50 last:border-0 hover:bg-muted/20 transition-colors">
@@ -1631,6 +1635,19 @@ export default function App() {
                   </tbody>
                 </table>
               </div>
+              {/* Lazy table rendering: render ≤200 rows initially; a huge
+                  table (10k+ rows) froze the main thread for seconds. The
+                  "Show all" button renders the rest — same data, no loss. */}
+              {filteredBiz.length > bizTableLimit && (
+                <div className="py-3 text-center border-t border-border">
+                  <button
+                    onClick={() => setBizTableLimit(l => l + 500)}
+                    className="text-sm text-primary hover:underline"
+                  >
+                    Show more ({filteredBiz.length - bizTableLimit} remaining)
+                  </button>
+                </div>
+              )}
               {filteredBiz.length === 0 && bizSearch && (
                 <div className="py-8 text-center text-sm text-muted-foreground">No businesses match "{bizSearch}"</div>
               )}
