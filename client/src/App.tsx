@@ -12,6 +12,7 @@ import {
   type DemandSignal,
   type OpportunityResult,
   type EnrichmentProgress,
+  setScanContext, buildScanContext,
 } from './clientEngine';
 import CompareView from './CompareView';
 import CountryView from './CountryView';
@@ -110,7 +111,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '6.4.0';
+const APP_VERSION = '6.5.0';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -407,6 +408,8 @@ export default function App() {
     setEnrichProgress(null);
 
     try {
+      // Native-language context for this city (helps contact discovery)
+      setScanContext(buildScanContext(selectedCity.countryCode, selectedCity.country, selectedCity.name));
       const biz = await queryBusinesses(
         selectedCity.lat, selectedCity.lon, 10000,
         (pct, msg) => { setProgress(pct); setLoadingStage(msg); },
@@ -478,6 +481,8 @@ export default function App() {
       setLoadingStage(`Scanning ${getCategoryLabel(selectedCategory)}…`);
       setProgress(5);
 
+      // Native-language context for this city (helps contact discovery)
+      setScanContext(buildScanContext(selectedCity.countryCode, selectedCity.country, selectedCity.name));
       const biz = await queryBusinesses(
         selectedCity.lat, selectedCity.lon, 10000,
         (pct, msg) => { setProgress(Math.max(pct, 5)); setLoadingStage(msg); },
@@ -1108,6 +1113,7 @@ export default function App() {
                             setEnrichProgress(null);
                             setLoadingStage(`Enriching ${getCategoryLabel(selectedOppCategory)}…`);
                             setProgress(5);
+                            setScanContext(buildScanContext(selectedCity.countryCode, selectedCity.country, selectedCity.name));
                             queryBusinesses(
                               selectedCity.lat, selectedCity.lon, 10000,
                               (pct, msg) => { setProgress(Math.max(pct, 5)); setLoadingStage(msg); },

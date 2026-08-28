@@ -7,6 +7,7 @@ import {
   type CityResult,
   type Business,
   type OpportunityResult,
+  setScanContext, buildScanContext,
 } from './clientEngine';
 import { analyzeCountry } from './aiAnalysis';
 
@@ -188,6 +189,8 @@ export default function CountryView() {
         setProgress(10 + Math.round((i / cities.length) * 80));
 
         try {
+          // Native-language context for this city (helps contact discovery)
+          setScanContext(buildScanContext(city.countryCode, city.country, city.name));
           const biz = await queryBusinesses(city.lat, city.lon, 8000, (pct, msg) => {
             setProgress(10 + Math.round(((i + pct / 100) / cities.length) * 80));
             setStage(`Scanning ${city.name} (${i + 1}/${cities.length}): ${msg}`);

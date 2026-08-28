@@ -1,10 +1,10 @@
-# 🌊 Blue Ocean v6.4.0
+# 🌊 Blue Ocean v6.5.0
 
 **Find What Your City Is Missing.**
 
 Discover underserved industries, compare business supply across similar cities, and uncover Blue Ocean opportunities using global open location data — all from your browser with zero backend.
 
-![Version](https://img.shields.io/badge/version-6.4.0-blue)
+![Version](https://img.shields.io/badge/version-6.5.0-blue)
 ![React](https://img.shields.io/badge/React-18-61DAFB)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.4-3178C6)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -12,6 +12,23 @@ Discover underserved industries, compare business supply across similar cities, 
 ## 🚀 Live Demo
 
 **https://devso3939.github.io/Blue-Ocean/**
+
+## 🆕 What's new in v6.5.0 (global contact & language update)
+
+**Native-language business discovery:**
+- Business search now runs in the **country's native language** (auto-detected per country, refined on the fly from OSM `name:xx` tag frequency) alongside English — cafes in Tbilisi are searched as `კაფე`, pharmacies in Yerevan as `դեղատուն`, etc.
+- New **ccTLD-restricted queries** (`site:.ge`, `site:.com.tr`, …) surface country-local websites English queries never reach
+- New `lang.ts` module: country→language map (~90 countries), ~32 category translations in 17 languages, native city names
+
+**Contact parsing improvements:**
+- **Phone numbers validated & normalized** with libphonenumber-js against the scan country (e.g. `0322 12 34 56` → `+995 32 212 34 56`); OSM multi-value phones (`;`-separated) fully parsed
+- **Twitter/X profiles** harvested from OSM `contact:twitter`/`contact:x` (previously discarded); LinkedIn/YouTube/TikTok extractors handle bare usernames and `@handles`
+- **Serper.dev** (Google SERP, 2,500 free) and **Tavily** (AI search, 1,000/mo free) join the enrichment engine chain when keys are set in `client/.env`
+
+**AI:**
+- Optional **OpenRouter** free models (50 req/day) via `VITE_OPENROUTER_API_KEY` — automatically preferred over keyless Pollinations when set
+
+All new keys are optional — see `client/.env.example`. The app works fully without them.
 
 ## 🆕 What's new in v6.4.0 (engine & parsing update)
 

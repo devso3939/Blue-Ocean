@@ -10,6 +10,13 @@
 
 // ─── City Resolution ───────────────────────────────────────────────
 
+// libphonenumber-js (free, offline): parse/validate/normalize phone numbers
+import { parsePhoneNumberFromString, AsYouType } from 'libphonenumber-js';
+// Native-language scan context (country → language/ccTLD/category terms)
+import { setScanContext, getScanContext, buildScanContext, categoryInNative, countryTld, type ScanContext } from './lang';
+export type { ScanContext };
+export { setScanContext, buildScanContext };
+
 export interface CityResult {
   name: string;
   country: string;
@@ -293,11 +300,39 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
 
 // ─── Parsing Helpers ───────────────────────────────────────────────
 
-function extractPhone(tags: Record<string, string>): string {
-  return tags.phone || tags['contact:phone'] || tags['contact:mobile'] ||
-         tags['phone:mobile'] || tags['phone:international'] ||
-         tags['contact:landline'] || tags['contact:fax'] ||
-         tags['contact:whatsapp'] || tags['contact:viber'] || '';
+/**
+ * Extract + normalize a phone from OSM tags using libphonenumber-js.
+ * OSM stores multi-numbers ';'-separated; pass countryCode (e.g. 'GE')
+ * so local formats (032 2xx xx xx) resolve correctly.
+ */
+function extractPhone(tags: Record<string, string>, countryCode?: string): string {
+  const raw = tags.phone || tags['contact:phone'] || tags['contact:mobile'] ||
+              tags['phone:mobile'] || tags['phone:international'] ||
+              tags['contact:landline'] || tags['contact:fax'] ||
+              tags['contact:whatsapp'] || tags['contact:viber'] || '';
+  if (!raw) return '';
+  const first = raw.split(/[;,/]/)[0].trim();
+  try {
+    const cc = (countryCode || '').toLowerCase() || undefined;
+    const parsed = parsePhoneNumberFromString(first, cc as any);
+    if (parsed && parsed.isValid()) return parsed.formatInternational();
+    // Invalid but digits exist — keep cleaned raw (better than dropping)
+    if (first.replace(/\D/g, '').length >= 7) return first;
+    return '';
+  } catch {
+    return first;
+  }
+}
+
+/** Normalize any scraped phone against the scan country. */
+export function normalizePhone(raw: string, countryCode?: string): string {
+  const v = (raw || '').trim();
+  if (!v) return '';
+  try {
+    const parsed = parsePhoneNumberFromString(v, (countryCode || undefined) as any);
+    if (parsed && parsed.isValid()) return parsed.formatInternational();
+  } catch {}
+  return v;
 }
 
 function extractEmail(tags: Record<string, string>): string {
@@ -308,43 +343,44 @@ function extractWebsite(tags: Record<string, string>): string {
   return tags.website || tags['contact:website'] || tags.url || '';
 }
 
-function extractFacebook(tags: Record<string, string>): string {
-  const raw = tags['contact:facebook'] || tags.facebook || '';
+/** OSM social values may be full URLs, 'www.', bare usernames or '@user'. */
+function osmSocialUrl(raw: string, base: string): string {
   if (!raw) return '';
-  if (raw.startsWith('http')) return raw;
-  if (raw.startsWith('www.')) return `https://${raw}`;
-  return `https://facebook.com/${raw.replace(/^\/+/, '')}`;
+  const v = raw.split(';')[0].trim();
+  if (/^https?:\/\//i.test(v)) return v;
+  if (v.startsWith('www.')) return `https://${v}`;
+  return `${base}/${v.replace(/^@+/, '').replace(/^\/+/, '')}`;
+}
+
+function extractFacebook(tags: Record<string, string>): string {
+  return osmSocialUrl(tags['contact:facebook'] || tags.facebook || '', 'https://facebook.com');
 }
 
 function extractInstagram(tags: Record<string, string>): string {
-  const raw = tags['contact:instagram'] || tags.instagram || '';
-  if (!raw) return '';
-  if (raw.startsWith('http')) return raw;
-  return `https://instagram.com/${raw.replace(/^@+/, '')}`;
+  return osmSocialUrl(tags['contact:instagram'] || tags.instagram || '', 'https://instagram.com');
 }
 
 // Extract LinkedIn from OSM tags
 function extractLinkedIn(tags: Record<string, string>): string {
-  const raw = tags['contact:linkedin'] || tags.linkedin || '';
-  if (!raw) return '';
-  if (raw.startsWith('http')) return raw;
-  return `https://linkedin.com/company/${raw.replace(/^@+/, '')}`;
+  return osmSocialUrl(tags['contact:linkedin'] || tags.linkedin || '', 'https://linkedin.com/company');
 }
 
 // Extract YouTube from OSM tags
 function extractYouTube(tags: Record<string, string>): string {
-  const raw = tags['contact:youtube'] || tags.youtube || '';
-  if (!raw) return '';
-  if (raw.startsWith('http')) return raw;
-  return `https://youtube.com/@${raw.replace(/^@+/, '')}`;
+  return osmSocialUrl(tags['contact:youtube'] || tags.youtube || '', 'https://youtube.com/@');
 }
 
 // Extract TikTok from OSM tags
 function extractTikTok(tags: Record<string, string>): string {
-  const raw = tags['contact:tiktok'] || tags.tiktok || '';
-  if (!raw) return '';
-  if (raw.startsWith('http')) return raw;
-  return `https://tiktok.com/@${raw.replace(/^@+/, '')}`;
+  return osmSocialUrl(tags['contact:tiktok'] || tags.tiktok || '', 'https://tiktok.com/@');
+}
+
+// Extract Twitter/X from OSM tags (was discarded entirely before v6.5)
+function extractTwitter(tags: Record<string, string>): string {
+  const raw = tags['contact:twitter'] || tags.twitter || tags['contact:x'] || '';
+  const u = osmSocialUrl(raw, 'https://twitter.com');
+  // Normalize x.com → twitter.com for display consistency
+  return u ? u.replace('//x.com/', '//twitter.com/') : '';
 }
 
 function formatAddress(tags: Record<string, string>): string {
@@ -751,6 +787,23 @@ out center body;`;
   }
 
   const seenLocations = new Map<string, string>();
+  // Detect the local language from Overpass data itself: the most frequent
+  // `name:xx` key among results is the working local language. This refines
+  // the static country→language map (handles bilingual areas dynamically).
+  const langFreq = new Map<string, number>();
+  const ctx = getScanContext();
+  for (const el of allElements) {
+    const t = el.tags || {};
+    for (const k of Object.keys(t)) {
+      const m = k.match(/^name:([a-z]{2})$/);
+      if (m && m[1] !== 'en') langFreq.set(m[1], (langFreq.get(m[1]) || 0) + 1);
+    }
+  }
+  if (ctx) {
+    let best = '', bestN = 0;
+    langFreq.forEach((n, k) => { if (n > bestN) { best = k; bestN = n; } });
+    if (best && best !== ctx.lang && bestN >= 3) (ctx as any).lang = best;
+  }
 
   for (const el of allElements) {
     const elLat = el.lat || el.center?.lat;
@@ -778,7 +831,7 @@ out center body;`;
       category,
       categoryLabel: getCategoryLabel(category),
       address: formatAddress(tags),
-      phone: extractPhone(tags),
+      phone: extractPhone(tags, ctx?.countryCode),
       website: extractWebsite(tags),
       email: extractEmail(tags),
       brand: tags.brand || '',
@@ -791,7 +844,7 @@ out center body;`;
       rating: 0,
       reviewCount: 0,
       hours: tags.opening_hours || '',
-      twitter: '',
+      twitter: extractTwitter(tags),
       pinterest: '',
     };
 
@@ -1775,6 +1828,113 @@ async function probeDomains(b: Business): Promise<void> {
 }
 
 // Brave API key: prefer VITE_BRAVE_API_KEY from client/.env (see README),
+// other free-tier engines: Serper (2,500 free one-time queries), Tavily
+// (1,000 searches/month free). Keys are optional — engines simply skip
+// when the env var is absent.
+const SERPER_API_KEY = (import.meta as any).env?.VITE_SERPER_API_KEY || '';
+const TAVILY_API_KEY = (import.meta as any).env?.VITE_TAVILY_API_KEY || '';
+
+/** Apply a search result (title/url/snippet) to a business — shared by all engines. */
+function applySearchResult(b: Business, url: string, text: string, found: { n: number }): void {
+  const cc = getScanContext()?.countryCode;
+  if (!b.phone && text) {
+    const m = text.match(/\+?\d[\d\s\-\.\(\)]{7,18}/);
+    if (m) {
+      const norm = normalizePhone(m[0], cc);
+      if (norm.replace(/\D/g, '').length >= 8) { b.phone = norm; found.n++; }
+    }
+  }
+  if (!b.website && url) {
+    let u = url;
+    const uddg = u.match(/uddg=([^&]+)/);
+    if (uddg) { try { u = decodeURIComponent(uddg[1]); } catch {} }
+    if (u.startsWith('http') && !EXCLUDE_DOMAINS.test(u) && isLikelyBusinessWebsite(u, b.name)) {
+      b.website = u; found.n++;
+    }
+  }
+  if (!b.email && text) {
+    const m = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+    if (m && !/example\.|duckduckgo|sentry|wixpress/i.test(m[0])) { b.email = m[0]; found.n++; }
+  }
+  if (!b.facebook && text) {
+    const m = text.match(/facebook\.com\/([a-zA-Z0-9._-]{2,})/i);
+    if (m && !/sharer|login|dialog/i.test(m[0])) { b.facebook = 'https://facebook.com/' + m[1]; found.n++; }
+  }
+  if (!b.instagram && text) {
+    const m = text.match(/instagram\.com\/([a-zA-Z0-9._-]{2,})/i);
+    if (m && !/accounts|explore|p\/|reel/i.test(m[0])) { b.instagram = 'https://instagram.com/' + m[1]; found.n++; }
+  }
+}
+
+// ─── Serper.dev engine (free tier: 2,500 one-time queries, key optional) ──
+async function enrichFromSerper(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
+  if (!SERPER_API_KEY) return;
+  const NEEDS = businesses.filter(b => !b.website || !b.phone || !b.email);
+  const max = Math.min(NEEDS.length, 80);
+  const BATCH = 3;
+  let found = { n: 0 };
+  for (let i = 0; i < max; i += BATCH) {
+    if (isCancelled()) break;
+    const batch = NEEDS.slice(i, i + BATCH);
+    await Promise.all(batch.map(async (b) => {
+      try {
+        // Native-language query first (site-restricted), then plain
+        const queries = buildSearchQueries(b).slice(0, 2);
+        for (const q of queries) {
+          const r = await fetch('https://google.serper.dev/search', {
+            method: 'POST',
+            headers: { 'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ q: decodeURIComponent(q), num: 5 }),
+            signal: AbortSignal.timeout(10000),
+          });
+          if (!r.ok) return;
+          const data = await r.json();
+          for (const res of (data.organic || []).slice(0, 5)) {
+            applySearchResult(b, res.link || '', `${res.title || ''} ${res.snippet || ''}`, found);
+            if (b.website && b.phone && b.email) break;
+          }
+          if (b.website && b.phone && b.email) break;
+          await wait(400);
+        }
+      } catch {}
+    }));
+    onProgress?.(86, `Serper… ${Math.min(i + BATCH, max)}/${max} (${found.n} found)`);
+    if (i + BATCH < max) await wait(1200);
+  }
+}
+
+// ─── Tavily engine (free tier: 1,000 searches/month, key optional) ──
+async function enrichFromTavily(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
+  if (!TAVILY_API_KEY) return;
+  const NEEDS = businesses.filter(b => !b.website || !b.phone || !b.email);
+  const max = Math.min(NEEDS.length, 60);
+  const BATCH = 3;
+  let found = { n: 0 };
+  for (let i = 0; i < max; i += BATCH) {
+    if (isCancelled()) break;
+    const batch = NEEDS.slice(i, i + BATCH);
+    await Promise.all(batch.map(async (b) => {
+      try {
+        const ctx = getScanContext();
+        const q = `"${b.name}" ${ctx?.cityNative || ''} ${b.categoryLabel || ''} contact phone email`.trim();
+        const r = await fetch('https://api.tavily.com/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ api_key: TAVILY_API_KEY, query: q, max_results: 5, search_depth: 'basic' }),
+          signal: AbortSignal.timeout(12000),
+        });
+        if (!r.ok) return;
+        const data = await r.json();
+        for (const res of (data.results || []).slice(0, 5)) {
+          applySearchResult(b, res.url || '', `${res.title || ''} ${res.content || ''}`, found);
+          if (b.website && b.phone && b.email) break;
+        }
+      } catch {}
+    }));
+    onProgress?.(86, `Tavily… ${Math.min(i + BATCH, max)}/${max} (${found.n} found)`);
+    if (i + BATCH < max) await wait(1000);
+  }
+}
 // falling back to the embedded free-tier key so the app works out of the box.
 const BRAVE_API_KEY = (import.meta as any).env?.VITE_BRAVE_API_KEY || 'BSAded3tnZfvadieW5pz0tiLrlh2lvn';
 
@@ -1890,11 +2050,14 @@ function buildSearchQuery(b: { name: string; address?: string; categoryLabel?: s
     parts.push(`"${b.name}"`);
   }
   // Add keywords that help find contact data in search snippets
+  // Native-language category term (e.g. 'კაფე') reaches local-only sites
+  const nativeCat = categoryInNative(b.category || '', category);
+  if (nativeCat && nativeCat !== category) parts.push(nativeCat);
   parts.push('phone email website contact');
   return encodeURIComponent(parts.join(' '));
 }
 
-// Generate multiple query variations for a business (inspired by omkarcloud approach)
+// Generate multiple query variations for a business (native + English)
 function buildSearchQueries(b: Business): string[] {
   const queries: string[] = [];
   const nameEn = getEnglishCityName(b.name);
@@ -1902,6 +2065,19 @@ function buildSearchQueries(b: Business): string[] {
   const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
   const streetEn = getEnglishCityName(street);
   const isLatin = /^[a-zA-Z\s\-'&.]+$/.test(b.name);
+  const ctx = getScanContext();
+  const nativeCat = categoryInNative(b.category || '', b.categoryLabel || '');
+  const tld = countryTld();
+
+  // Query 0 (new): site:.tld restriction — the strongest local-site filter
+  if (tld && tld !== 'com') {
+    queries.push(encodeURIComponent(`"${b.name}" ${ctx?.cityNative || cityEn || ''} site:.${tld}`));
+  }
+
+  // Query 0b (new): native-language query — name + native category + city
+  if (nativeCat && nativeCat !== (b.categoryLabel || '')) {
+    queries.push(encodeURIComponent(`"${b.name}" ${nativeCat} ${ctx?.cityNative || cityEn || ''} contact`));
+  }
 
   // Query 1: Exact name + city (best for well-known businesses)
   if (isLatin) {
@@ -2304,6 +2480,8 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     engines: [
       { name: 'DuckDuckGo', icon: '🦆', status: 'idle', found: 0 },
       { name: 'Brave', icon: '🦁', status: 'idle', found: 0 },
+      ...(SERPER_API_KEY ? [{ name: 'Serper', icon: '⚡', status: 'idle' as const, found: 0 }] : []),
+      ...(TAVILY_API_KEY ? [{ name: 'Tavily', icon: '🧭', status: 'idle' as const, found: 0 }] : []),
       { name: 'Bing', icon: '🔍', status: 'idle', found: 0 },
       { name: 'DDG Lite', icon: '🌐', status: 'idle', found: 0 },
       { name: '2GIS', icon: '📍', status: 'idle', found: 0 },
@@ -2444,6 +2622,10 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               }
             } catch {}
           })(),
+          // Serper (Google SERP API — free tier, optional key)
+          ...(SERPER_API_KEY ? [enrichFromSerper([b])] : []),
+          // Tavily (AI search API — free tier, optional key)
+          ...(TAVILY_API_KEY ? [enrichFromTavily([b])] : []),
         ]);
 
         // ═══ PHASE 2: Scrape website ONCE ═══

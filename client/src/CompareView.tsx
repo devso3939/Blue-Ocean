@@ -8,6 +8,7 @@ import {
   type Business,
   type DemandSignal,
   type OpportunityResult,
+  setScanContext, buildScanContext,
 } from './clientEngine';
 import { analyzeComparison } from './aiAnalysis';
 
@@ -167,6 +168,8 @@ export default function CompareView() {
     setError('');
 
     try {
+      // Native-language context for this city (helps contact discovery)
+      setScanContext(buildScanContext(city.countryCode, city.country, city.name));
       const biz = await queryBusinesses(city.lat, city.lon, 10000, (pct, msg) => {
         setProgress(pct);
         setLoadingStage(msg);
