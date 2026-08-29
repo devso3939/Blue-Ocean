@@ -956,6 +956,13 @@ let _jinaFails = 0;
 let _jinaLastFail = 0;
 let _alloFails = 0;
 let _alloLastFail = 0;
+// v6.9.10: single-flight promise + last-successful payload for the allorigins
+// arm (see corsFetch step 5). Waiting callers get the flight's outcome
+// without printing another network error; on success they get a 501 marker
+// (payload differs per URL — callers re-enter corsFetch and hit step-0
+// caches/cooldowns instead of firing a second allorigins request).
+let _alloInFlight: Promise<boolean> | null = null;
+let _alloLastPayload = '';
 
 // v6.9.5: hosts known to SERVE CORS headers to browsers (public APIs).
 // These get the instant direct fetch; every other host goes through the
@@ -1209,18 +1216,34 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   }
 
   // 5) allorigins (demoted to last resort: 5xx/timeout failures observed
-  // 2026). v6.9.9: same failure-memory pattern as cors.sh/Jina.
+  // 2026). v6.9.9: failure-memory pattern. v6.9.10: single-flight — when
+  // allorigins is unreachable, 10 parallel aborts printed 10 console errors
+  // per wave; now only ONE in-flight request exists and the rest reuse its
+  // outcome (success clones the payload, failure skips the arm).
   if (_alloFails < 3 || Date.now() - _alloLastFail > 300_000) {
-    try {
-      const r = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(url), { headers, signal: AbortSignal.timeout(5000) });
-      if (r.ok) {
-        const json = await r.json();
-        hostRecordSuccess(url);
-        _alloFails = 0;
-        return new Response(json.contents || '', { status: 200, headers: { 'Content-Type': 'text/html' } });
+    if (_alloInFlight) {
+      const ok = await _alloInFlight.catch(() => false);
+      if (ok) return new Response('', { status: 501, statusText: 'allorigins single-flight: refetch needed' });
+    } else {
+      _alloInFlight = (async () => {
+        try {
+          const r = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(url), { headers, signal: AbortSignal.timeout(5000) });
+          if (r.ok) {
+            const json = await r.json();
+            _alloFails = 0; _alloLastPayload = json.contents || '';
+            hostRecordSuccess(url);
+            return true;
+          }
+          _alloFails++; _alloLastFail = Date.now();
+          return false;
+        } catch { _alloFails++; _alloLastFail = Date.now(); return false; }
+        finally { _alloInFlight = null; }
+      })();
+      const ok = await _alloInFlight;
+      if (ok) {
+        return new Response(_alloLastPayload, { status: 200, headers: { 'Content-Type': 'text/html' } });
       }
-      _alloFails++; _alloLastFail = Date.now();
-    } catch { _alloFails++; _alloLastFail = Date.now(); }
+    }
   }
 
   // v6.9.5: whole chain failed. CORS refusal is host-wide and sticky, so
@@ -3216,13 +3239,21 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   if (allBizList.length > 0) {
     // Use Photon (separate infrastructure from Nominatim) for address filling
     // This NEVER conflicts with city search rate limits
+    // v6.9.10: Photon health gate — this loop fires 150 raw fetches at
+    // concurrency 5; when Photon starts refusing connections (rate limit /
+    // outage) it printed 30+ uncatchable console errors in one pass. Sticky
+    // counter + per-batch gate: after 3 failures Photon is skipped for the
+    // rest of the pass (addresses simply stay empty — they are cosmetic).
+    let _photonFails = 0;
     const maxEnrich = Math.min(allBizList.length, 150);
     const CONCURRENCY = 5; // Photon allows more parallel requests
     for (let i = 0; i < maxEnrich; i += CONCURRENCY) {
       if (isCancelled()) break;
+      if (_photonFails >= 3) break; // v6.9.10: dead engine, stop the pass
       const batch = allBizList.slice(i, i + CONCURRENCY);
       await Promise.allSettled(batch.map(async (b) => {
         if (b.address) return; // already has address
+        if (_photonFails >= 3) return;
         try {
           const r = await fetch(`https://photon.komoot.io/reverse?lat=${b.lat}&lon=${b.lon}&lang=en`, {
             signal: AbortSignal.timeout(3000),
@@ -3234,10 +3265,12 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               const parts = [f.name, f.housenumber, f.district || f.locality, f.city].filter(Boolean);
               b.address = parts.join(', ') || '';
             }
+          } else {
+            _photonFails++;
           }
-        } catch {}
+        } catch { _photonFails++; }
       }));
-      if (i + CONCURRENCY < maxEnrich) await wait(500);
+      if (i + CONCURRENCY < maxEnrich && _photonFails < 3) await wait(500);
       onProgress?.(75, `Filling addresses… ${Math.min(i + CONCURRENCY, maxEnrich)}/${maxEnrich}`);
       _ep.businessesProcessed = Math.min(i + CONCURRENCY, maxEnrich);
       emitEP();
@@ -3268,7 +3301,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     // ── Live discovery feed: mark these businesses as currently being parsed ──
     batch.forEach(b => recordBusiness(b, 'parsing'));
     logQuery(buildSearchQuery(batch[0]), `${batch.length} businesses`);
-    await Promise.all(batch.map(async (b) => {
+    await Promise.all(batch.map(async (b, bi) => {
       try {
         // Helper: check if business has sufficient data (phone OR email + website)
         const hasSufficientData = () => (b.phone && b.email) || (b.phone && b.website) || (b.email && b.website);
@@ -3428,6 +3461,10 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               // must not re-fire here for every business.
               // v6.9.9: surge guard (sticky + 4s pause) caps wave-amplified
               // 429 storms when a whole enrichment wave hits rate-limit.
+              // v6.9.10: stagger 300ms×index + re-check the gate just before
+              // firing — the first 429 lands within ~300ms and blocks the
+              // rest of the wave instead of all 10 failing together.
+              if (bi > 0) await wait(300 * bi);
               if (!braveOkToCall()) return;
               try {
                 const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${emailQ}&count=5`, {
