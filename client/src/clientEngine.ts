@@ -3461,15 +3461,17 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               // must not re-fire here for every business.
               // v6.9.9: surge guard (sticky + 4s pause) caps wave-amplified
               // 429 storms when a whole enrichment wave hits rate-limit.
-              // v6.9.10: stagger 300ms×index + re-check the gate just before
-              // firing — the first 429 lands within ~300ms and blocks the
-              // rest of the wave instead of all 10 failing together.
-              if (bi > 0) await wait(300 * bi);
+              // v6.9.10: stagger + re-check the gate just before firing —
+              // the first failure must land MID-wave to block the rest.
+              // v6.9.11: stagger span (400ms×9 = 3.6s) now exceeds the
+              // reduced 2s timeout, so a dead Brave costs ≤5 errors per
+              // wave instead of 10.
+              if (bi > 0) await wait(400 * bi);
               if (!braveOkToCall()) return;
               try {
                 const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${emailQ}&count=5`, {
                   headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
-                  signal: AbortSignal.timeout(3000),
+                  signal: AbortSignal.timeout(2000),
                 });
                 if (r.ok) {
                   engineNoteSuccess('brave', 'Brave');
