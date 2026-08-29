@@ -92,15 +92,68 @@ export const CATEGORY_TERMS: Record<string, Record<string, string>> = {
 
 /** Native-language names for common cities (extends engine's CITY_EN_MAP reverse). */
 export const NATIVE_CITY_NAMES: Record<string, string> = {
+  // Georgia
   'Tbilisi': 'თბილისი', 'Batumi': 'ბათუმი', 'Kutaisi': 'ქუთაისი',
   'Rustavi': 'რუსთავი', 'Zugdidi': 'ზუგდიდი', 'Gori': 'გორი',
-  'Poti': 'ფოთი', 'Telavi': 'თელავი', 'Yerevan': 'Երևան',
-  'Gyumri': 'Գյումրի', 'Vanadzor': 'Վանաձոր',
-  'Moscow': 'Москва', 'Saint Petersburg': 'Санкт-Петербург',
-  'Kyiv': 'Київ', 'Kharkiv': 'Харків', 'Odesa': 'Одеса',
+  'Poti': 'ფოთი', 'Telavi': 'თელავი',
+  // Armenia / Azerbaijan
+  'Yerevan': 'Երևան', 'Gyumri': 'Գյումրի', 'Vanadzor': 'Վանաձոր',
+  'Baku': 'Bakı', 'Ganja': 'Gəncə',
+  // Russia / Ukraine / Belarus
+  'Moscow': 'Москва', 'Saint Petersburg': 'Санкт-Петербург', 'Novosibirsk': 'Новосибирск',
+  'Yekaterinburg': 'Екатеринбург', 'Kazan': 'Казань',
+  'Kyiv': 'Київ', 'Kharkiv': 'Харків', 'Odesa': 'Одеса', 'Lviv': 'Львів',
+  'Minsk': 'Мінск',
+  // Turkey
   'Istanbul': 'İstanbul', 'Ankara': 'Ankara', 'Izmir': 'İzmir',
-  'Baku': 'Bakı', 'Dubai': 'دبي', 'Cairo': 'القاهرة',
-  'Beirut': 'بيروت', 'Amman': 'عمّان',
+  'Antalya': 'Antalya', 'Bursa': 'Bursa', 'Adana': 'Adana',
+  // Middle East
+  'Dubai': 'دبي', 'Abu Dhabi': 'أبوظبي', 'Riyadh': 'الرياض', 'Jeddah': 'جدة',
+  'Doha': 'الدوحة', 'Kuwait City': 'مدينة الكويت', 'Manama': 'المنامة',
+  'Muscat': 'مسقط', 'Cairo': 'القاهرة', 'Alexandria': 'الإسكندرية',
+  'Tehran': 'تهران', 'Baghdad': 'بغداد', 'Beirut': 'بيروت', 'Amman': 'عمّان',
+  // South Asia
+  'Mumbai': 'मुंबई', 'Delhi': 'दिल्ली', 'New Delhi': 'नई दिल्ली', 'Bengaluru': 'बेंगलुरु',
+  'Chennai': 'चेन्नई', 'Kolkata': 'कोलकाता', 'Hyderabad': 'हैदराबाद', 'Karachi': 'کراچی',
+  'Lahore': 'لاہور', 'Islamabad': 'اسلام آباد', 'Dhaka': 'ঢাকা', 'Colombo': 'කොළඹ',
+  'Kathmandu': 'काठमाडौं',
+  // East Asia
+  'Tokyo': '東京', 'Osaka': '大阪', 'Kyoto': '京都', 'Yokohama': '横浜', 'Nagoya': '名古屋',
+  'Seoul': '서울', 'Busan': '부산',
+  'Beijing': '北京', 'Shanghai': '上海', 'Shenzhen': '深圳', 'Guangzhou': '广州',
+  'Hangzhou': '杭州', 'Chengdu': '成都',
+  'Taipei': '臺北', 'Hong Kong': '香港',
+  // Europe
+  'London': 'London', 'Manchester': 'Manchester', 'Birmingham': 'Birmingham',
+  'Paris': 'Paris', 'Lyon': 'Lyon', 'Marseille': 'Marseille',
+  'Berlin': 'Berlin', 'Munich': 'München', 'Hamburg': 'Hamburg', 'Frankfurt': 'Frankfurt',
+  'Vienna': 'Wien', 'Zurich': 'Zürich', 'Geneva': 'Genève',
+  'Madrid': 'Madrid', 'Barcelona': 'Barcelona', 'Lisbon': 'Lisboa',
+  'Rome': 'Roma', 'Milan': 'Milano', 'Naples': 'Napoli', 'Turin': 'Torino',
+  'Amsterdam': 'Amsterdam', 'Rotterdam': 'Rotterdam', 'Brussels': 'Bruxelles',
+  'Warsaw': 'Warszawa', 'Krakow': 'Kraków', 'Prague': 'Praha',
+  'Budapest': 'Budapest', 'Bucharest': 'București', 'Sofia': 'София',
+  'Belgrade': 'Београд', 'Zagreb': 'Zagreb', 'Ljubljana': 'Ljubljana',
+  'Bratislava': 'Bratislava', 'Athens': 'Αθήνα',
+  'Helsinki': 'Helsinki', 'Stockholm': 'Stockholm', 'Oslo': 'Oslo',
+  'Copenhagen': 'København', 'Dublin': 'Dublin', 'Reykjavik': 'Reykjavík',
+  'Riga': 'Rīga', 'Vilnius': 'Vilnius', 'Tallinn': 'Tallinn',
+  // Americas
+  'New York': 'New York', 'Los Angeles': 'Los Angeles', 'Chicago': 'Chicago',
+  'Houston': 'Houston', 'San Francisco': 'San Francisco', 'Seattle': 'Seattle',
+  'Boston': 'Boston', 'Miami': 'Miami', 'Austin': 'Austin', 'Denver': 'Denver',
+  'Toronto': 'Toronto', 'Vancouver': 'Vancouver', 'Montreal': 'Montréal',
+  'Mexico City': 'Ciudad de México', 'Guadalajara': 'Guadalajara',
+  'São Paulo': 'São Paulo', 'Rio de Janeiro': 'Rio de Janeiro',
+  'Buenos Aires': 'Buenos Aires', 'Santiago': 'Santiago',
+  'Bogotá': 'Bogotá', 'Lima': 'Lima',
+  // Africa / Southeast Asia
+  'Lagos': 'Lagos', 'Nairobi': 'Nairobi', 'Addis Ababa': 'Addis Ababa',
+  'Johannesburg': 'Johannesburg', 'Cape Town': 'Cape Town',
+  'Bangkok': 'กรุงเทพมหานคร', 'Jakarta': 'Jakarta', 'Manila': 'Maynila',
+  'Ho Chi Minh City': 'Thành phố Hồ Chí Minh', 'Hanoi': 'Hà Nội',
+  'Kuala Lumpur': 'Kuala Lumpur', 'Singapore': 'Singapore',
+  'Phnom Penh': 'ភ្នំពេញ', 'Vientiane': 'ວຽງຈັນ', 'Yangon': 'ရန်ကုန်',
 };
 
 /**
