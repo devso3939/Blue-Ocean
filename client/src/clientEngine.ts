@@ -73,9 +73,11 @@ const _b64dec = (v: string) => { try { return atob(v); } catch { return ''; } };
 const _env = (import.meta as any).env || {};
 function _b64decFallback_Serper(): string { return 'M2U4YjNmZjQ0MjVkMTg4NGQxYTYzNmRiMGJmYjdmYWYxODBjYTZlYw=='; }
 function _b64decFallback_Tavily(): string { return 'dHZseS1kZXYtMUpiaTNlLUNGa3VVWkVIN21aNHVad2ZrdGgwVURRVTlpYTVjOERtMUU1STRxbFR1bA=='; }
+// v6.9.13b: dedicated backup Tavily key ("BlueOcean-Backup" on app.tavily.com).
+function _b64decBackup_Tavily(): string { return 'dHZseS1kZXYtMzBIRnJKLVhWMDM4R1ZtZm56cERybVlhaGNGTFF1dHRWVXRQNnpLaDVkSlNraDB4cw=='; }
 // Seed pools: primary (env → embedded fallback) + embedded backups.
 _poolRegister('serper', [_env.VITE_SERPER_API_KEY, _b64decFallback_Serper()]);
-_poolRegister('tavily', [_env.VITE_TAVILY_API_KEY, _b64decFallback_Tavily()]);
+_poolRegister('tavily', [_env.VITE_TAVILY_API_KEY, _b64decFallback_Tavily(), _b64decBackup_Tavily()]);
 _poolRegister('brave', [_env.VITE_BRAVE_API_KEY, _b64dec('QlNBZGVkM3RuWmZ2YWRpZVc1cHowdGlMcmxoMmx2bg==')]);
 const _serperKey = () => _poolKey('serper');
 const _tavilyKey = () => _poolKey('tavily');
@@ -4130,6 +4132,8 @@ function _b64decTop(v: string): string { try { return atob(v); } catch { return 
 _poolRegister('openrouter', [
   (import.meta as any).env?.VITE_OPENROUTER_API_KEY,
   _b64decTop('c2stb3ItdjEtMTU5MjliZDcwNGFjM2VlMTA1YjU3ODVkM2U4NDQzNDc3NmFhNWIyMmI3N2ZjZTk0OGJiOTBiYTU5ZjFmMmE0ZA=='),
+  // v6.9.13b: "Default key" auto-created on openrouter.ai (gensweaty@gmail.com).
+  _b64decTop('c2stb3ItdjEtMjQwMDQ5YjM0OGZhNDgxNDg0ODg0NDQ1NzNkYzUyMjI0YTkxM2JjNTUxNDVhODdiOWE5Njc2MzA5MWM3ZWE5Yg=='),
 ]);
 const _orKey = () => _poolKey('openrouter');
 const OPENROUTER_MODEL = (import.meta as any).env?.VITE_OPENROUTER_MODEL || 'nvidia/nemotron-3-super-120b-a12b:free';
