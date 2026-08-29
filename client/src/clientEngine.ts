@@ -947,6 +947,18 @@ function isCancelled(): boolean { return _cancelSignal?.aborted ?? false; }
 // Multi-proxy strategy: try 3 different CORS proxies in parallel
 let _lastProxyFail = 0; // 30s cooldown instead of permanent block
 
+// v6.9.4: hosts that NEVER serve CORS to browsers (search engines). Every
+// direct fetch() attempt to these prints an uncatchable console error and
+// always fails, so we skip the direct arm and go straight through proxies.
+const _NO_DIRECT_HOSTS = new Set([
+  'lite.duckduckgo.com', 'html.duckduckgo.com', 'duckduckgo.com',
+  'www.startpage.com', 'startpage.com', 'www.mojeek.com', 'www.bing.com',
+  'www.google.com', 'yandex.com', 'yandex.ru', 'web.archive.org',
+]);
+function hostAllowsDirect(u: string): boolean {
+  try { return !_NO_DIRECT_HOSTS.has(new URL(u).host); } catch { return true; }
+}
+
 // ─── Per-host circuit breaker (quality-neutral) ───────────────────
 // A host that consistently fails at the NETWORK level (timeout / refused /
 // DNS / CORS-rejected) can never yield data, so skipping it later cannot
@@ -1088,11 +1100,15 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   //    level — fail instantly instead of burning 5-30s on every request.
   if (hostIsOpen(url)) return new Response('', { status: 0, statusText: 'Host unreachable (circuit open)' });
 
-  // 1) Try direct fetch — instant for CORS-enabled, instant error for others
-  try {
-    const r = await fetch(url, { ...init, headers });
-    if (r.ok) { hostRecordSuccess(url); return r; }
-  } catch { /* CORS error */ }
+  // 1) Try direct fetch — instant for CORS-enabled, instant error for others.
+  //    Skipped entirely for known CORS-blocked search hosts (never succeeds,
+  //    and each attempt logs an uncatchable browser console error).
+  if (hostAllowsDirect(url)) {
+    try {
+      const r = await fetch(url, { ...init, headers });
+      if (r.ok) { hostRecordSuccess(url); return r; }
+    } catch { /* CORS error */ }
+  }
   if (callerSignal?.aborted) throw new Error('Cancelled');
 
   // 2) If proxy failed recently (30s cooldown), skip
@@ -2238,13 +2254,23 @@ async function searchBing(query: string): Promise<{title: string; url: string; s
 
 // DuckDuckGo Lite search — different endpoint from html.duckduckgo.com, returns cleaner results
 async function searchDDGLite(query: string): Promise<{title: string; url: string; snippet: string}[]> {
+  // v6.9.4: engine-health gate — after repeated failures stop firing
+  // DDG Lite per-business (each failed fetch prints a console error).
+  if (!engineAvailable('ddglite')) return [];
   try {
     const r = await corsFetch('https://lite.duckduckgo.com/lite/?q=' + query, {
       headers: { 'User-Agent': 'Mozilla/5.0' },
       signal: AbortSignal.timeout(8000),
     });
-    if (!r.ok) return [];
+    if (!r.ok) {
+      engineNoteFail('ddglite', 'DDG Lite', classifyEngineError(r.status), `HTTP ${r.status}`);
+      return [];
+    }
     const html = await r.text();
+    if (!html || html.length < 200) {
+      engineNoteFail('ddglite', 'DDG Lite', 'net', 'empty response (blocked)');
+      return [];
+    }
     const results: {title: string; url: string; snippet: string}[] = [];
     // DDG Lite uses table-based layout with class="result-link" for titles
     const links = html.matchAll(/<a[^>]*rel="nofollow"[^>]*href="([^"]+)"[^>]*class="result-link"[^>]*>([^<]*)<\/a>/gi);
@@ -2274,7 +2300,12 @@ async function searchDDGLite(query: string): Promise<{title: string; url: string
       }
     }
     return results.slice(0, 10);
-  } catch { return []; }
+  } catch (e: any) {
+    // v6.9.4: count thrown errors so the gate trips after 3 consecutive
+    // failures instead of silently re-firing for every business.
+    if (e?.message !== 'Cancelled') engineNoteFail('ddglite', 'DDG Lite', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : e?.message || 'network error').slice(0, 60));
+    return [];
+  }
 }
 
 // Wikidata SPARQL lookup: free, keyless, CORS-native. Finds official email/
@@ -2319,7 +2350,14 @@ async function wikidataContacts(b: Business): Promise<void> {
         const p = String(row.phone.value);
         if (plausiblePhone(p)) b.phone = p;
       }
-    } catch { /* sparse coverage / timeouts are normal */ }
+    } catch (e: any) {
+      // v6.9.4: thrown errors (timeout / network / CORS) MUST count as
+      // engine failures — previously they were swallowed here, so the
+      // health gate never tripped and every business re-fired a doomed
+      // SPARQL query (the Pass 4 console-abort storm).
+      if (e?.message === 'Cancelled') return;
+      engineNoteFail('wikidata', 'Wikidata', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : e?.message || 'network error').slice(0, 60));
+    }
   };
   _wikidataQueue = _wikidataQueue.then(run, run);
   await _wikidataQueue;
@@ -2344,7 +2382,13 @@ async function waybackContacts(b: Business): Promise<void> {
     const snap = j?.archived_snapshots?.closest?.url;
     if (!snap || !j.archived_snapshots.closest.available) return;
     const r = await corsFetch(snap, { signal: AbortSignal.timeout(15000) });
-    if (!r.ok) return;
+    if (!r.ok) {
+      // v6.9.4: a failing snapshot fetch is just as dead as a failing
+      // availability check — count it, or the gate never trips while
+      // every business still fires (and aborts) a snapshot request.
+      _waybackFails++;
+      return;
+    }
     const html = await r.text();
     if (html && html.length > 200) extractFromHtmlModule(html, b);
   } catch {
@@ -3236,7 +3280,9 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               headers: { 'User-Agent': 'Mozilla/5.0' },
               signal: AbortSignal.timeout(5000),
             });
-            if (!r.ok) return false;
+            // v6.9.4: register failures so the health gate trips and we stop
+            // re-firing a dead engine for every business in the scan.
+            if (!r.ok) { engineNoteFail('startpage', 'Startpage', classifyEngineError(r.status), `HTTP ${r.status}`); return false; }
             return extractFromHtml(await r.text(), b);
           }),
           // Bing
@@ -3440,8 +3486,11 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   }
 
   // ── Yandex (dominant in Georgia/Russia/CIS) ──
+  // v6.9.4: rides on the shared html.duckduckgo.com engine — when DDG is
+  // cooling down / dead, skip the whole pass instead of firing one doomed
+  // fetch per business (each failure logs a console error).
   const needYandex = allBizList.filter(b => !b.phone && !b.email && !b.website);
-  if (needYandex.length > 0) {
+  if (needYandex.length > 0 && engineAvailable('ddg')) {
     _ep.activePass = 'Pass 3: Regional (Yandex)'; _ep.passNumber = 3; _ep.percent = 94;
     _ep.engines.find(e => e.name === 'Yandex')!.status = 'active'; emitEP();
     for (let i3 = 0; i3 < Math.min(needYandex.length, 30); i3 += _BATCH) {

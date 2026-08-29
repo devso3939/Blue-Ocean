@@ -121,7 +121,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '6.9.3';
+const APP_VERSION = '6.9.4';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -1498,12 +1498,12 @@ export default function App() {
                               <div className="text-xs font-semibold text-foreground">
                                 {ins.title}
                                 {ins.severity === 'high' && <span className="ml-1.5 text-[10px] text-red-400 font-bold">HIGH</span>}
-                                {ins.categories && ins.categories.length > 0 && (
-                                  <span className="ml-1.5 text-[10px] text-muted-foreground">
-                                    · {ins.categories.map(c => getCategoryLabel(c)).join(', ')}
-                                  </span>
-                                )}
                               </div>
+                              {ins.categories && ins.categories.length > 0 && (
+                                <div className="text-[10px] text-muted-foreground mt-0.5">
+                                  Categories: {ins.categories.map(c => getCategoryLabel(c)).join(', ')}
+                                </div>
+                              )}
                               <div className="text-xs text-muted-foreground leading-relaxed mt-0.5">{ins.detail}</div>
                             </div>
                           </div>
