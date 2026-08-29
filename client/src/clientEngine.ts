@@ -946,6 +946,9 @@ function isCancelled(): boolean { return _cancelSignal?.aborted ?? false; }
 // Total max wait: ~4 seconds (not 12+)
 // Multi-proxy strategy: try 3 different CORS proxies in parallel
 let _lastProxyFail = 0; // 30s cooldown instead of permanent block
+// v6.9.6: cors.sh consecutive-failure memory (3 fails → 5 min skip)
+let _corsshFails = 0;
+let _corsshLastFail = 0;
 
 // v6.9.5: hosts known to SERVE CORS headers to browsers (public APIs).
 // These get the instant direct fetch; every other host goes through the
@@ -1128,11 +1131,19 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
     return new Response('', { status: 0, statusText: 'CORS unavailable' });
   }
 
-  // 3) Try cors.sh (working as of 2026, keyless)
-  try {
-    const r = await fetch('https://cors.sh/' + url, { headers, signal: AbortSignal.timeout(5000) });
-    if (r.ok) { hostRecordSuccess(url); return r; }
-  } catch {}
+  // 3) Try cors.sh (working as of 2026, keyless). v6.9.6: it rate-limits
+  //    keyless traffic hard (429 / connection resets) — track consecutive
+  //    failures and skip it for 5 minutes after 3, instead of re-failing
+  //    (and printing a console error) on every single proxied request.
+  if (_corsshFails < 3 || Date.now() - _corsshLastFail > 300_000) {
+    try {
+      const r = await fetch('https://cors.sh/' + url, { headers, signal: AbortSignal.timeout(5000) });
+      if (r.ok) { hostRecordSuccess(url); _corsshFails = 0; return r; }
+      _corsshFails++; _corsshLastFail = Date.now();
+    } catch {
+      _corsshFails++; _corsshLastFail = Date.now();
+    }
+  }
 
   // 4) Jina Reader (keyless, returns page text/markdown — good for contact
   // extraction; works from real browser sessions)
@@ -2862,10 +2873,15 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
 async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
   const NEEDS = businesses.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
   if (NEEDS.length === 0 || !BRAVE_API_KEY) return;
+  // v6.9.6: engine-health gate — a rate-limited Brave returns 429 WITHOUT
+  // CORS headers, so the fetch throws and prints a console error. After
+  // 3 failures stop calling it entirely (Mojeek/DDG take over).
+  if (!engineAvailable('brave')) return;
   const BATCH = 3;
   const max = Math.min(NEEDS.length, 50); // Brave free tier: 2000 req/mo
   let found = 0;
   for (let i = 0; i < max; i += BATCH) {
+    if (!engineAvailable('brave')) break;
     const batch = NEEDS.slice(i, i + BATCH);
     await Promise.all(batch.map(async (b) => {
       try {
@@ -2914,7 +2930,12 @@ async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number
             }
           }
         }
-      } catch {}
+        engineNoteSuccess('brave', 'Brave');
+      } catch (e: any) {
+        // v6.9.6: count thrown errors (429 CORS-less / timeout) so the gate
+        // trips quickly instead of re-firing per business.
+        if (e?.message !== 'Cancelled') engineNoteFail('brave', 'Brave', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : e?.message || 'network error').slice(0, 60));
+      }
     }));
     if (i + BATCH < max) await wait(1500);
     onProgress?.(88, `Brave search… ${Math.min(i + BATCH, max)}/${max} (${found} found)`);
@@ -3338,12 +3359,16 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           const emailQ = buildEmailQuery(b);
           await Promise.all([
             (async () => {
+              // v6.9.6: gate on engine health — a cooled-down / dead Brave
+              // must not re-fire here for every business.
+              if (!engineAvailable('brave')) return;
               try {
                 const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${emailQ}&count=5`, {
                   headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
                   signal: AbortSignal.timeout(3000),
                 });
                 if (r.ok) {
+                  engineNoteSuccess('brave', 'Brave');
                   const data = await r.json();
                   for (const res of (data.web?.results || [])) {
                     extractFromText((res.description || '') + ' ' + (res.title || ''), b);
@@ -3354,8 +3379,12 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                       } catch {}
                     }
                   }
+                } else {
+                  engineNoteFail('brave', 'Brave', classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
                 }
-              } catch {}
+              } catch (e: any) {
+                if (e?.message !== 'Cancelled') engineNoteFail('brave', 'Brave', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : 'network error').slice(0, 60));
+              }
             })(),
             (async () => {
               try {
