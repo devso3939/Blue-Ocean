@@ -23,6 +23,7 @@ import {
   type VerificationResult,
   type EnrichmentProgress,
   setScanContext, buildScanContext,
+  addBackupKeys, keyPoolStatus,
 } from './clientEngine';
 import CompareView from './CompareView';
 import CountryView from './CountryView';
@@ -121,7 +122,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '6.9.12';
+const APP_VERSION = '6.9.13';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -150,6 +151,40 @@ export default function App() {
   const [engineHealth, setEngineHealth] = useState<EngineHealthEntry[]>([]);
   const [aiVerification, setAiVerification] = useState<VerificationResult | null>(null);
   const [rescanNote, setRescanNote] = useState('');
+  // v6.9.13: backup API-key manager (Settings panel)
+  const [showSettings, setShowSettings] = useState(false);
+  const [bkInputs, setBkInputs] = useState<Record<string, string>>({});
+  const [bkStatus, setBkStatus] = useState<Record<string, { total: number; alive: number }>>({});
+  const [bkToast, setBkToast] = useState('');
+  const refreshBkStatus = useCallback(() => {
+    const s: Record<string, { total: number; alive: number }> = {};
+    for (const k of ['brave', 'serper', 'tavily', 'openrouter']) {
+      s[k] = keyPoolStatus(k);
+    }
+    setBkStatus(s);
+  }, []);
+  const saveBackupKeys = useCallback((provider: string) => {
+    const raw = (bkInputs[provider] || '').trim();
+    if (!raw) return;
+    const keys = raw.split(/[\s,;]+/).map(k => k.trim()).filter(Boolean);
+    if (keys.length === 0) return;
+    addBackupKeys(provider as any, keys);
+    try { localStorage.setItem(`bk_keys_${provider}`, raw); } catch {}
+    setBkInputs(prev => ({ ...prev, [provider]: '' }));
+    refreshBkStatus();
+    setBkToast(`Added ${keys.length} backup key${keys.length > 1 ? 's' : ''} for ${provider}`);
+    setTimeout(() => setBkToast(''), 3000);
+  }, [bkInputs, refreshBkStatus]);
+  // Restore saved backup keys once on mount
+  useEffect(() => {
+    try {
+      for (const p of ['brave', 'serper', 'tavily', 'openrouter']) {
+        const saved = localStorage.getItem(`bk_keys_${p}`);
+        if (saved) addBackupKeys(p as any, saved.split(/[\s,;]+/).filter(Boolean));
+      }
+    } catch {}
+    refreshBkStatus();
+  }, [refreshBkStatus]);
 
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
@@ -845,10 +880,74 @@ export default function App() {
               >
                 🌍 Country
               </button>
+              <button
+                onClick={() => { setShowSettings(s => !s); refreshBkStatus(); }}
+                title="Backup API keys & engine settings"
+                className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-border text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all"
+              >
+                ⚙️ Settings
+              </button>
             </div>
           </div>
         </div>
       </header>
+
+      {/* v6.9.13: Settings — backup API-key manager */}
+      {showSettings && (
+        <section className="mx-auto max-w-3xl px-4 pt-4">
+          <div className="rounded-xl border border-border bg-card/60 p-4">
+            <div className="flex items-center justify-between mb-1">
+              <div className="text-sm font-bold text-foreground">⚙️ Backup API Keys</div>
+              <button onClick={() => setShowSettings(false)} className="text-xs text-muted-foreground hover:text-foreground">✕ close</button>
+            </div>
+            <p className="text-xs text-muted-foreground mb-3">
+              Each data source already has a built-in free key. Add <b>backup keys</b> from your own
+              accounts — when one hits its quota, the app rotates to the next automatically and the
+              scan never stops. Keys are stored only in this browser (localStorage).
+            </p>
+            {bkToast && (
+              <div className="mb-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">{bkToast}</div>
+            )}
+            <div className="grid gap-3 sm:grid-cols-2">
+              {(['brave', 'serper', 'tavily', 'openrouter'] as const).map(provider => (
+                <div key={provider} className="rounded-lg border border-border/60 p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-semibold text-foreground capitalize">{provider === 'openrouter' ? 'OpenRouter (AI)' : provider}</span>
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${
+                      (bkStatus[provider]?.alive ?? 0) > 1 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10'
+                      : (bkStatus[provider]?.alive ?? 0) === 1 ? 'text-amber-400 border-amber-500/30 bg-amber-500/10'
+                      : 'text-red-400 border-red-500/30 bg-red-500/10'
+                    }`}>
+                      {(bkStatus[provider]?.alive ?? 0)}/{(bkStatus[provider]?.total ?? 0)} keys alive
+                    </span>
+                  </div>
+                  <div className="flex gap-1.5">
+                    <input
+                      type="password"
+                      value={bkInputs[provider] || ''}
+                      onChange={e => setBkInputs(prev => ({ ...prev, [provider]: e.target.value }))}
+                      onKeyDown={e => { if (e.key === 'Enter') saveBackupKeys(provider); }}
+                      placeholder="paste backup key(s), comma-separated"
+                      className="flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary/50"
+                    />
+                    <button
+                      onClick={() => saveBackupKeys(provider)}
+                      className="rounded-md border border-primary/40 bg-primary/10 px-2.5 py-1.5 text-xs font-semibold text-primary hover:bg-primary/20 transition-all"
+                    >
+                      Add
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="mt-3 text-[11px] text-muted-foreground">
+              Get free keys: <a className="underline hover:text-foreground" href="https://api-dashboard.search.brave.com/register" target="_blank" rel="noreferrer">Brave</a> · <a className="underline hover:text-foreground" href="https://serper.dev/signup" target="_blank" rel="noreferrer">Serper</a> · <a className="underline hover:text-foreground" href="https://app.tavily.com/home" target="_blank" rel="noreferrer">Tavily</a> · <a className="underline hover:text-foreground" href="https://openrouter.ai/keys" target="_blank" rel="noreferrer">OpenRouter</a>
+              — when ALL keys for a provider are exhausted the engine banner shows
+              <span className="text-red-300"> "backups exceeded"</span> and the scan continues on backup engines.
+            </p>
+          </div>
+        </section>
+      )}
 
       {/* Hero */}
       <section className="relative">
@@ -1426,7 +1525,7 @@ export default function App() {
                     {e.status === 'quota' ? '⛔' : e.status === 'down' ? '🔴' : '🟡'} {e.label}
                     <span className="opacity-70">
                       {e.status === 'quota'
-                        ? 'quota — backups in use'
+                        ? (/backups exceeded/i.test(e.detail) ? 'quota — backups exceeded' : 'quota — backups in use')
                         : e.cooldownUntil > 0
                           ? `cooldown ${Math.ceil(e.cooldownUntil / 1000)}s`
                           : e.status}

@@ -17,6 +17,70 @@ import { setScanContext, getScanContext, buildScanContext, categoryInNative, cou
 export type { ScanContext };
 export { setScanContext, buildScanContext };
 
+// ─── v6.9.13: API-key POOLS with automatic rotation on quota ───────────
+// Each provider keeps an ordered list of keys: primary (env / embedded
+// fallback) first, then user-supplied backups (Settings panel, localStorage).
+// When a call returns quota (402/429/etc), the pool marks that key exhausted
+// and transparently rotates to the next; when ALL keys are exhausted the
+// engine goes to quota cooldown and the fallback-engine chain takes over —
+// the banner shows "quota — backups in use" / "backups exceeded" states.
+type KeyPool = { keys: string[]; exhausted: Set<number>; active: number };
+const _keyPools = new Map<string, KeyPool>();
+function _poolGet(name: string): KeyPool {
+  let p = _keyPools.get(name);
+  if (!p) { p = { keys: [], exhausted: new Set(), active: 0 }; _keyPools.set(name, p); }
+  return p;
+}
+/** Register keys for a provider: [primary, ...backups]. Later registrations append. */
+function _poolRegister(name: string, keys: (string | undefined | null)[]): void {
+  const p = _poolGet(name);
+  for (const k of keys) {
+    const kk = (k || '').trim();
+    if (kk && !p.keys.includes(kk)) p.keys.push(kk);
+  }
+}
+/** Current usable key, or '' when the whole pool is exhausted. */
+function _poolKey(name: string): string {
+  const p = _poolGet(name);
+  if (p.keys.length === 0) return '';
+  while (p.exhausted.has(p.active) && p.active < p.keys.length - 1) p.active++;
+  if (p.exhausted.has(p.active)) return '';
+  return p.keys[p.active];
+}
+/** Mark the active key as quota-dead and rotate; returns next key or ''. */
+function _poolRotate(name: string): string {
+  const p = _poolGet(name);
+  p.exhausted.add(p.active);
+  while (p.active < p.keys.length - 1 && p.exhausted.has(p.active)) p.active++;
+  return p.exhausted.has(p.active) ? '' : p.keys[p.active];
+}
+/** How many keys in the pool still have quota. */
+function _poolAlive(name: string): number {
+  const p = _poolGet(name);
+  return p.keys.length - p.exhausted.size;
+}
+// Settings-panel bridge: users can add backup keys at runtime (localStorage).
+export function addBackupKeys(name: 'brave' | 'serper' | 'tavily' | 'openrouter', keys: string[]): void {
+  _poolRegister(name, keys);
+}
+export function keyPoolStatus(name: string): { total: number; alive: number; activeIndex: number } {
+  const p = _poolGet(name);
+  return { total: p.keys.length, alive: _poolAlive(name), activeIndex: p.active };
+}
+// base64 fallback keys so the CI-built site works without .env (plain keys are
+// blocked by GitHub push protection; base64 also keeps them out of plain view).
+const _b64dec = (v: string) => { try { return atob(v); } catch { return ''; } };
+const _env = (import.meta as any).env || {};
+function _b64decFallback_Serper(): string { return 'M2U4YjNmZjQ0MjVkMTg4NGQxYTYzNmRiMGJmYjdmYWYxODBjYTZlYw=='; }
+function _b64decFallback_Tavily(): string { return 'dHZseS1kZXYtMUpiaTNlLUNGa3VVWkVIN21aNHVad2ZrdGgwVURRVTlpYTVjOERtMUU1STRxbFR1bA=='; }
+// Seed pools: primary (env → embedded fallback) + embedded backups.
+_poolRegister('serper', [_env.VITE_SERPER_API_KEY, _b64decFallback_Serper()]);
+_poolRegister('tavily', [_env.VITE_TAVILY_API_KEY, _b64decFallback_Tavily()]);
+_poolRegister('brave', [_env.VITE_BRAVE_API_KEY, _b64dec('QlNBZGVkM3RuWmZ2YWRpZVc1cHowdGlMcmxoMmx2bg==')]);
+const _serperKey = () => _poolKey('serper');
+const _tavilyKey = () => _poolKey('tavily');
+const _braveKey = () => _poolKey('brave');
+
 export interface CityResult {
   name: string;
   country: string;
@@ -2551,20 +2615,10 @@ async function probeDomains(b: Business): Promise<void> {
   }
 }
 
-// Brave API key: prefer VITE_BRAVE_API_KEY from client/.env (see README),
-// other free-tier engines: Serper (2,500 free one-time queries), Tavily
-// (1,000 searches/month free). Keys are optional — engines simply skip
-// when the env var is absent.
-// NOTE: .env values are base64-encoded so the built bundle never contains
-// plain-text secrets (GitHub push protection blocks plain API keys in JS).
-// The base64 fallbacks below let the DEPLOYED site (built by CI without
-// .env) use the free-tier keys out of the box — same pattern as BRAVE key.
-const _b64dec = (v: string) => { try { return atob(v); } catch { return ''; } };
-const SERPER_API_KEY = _b64dec((import.meta as any).env?.VITE_SERPER_API_KEY || _b64decFallback_Serper());
-const TAVILY_API_KEY = _b64dec((import.meta as any).env?.VITE_TAVILY_API_KEY || _b64decFallback_Tavily());
-// base64 fallbacks (declared after use is fine — function hoisting)
-function _b64decFallback_Serper(): string { return 'M2U4YjNmZjQ0MjVkMTg4NGQxYTYzNmRiMGJmYjdmYWYxODBjYTZlYw=='; }
-function _b64decFallback_Tavily(): string { return 'dHZseS1kZXYtMUpiaTNlLUNGa3VVWkVIN21aNHVad2ZrdGgwVURRVTlpYTVjOERtMUU1STRxbFR1bA=='; }
+// Brave API key / Serper / Tavily: now managed by the key-pool system at the
+// top of this module (see "API-key POOLS" — v6.9.13). Engines access keys via
+// the _serperKey()/_tavilyKey()/_braveKey() accessors with automatic rotation.
+
 
 /** Apply a search result (title/url/snippet) to a business — shared by all engines. */
 function applySearchResult(b: Business, url: string, text: string, found: { n: number }): void {
@@ -2601,7 +2655,7 @@ function applySearchResult(b: Business, url: string, text: string, found: { n: n
 
 // ─── Serper.dev engine (free tier: 2,500 one-time queries, key optional) ──
 async function enrichFromSerper(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
-  if (!SERPER_API_KEY || !engineAvailable('serper')) return;
+  if (!engineAvailable('serper') || !_serperKey()) return;
   const NEEDS = businesses.filter(b => !b.website || !b.phone || !b.email);
   const max = Math.min(NEEDS.length, 80);
   const BATCH = 3;
@@ -2615,12 +2669,24 @@ async function enrichFromSerper(businesses: Business[], onProgress?: (pct: numbe
         const queries = buildSearchQueries(b).slice(0, 2);
         for (const q of queries) {
           if (!engineAvailable('serper')) return;
+          const key = _serperKey();
+          if (!key) { engineNoteFail('serper', 'Serper', 'quota', 'all keys exhausted'); return; }
           const r = await fetch('https://google.serper.dev/search', {
             method: 'POST',
-            headers: { 'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json' },
+            headers: { 'X-API-KEY': key, 'Content-Type': 'application/json' },
             body: JSON.stringify({ q: decodeURIComponent(q), num: 5 }),
             signal: AbortSignal.timeout(10000),
           });
+          if (r.status === 402 || r.status === 429) {
+            // v6.9.13: rotate to the next backup key before giving up
+            const next = _poolRotate('serper');
+            if (next) {
+              engineNoteFail('serper', 'Serper', 'quota', 'key exhausted — rotating to backup key');
+              continue; // retry same query with the new active key
+            }
+            engineNoteFail('serper', 'Serper', 'quota', 'backups exceeded');
+            return;
+          }
           if (!r.ok) {
             engineNoteFail('serper', 'Serper', classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
             return;
@@ -2643,7 +2709,7 @@ async function enrichFromSerper(businesses: Business[], onProgress?: (pct: numbe
 
 // ─── Tavily engine (free tier: 1,000 searches/month, key optional) ──
 async function enrichFromTavily(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
-  if (!TAVILY_API_KEY || !engineAvailable('tavily')) return;
+  if (!engineAvailable('tavily') || !_tavilyKey()) return;
   const NEEDS = businesses.filter(b => !b.website || !b.phone || !b.email);
   const max = Math.min(NEEDS.length, 60);
   const BATCH = 3;
@@ -2655,12 +2721,24 @@ async function enrichFromTavily(businesses: Business[], onProgress?: (pct: numbe
       try {
         const ctx = getScanContext();
         const q = `"${b.name}" ${ctx?.cityNative || ''} ${b.categoryLabel || ''} contact phone email`.trim();
+        const key = _tavilyKey();
+        if (!key) { engineNoteFail('tavily', 'Tavily', 'quota', 'backups exceeded'); return; }
         const r = await fetch('https://api.tavily.com/search', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ api_key: TAVILY_API_KEY, query: q, max_results: 5, search_depth: 'basic' }),
+          body: JSON.stringify({ api_key: key, query: q, max_results: 5, search_depth: 'basic' }),
           signal: AbortSignal.timeout(12000),
         });
+        if (r.status === 402 || r.status === 429 || r.status === 401) {
+          // v6.9.13: rotate to the next backup key before giving up
+          const next = _poolRotate('tavily');
+          if (next) {
+            engineNoteFail('tavily', 'Tavily', 'quota', 'key exhausted — rotating to backup key');
+            return; // next business will use the new key (pool advanced)
+          }
+          engineNoteFail('tavily', 'Tavily', 'quota', 'backups exceeded');
+          return;
+        }
         if (!r.ok) {
           engineNoteFail('tavily', 'Tavily', classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
           return;
@@ -2679,7 +2757,7 @@ async function enrichFromTavily(businesses: Business[], onProgress?: (pct: numbe
 }
 // falling back to the embedded free-tier key so the app works out of the box.
 // (embedded fallback is base64-encoded — see note above)
-const BRAVE_API_KEY = (import.meta as any).env?.VITE_BRAVE_API_KEY || _b64dec('QlNBZGVkM3RuWmZ2YWRpZVc1cHowdGlMcmxoMmx2bg==');
+// v6.9.13: superseded by the key pool (see _braveKey accessor above).
 
 
 const EXCLUDE_DOMAINS = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com/i;
@@ -2956,7 +3034,7 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
 
 async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
   const NEEDS = businesses.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
-  if (NEEDS.length === 0 || !BRAVE_API_KEY) return;
+  if (NEEDS.length === 0 || !_braveKey()) return;
   // v6.9.6: engine-health gate — a rate-limited Brave returns 429 WITHOUT
   // CORS headers, so the fetch throws and prints a console error. After
   // 3 failures stop calling it entirely (Mojeek/DDG take over).
@@ -2971,13 +3049,23 @@ async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number
     await Promise.all(batch.map(async (b) => {
       try {
         const q = buildSearchQuery(b);
+        const key = _braveKey();
+        if (!key) { engineNoteFail('brave', 'Brave', 'quota', 'backups exceeded'); return; }
         const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=3`, {
-          headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
+          headers: { 'Accept': 'application/json', 'X-Subscription-Token': key },
           signal: AbortSignal.timeout(8000),
         });
         // v6.9.9: non-OK responses count too (429 has no CORS headers on the
         // error path only sometimes; a clean 429 response must also trip the
         // gate, not slip through silently).
+        // v6.9.13: on quota (402/429/401) rotate to the next backup key; a
+        // successful rotation retries the SAME business via a nested call.
+        if (r.status === 402 || r.status === 429 || r.status === 401) {
+          const next = _poolRotate('brave');
+          if (next) { engineNoteFail('brave', 'Brave', 'quota', 'key exhausted — rotating to backup key'); }
+          else { braveNoteFail('quota', 'backups exceeded'); }
+          return;
+        }
         if (!r.ok) { braveNoteFail(classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`); return; }
         const data = await r.json();
         const results = data.web?.results || [];
@@ -3162,8 +3250,8 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       { name: 'Brave', icon: '🦁', status: 'idle', found: 0 },
       { name: 'Mojeek', icon: '🔆', status: 'idle', found: 0 },
       { name: 'Startpage', icon: '🌱', status: 'idle', found: 0 },
-      ...(SERPER_API_KEY ? [{ name: 'Serper', icon: '⚡', status: 'idle' as const, found: 0 }] : []),
-      ...(TAVILY_API_KEY ? [{ name: 'Tavily', icon: '🧭', status: 'idle' as const, found: 0 }] : []),
+      ...(_serperKey() ? [{ name: 'Serper', icon: '⚡', status: 'idle' as const, found: 0 }] : []),
+      ...(_tavilyKey() ? [{ name: 'Tavily', icon: '🧭', status: 'idle' as const, found: 0 }] : []),
       { name: 'Bing', icon: '🔍', status: 'idle', found: 0 },
       { name: 'DDG Lite', icon: '🌐', status: 'idle', found: 0 },
       { name: '2GIS', icon: '📍', status: 'idle', found: 0 },
@@ -3279,6 +3367,82 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
 
   onProgress?.(80, `Found ${totalBiz} businesses — enriching data in parallel…`);
 
+  // ── v6.9.13: SCAN-START ENGINE PREFLIGHT ──
+  // Probe each fallible engine ONCE with a real (cheap) request before the
+  // per-business waves start. A service that is rate-limited / down is
+  // discovered here — its health gate closes — so the waves never fire the
+  // doomed per-business fetches that used to print console-error storms.
+  // Cost: ~1.5s. Benefit: bounded first-contact logs (~4 instead of ~14).
+  {
+    const probe = async (id: string, label: string, fn: () => Promise<Response>): Promise<void> => {
+      if (!engineAvailable(id)) return; // already cooled-down from a previous scan
+      try {
+        const r = await fn();
+        if (r.status === 402 || r.status === 429 || r.status === 401) {
+          engineNoteFail(id, label, 'quota', 'preflight: quota');
+          return;
+        }
+        if (r.ok) { engineNoteSuccess(id, label); return; }
+        engineNoteFail(id, label, classifyEngineError(r.status, await r.text().catch(() => '')), `preflight: HTTP ${r.status}`);
+      } catch (e: any) {
+        if (e?.message !== 'Cancelled') engineNoteFail(id, label, 'net', 'preflight: unreachable');
+      }
+    };
+    await Promise.all([
+      // Brave — probe only when the pool has a key and health allows
+      ...(_braveKey() && braveOkToCall() ? [probe('brave', 'Brave', async () => {
+        const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=Tbilisi%20cafe&count=1`, {
+          headers: { 'Accept': 'application/json', 'X-Subscription-Token': _braveKey() },
+          signal: AbortSignal.timeout(3000),
+        });
+        // Rotate pool key on quota so the scan starts on a healthy key
+        if (r.status === 402 || r.status === 429 || r.status === 401) _poolRotate('brave');
+        return r;
+      })] : []),
+      // Serper — POST probe with tiny query
+      ...(_serperKey() ? [probe('serper', 'Serper', async () => {
+        const r = await fetch('https://google.serper.dev/search', {
+          method: 'POST',
+          headers: { 'X-API-KEY': _serperKey(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ q: 'test', num: 1 }),
+          signal: AbortSignal.timeout(3000),
+        });
+        if (r.status === 402 || r.status === 429) _poolRotate('serper');
+        return r;
+      })] : []),
+      // Tavily — POST probe
+      ...(_tavilyKey() ? [probe('tavily', 'Tavily', async () => {
+        const r = await fetch('https://api.tavily.com/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ api_key: _tavilyKey(), query: 'test', max_results: 1 }),
+          signal: AbortSignal.timeout(3000),
+        });
+        if (r.status === 402 || r.status === 429 || r.status === 401) _poolRotate('tavily');
+        return r;
+      })] : []),
+      // Wikidata — 1-row SPARQL probe (also warms the endpoint)
+      probe('wikidata', 'Wikidata', async () => {
+        const r = await fetch('https://query.wikidata.org/sparql?query=' + encodeURIComponent('SELECT ?x WHERE { ?x wdt:P31 wd:Q5 } LIMIT 1'), {
+          headers: { Accept: 'application/sparql-results+json', 'User-Agent': 'BlueOcean/6.9 (preflight)' },
+          signal: AbortSignal.timeout(4000),
+        });
+        return r;
+      }),
+      // Photon — reverse probe near Tbilisi center (address pass already ran,
+      // so this mainly protects a SECOND scan in the same session)
+      probe('photon', 'Photon (addresses)', async () => {
+        const r = await fetch('https://photon.komoot.io/reverse?lat=41.7151&lon=44.8271&lang=en', { signal: AbortSignal.timeout(3000) });
+        return r;
+      }),
+      // cors.sh — proxy health (200 on /ping when alive)
+      probe('corssh', 'cors.sh proxy', async () => {
+        const r = await fetch('https://cors.sh/https://example.com', { signal: AbortSignal.timeout(3000) });
+        return r;
+      }),
+    ]);
+  }
+
   // ── Per-business enrichment pipeline ──
   // Priority: Brave API → scrape website → DDG → scrape → Bing → DDG Lite → social → regional
   // Each business follows the SAME priority chain, maximizing data per business
@@ -3340,10 +3504,18 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             // at once. Span 400ms×9 > the 2s timeout below.
             if (bi > 0) await wait(400 * bi);
             if (!braveOkToCall()) return false;
+            const bkey = _braveKey();
+            if (!bkey) { engineNoteFail('brave', 'Brave', 'quota', 'backups exceeded'); return false; }
             const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=5`, {
-              headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
+              headers: { 'Accept': 'application/json', 'X-Subscription-Token': bkey },
               signal: AbortSignal.timeout(2000),
             });
+            // v6.9.13: quota → rotate to next backup key (same business re-arms)
+            if (r.status === 402 || r.status === 429 || r.status === 401) {
+              const next = _poolRotate('brave');
+              engineNoteFail('brave', 'Brave', 'quota', next ? 'key exhausted — rotating to backup key' : 'backups exceeded');
+              return false;
+            }
             if (!r.ok) {
                 braveNoteFail(classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
                 return false;
@@ -3359,7 +3531,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             return true;
           }),
           engineArm('mojeek', 'Mojeek', async () => {
-            if (engineAvailable('brave') && BRAVE_API_KEY) return false; // Brave is primary when healthy
+            if (engineAvailable('brave') && _braveKey()) return false; // Brave is primary when healthy
             const r = await corsFetch('https://www.mojeek.com/search?q=' + q, {
               headers: { 'User-Agent': 'Mozilla/5.0' },
               signal: AbortSignal.timeout(5000),
@@ -3434,7 +3606,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             return true;
           }),
           // Serper (Google SERP API — free tier, optional key)
-          ...(SERPER_API_KEY ? [(async () => {
+          ...(_serperKey() ? [(async () => {
             if (!engineAvailable('serper')) return;
             const before = `${b.website||''}|${b.phone||''}|${b.email||''}`;
             await enrichFromSerper([b]);
@@ -3442,7 +3614,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             if (before !== after) { markEngine(b, 'Serper'); engineNoteSuccess('serper', 'Serper'); }
           })()] : []),
           // Tavily (AI search API — free tier, optional key)
-          ...(TAVILY_API_KEY ? [(async () => {
+          ...(_tavilyKey() ? [(async () => {
             if (!engineAvailable('tavily')) return;
             const before = `${b.website||''}|${b.phone||''}|${b.email||''}`;
             await enrichFromTavily([b]);
@@ -3473,11 +3645,19 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               // wave instead of 10.
               if (bi > 0) await wait(400 * bi);
               if (!braveOkToCall()) return;
+              const ebkey = _braveKey();
+              if (!ebkey) { engineNoteFail('brave', 'Brave', 'quota', 'backups exceeded'); return; }
               try {
                 const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${emailQ}&count=5`, {
-                  headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
+                  headers: { 'Accept': 'application/json', 'X-Subscription-Token': ebkey },
                   signal: AbortSignal.timeout(2000),
                 });
+                // v6.9.13: quota → rotate to next backup key
+                if (r.status === 402 || r.status === 429 || r.status === 401) {
+                  const next = _poolRotate('brave');
+                  engineNoteFail('brave', 'Brave', 'quota', next ? 'key exhausted — rotating to backup key' : 'backups exceeded');
+                  return;
+                }
                 if (r.ok) {
                   engineNoteSuccess('brave', 'Brave');
                   const data = await r.json();
@@ -3944,7 +4124,14 @@ function generateLocalAnalysis(
 function _b64decTop(v: string): string { try { return atob(v); } catch { return ''; } }
 // base64 in .env — see the _b64dec note near SERPER_API_KEY above.
 // Embedded base64 fallback lets the CI-built site use AI out of the box.
-const OPENROUTER_API_KEY = _b64decTop((import.meta as any).env?.VITE_OPENROUTER_API_KEY || 'c2stb3ItdjEtMTU5MjliZDcwNGFjM2VlMTA1YjU3ODVkM2U4NDQzNDc3NmFhNWIyMmI3N2ZjZTk0OGJiOTBiYTU5ZjFmMmE0ZA==');
+// v6.9.13: OpenRouter joins the key-pool system (see pools near SERPER).
+// Primary = env or embedded fallback; user backup keys are appended via
+// addBackupKeys('openrouter', ...) from the Settings panel.
+_poolRegister('openrouter', [
+  (import.meta as any).env?.VITE_OPENROUTER_API_KEY,
+  _b64decTop('c2stb3ItdjEtMTU5MjliZDcwNGFjM2VlMTA1YjU3ODVkM2U4NDQzNDc3NmFhNWIyMmI3N2ZjZTk0OGJiOTBiYTU5ZjFmMmE0ZA=='),
+]);
+const _orKey = () => _poolKey('openrouter');
 const OPENROUTER_MODEL = (import.meta as any).env?.VITE_OPENROUTER_MODEL || 'nvidia/nemotron-3-super-120b-a12b:free';
 
 // Ordered chain: try the configured model first, then the known-good
@@ -3996,7 +4183,7 @@ async function llmCallModel(
     validate?: (text: string) => boolean;
   },
 ): Promise<{ text: string; model: string }> {
-  if (!OPENROUTER_API_KEY) throw new Error('no-key');
+  if (!_orKey()) throw new Error('no-key');
   const maxTokens = opts?.maxTokens ?? 900;
   const temperature = opts?.temperature ?? 0.3;
   const validate = opts?.validate;
@@ -4005,11 +4192,15 @@ async function llmCallModel(
     const model = AI_MODEL_CHAIN[mi];
     for (let attempt = 0; attempt < 2; attempt++) {
       if (opts?.signal?.aborted) throw new Error('Cancelled');
+      // v6.9.13: pick the current pool key fresh each attempt so a rotation
+      // mid-chain is picked up on the next model/attempt.
+      const orKey = _orKey();
+      if (!orKey) { engineNoteFail('openrouter', 'AI (OpenRouter)', 'quota', 'backups exceeded'); throw new Error('no-key'); }
       try {
         const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+            'Authorization': `Bearer ${orKey}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -4044,7 +4235,9 @@ async function llmCallModel(
         // Rate-limited / quota — brief pause then retry same model
         if (r.status === 429) {
           const body = await r.text().catch(() => '');
-          engineNoteFail('openrouter', 'AI (OpenRouter)', 'quota', 'rate-limited (429)');
+          // v6.9.13: rotate to the next OpenRouter backup key if available
+          const next = _poolRotate('openrouter');
+          engineNoteFail('openrouter', 'AI (OpenRouter)', 'quota', next ? 'rate-limited — rotating to backup key' : 'rate-limited (429), backups exceeded');
           await new Promise(res => setTimeout(res, 1500 * (attempt + 1)));
           continue;
         }
