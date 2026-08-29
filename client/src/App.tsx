@@ -13,6 +13,7 @@ import {
   type OpportunityResult,
   type DiscoveryProgress,
   type AIAnalysis,
+  type SanityCheck,
   runDiscoveryPhases,
   getSmartCategoryAnalysis,
   sanityCheckOpportunities,
@@ -122,7 +123,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '6.9.14';
+const APP_VERSION = '6.9.15';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -150,6 +151,8 @@ export default function App() {
   // v6.9.2: engine health (quota / fallback banners) + AI verification notes
   const [engineHealth, setEngineHealth] = useState<EngineHealthEntry[]>([]);
   const [aiVerification, setAiVerification] = useState<VerificationResult | null>(null);
+  // v6.9.15: click-to-explain modal for the plausibility badge in the opportunities table
+  const [sanityDetail, setSanityDetail] = useState<SanityCheck | null>(null);
   const [rescanNote, setRescanNote] = useState('');
   // v6.9.13: backup API-key manager (Settings panel)
   const [showSettings, setShowSettings] = useState(false);
@@ -1583,6 +1586,28 @@ export default function App() {
                 </div>
               </div>
 
+              {/* v6.9.15: visual snapshot — top 5 opportunity bars */}
+              {opportunities.length > 0 && (
+                <div className="mb-4 rounded-lg bg-background/30 border border-border/40 px-3 py-2.5">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-sky-400/80 mb-2">📊 Top 5 by Score</div>
+                  <div className="space-y-2">
+                    {[...opportunities].sort((a, b) => b.score - a.score).slice(0, 5).map(opp => (
+                      <div key={opp.category} className="flex items-center gap-2">
+                        <span className="w-20 shrink-0 truncate text-[11px] text-muted-foreground text-right">{opp.categoryLabel}</span>
+                        <div className="flex-1 h-3.5 rounded-full bg-background/60 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full ${opp.score > 60 ? 'bg-emerald-500/70' : opp.score > 40 ? 'bg-amber-500/70' : 'bg-slate-500/50'}`}
+                            style={{ width: `${opp.score}%` }}
+                          />
+                        </div>
+                        <span className={`w-7 shrink-0 text-right text-[11px] font-bold tabular-nums ${opp.score > 60 ? 'text-emerald-400' : opp.score > 40 ? 'text-amber-400' : 'text-muted-foreground'}`}>{opp.score}</span>
+                        <span className="w-24 shrink-0 text-[10px] text-muted-foreground">{opp.existing} exist{opp.gap != null && opp.gap > 0 ? ` · +${opp.gap}` : ''}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {aiAnalysis ? (
                 <div className="space-y-4">
                   {/* Insights */}
@@ -1610,6 +1635,42 @@ export default function App() {
                       </div>
                     </div>
                   )}
+
+                  {/* v6.9.15: gap chart — existing vs expected for top-gap categories */}
+                  {aiAnalysis.insights.length > 0 && (() => {
+                    const gapRows = opportunities
+                      .filter(o => o.gap != null && o.gap > 0)
+                      .sort((a, b) => (b.gap ?? 0) - (a.gap ?? 0))
+                      .slice(0, 5);
+                    if (gapRows.length === 0) return null;
+                    const maxVal = Math.max(...gapRows.map(o => Math.max(o.existing + (o.gap ?? 0), 1)));
+                    return (
+                      <div className="rounded-lg bg-background/30 border border-border/40 px-3 py-2.5">
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-sky-400/80 mb-2">📉 Supply Gap — existing vs expected</div>
+                        <div className="space-y-2">
+                          {gapRows.map(o => {
+                            const expected = o.existing + (o.gap ?? 0);
+                            return (
+                              <div key={o.category} className="flex items-center gap-2">
+                                <span className="w-20 shrink-0 truncate text-[11px] text-muted-foreground text-right">{o.categoryLabel}</span>
+                                <div className="flex-1 h-3.5 rounded-full bg-background/60 overflow-hidden relative">
+                                  <div className="h-full bg-sky-500/40" style={{ width: `${(expected / maxVal) * 100}%` }} />
+                                  <div className="absolute top-0 left-0 h-full bg-sky-500/80" style={{ width: `${(o.existing / maxVal) * 100}%` }} />
+                                </div>
+                                <span className="w-28 shrink-0 text-[10px] text-muted-foreground tabular-nums">
+                                  {fmtNum(o.existing)}/{fmtNum(expected)} <span className="text-emerald-400">(+{fmtNum(o.gap)})</span>
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div className="mt-1.5 flex gap-3 text-[10px] text-muted-foreground">
+                          <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-sky-500/80" /> exist now</span>
+                          <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-sky-500/40" /> expected (benchmark)</span>
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* Patterns */}
                   {aiAnalysis.patterns.length > 0 && (
@@ -2063,18 +2124,28 @@ export default function App() {
                     // plausibility check — numbers likely reflect scan
                     // coverage gaps, not the real market.
                     const sanityFlag = aiAnalysis?.sanity?.find(s => s.category === opp.category && s.verdict === 'absurd');
+                    // v6.9.15: clear badge label + click-to-explain instead of hover-only title
+                    const badgeLabel = sanityFlag?.kind === 'high' ? '⚠ too many' : '⚠ low data';
                     return (
                       <tr
                         key={opp.category}
                         onClick={() => setSelectedOppCategory(isSelected ? null : opp.category)}
                         className={`border-b border-border/50 last:border-0 cursor-pointer transition-colors ${isSelected ? 'bg-primary/10' : 'hover:bg-muted/30'}`}
-                        title={sanityFlag?.reason}
                       >
                         <td className="px-5 py-3 text-xs text-muted-foreground">{i + 1}</td>
                         <td className="px-4 py-3 font-medium flex items-center gap-2">
                           <span className="w-2.5 h-2.5 rounded-full inline-block flex-shrink-0" style={{background: color}} />
                           {opp.categoryLabel}
-                          {sanityFlag && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400 font-normal">⚠ check</span>}
+                          {sanityFlag && (
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); setSanityDetail(sanityFlag); }}
+                              title="Why is this flagged? Click for details"
+                              className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400 font-normal hover:bg-amber-500/30 transition-colors"
+                            >
+                              {badgeLabel}
+                            </button>
+                          )}
                         </td>
                         <td className="px-4 py-3 text-right tabular-nums">{fmtNum(opp.existing)}</td>
                         <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">{opp.per10k}</td>
@@ -2114,6 +2185,50 @@ export default function App() {
               Without a known population, gap/size criteria score neutral and ranking relies on competition &amp; measured demand — no numbers are fabricated.
               Demand signals come from Wikipedia pageviews (rolling 12-month window), Reddit, and web search — counted only when successfully measured (confidence &gt; 0).
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* v6.9.15: plausibility-flag explain modal (opens from the table badge) */}
+      {sanityDetail && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setSanityDetail(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-amber-500/40 bg-card p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <h3 className="text-sm font-bold text-amber-300">
+                ⚠ Why is “{getCategoryLabel(sanityDetail.category)}” flagged?
+              </h3>
+              <button onClick={() => setSanityDetail(null)} className="text-xs text-muted-foreground hover:text-foreground">✕</button>
+            </div>
+            <p className="text-xs text-muted-foreground leading-relaxed mb-4">{sanityDetail.reason}</p>
+            {sanityDetail.found != null && sanityDetail.expected != null && (
+              <div className="space-y-2 rounded-lg bg-muted/40 p-3">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-muted-foreground">Found by scan</span>
+                  <span className="font-semibold text-foreground tabular-nums">{fmtNum(sanityDetail.found)}</span>
+                </div>
+                <div className="h-2 rounded-full bg-background overflow-hidden">
+                  <div className="h-full bg-sky-500" style={{ width: `${Math.min(100, (sanityDetail.found / Math.max(sanityDetail.found, sanityDetail.expected)) * 100)}%` }} />
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-muted-foreground">Expected for a city this size</span>
+                  <span className="font-semibold text-amber-300 tabular-nums">~{fmtNum(sanityDetail.expected)}</span>
+                </div>
+                <div className="h-2 rounded-full bg-background overflow-hidden">
+                  <div className="h-full bg-amber-500" style={{ width: `${Math.min(100, (sanityDetail.expected / Math.max(sanityDetail.found, sanityDetail.expected)) * 100)}%` }} />
+                </div>
+                <p className="text-[11px] text-muted-foreground pt-1">
+                  {sanityDetail.kind === 'high'
+                    ? 'The scan found more than plausible — some entries are likely mis-tagged or duplicated.'
+                    : 'The scan found far fewer than plausible — most were likely missed by the data source.'}
+                </p>
+              </div>
+            )}
           </div>
         </div>
       )}

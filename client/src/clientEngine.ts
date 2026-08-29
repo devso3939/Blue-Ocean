@@ -316,7 +316,7 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   if (s === 'beauty' || s === 'cosmetics' || s === 'beauty_salon') {
     // A "beauty" shop named like a nail salon is a nail salon, not a beauty salon
     const nm = nameOf();
-    if (/(nail|manikюр|pedikюр)/.test(nm)) return 'nail_salon';
+    if (/(nail|маникюр|педикюр)/.test(nm)) return 'nail_salon';
     return 'beauty_salon';
   }
   if (s === 'hairdresser' || s === 'wigs' || s === 'hairdresser_supply') return 'hair_salon';
@@ -544,7 +544,7 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
     if (/(travel|tur|tour)/.test(nm)) return 'travel_agency';
     if (/(clean|ubor|cleaning)/.test(nm)) return 'cleaning';
     if (/(car.?wash|moyk[ae]|автомойк)/.test(nm)) return 'car_wash';
-    if (/(nail|manikюр|pedikюр)/.test(nm)) return 'nail_salon';
+    if (/(nail|маникюр|педикюр)/.test(nm)) return 'nail_salon';
     if (/(yoga|pilates)/.test(nm)) return 'yoga';
     if (/(soft|it|tech|digital|web|dev|data|ai|cloud|cyber|app)/.test(nm)) return 'software';
     if (/(consult|консалт)/.test(nm)) return 'it_consulting';
@@ -603,7 +603,7 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
     if (/(travel|tur|tour|travel)/.test(nameLower)) return 'travel_agency';
     if (/(clean|ubor|cleaning)/.test(nameLower)) return 'cleaning';
     if (/(car.?wash|moyk[ae]|автомойк)/.test(nameLower)) return 'car_wash';
-    if (/(nail|manikюр|pedikюр)/.test(nameLower)) return 'nail_salon';
+    if (/(nail|маникюр|педикюр)/.test(nameLower)) return 'nail_salon';
     if (/(yoga|pilates)/.test(nameLower)) return 'yoga';
   }
 
@@ -4329,10 +4329,16 @@ export interface AIAnalysis {
 
 // Result of one category's plausibility check. 'absurd' = the number almost
 // certainly reflects incomplete scan coverage, not the real market.
+// v6.9.15: structured numbers so the UI can show a click-to-explain panel.
 export interface SanityCheck {
   category: string;
   verdict: 'plausible' | 'absurd' | 'uncertain';
   reason: string;
+  // v6.9.15 structured context for the UI popover:
+  kind?: 'low' | 'high';      // count implausibly LOW (scan gap) or HIGH (mis-tags)
+  found?: number;             // businesses found by the scan
+  per10k?: number;            // found per 10k residents
+  expected?: number | null;   // expected per 10k baseline → absolute expected count
 }
 
 // Statistical pre-computation fed to the LLM as compact facts. Detecting
@@ -4489,6 +4495,7 @@ PRE-DETECTED PATTERNS (deterministic, from real data):
 }
 
 // System prompt — domain-tuned for market-opportunity analysis.
+// v6.9.15: tightened for SHORT, chart-friendly, evidence-first output.
 const AI_SYSTEM_PROMPT = `You are a senior market analyst specializing in blue-ocean opportunity discovery for small businesses.
 
 You analyze real OpenStreetMap scan data about businesses in a city, plus measured demand signals from Wikipedia, Reddit, and web search.
@@ -4502,8 +4509,9 @@ Your job:
 Rules:
 - Use ONLY the numbers given. NEVER invent statistics.
 - When population is unknown, treat gap/expected as unreliable.
-- Be specific: prefer "this city has 3x fewer gyms per capita than the median city" style over generic advice.
-- Keep every string under 200 chars. Be concise but analytical.`;
+- ALWAYS quote the exact number that backs the claim ("3x fewer gyms per capita", "12 of 48 have a website").
+- Be SHORT: insight.title ≤ 60 chars; insight.detail ≤ 140 chars; pattern.description ≤ 140 chars; risk ≤ 120 chars; action ≤ 90 chars; rationale ≤ 120 chars.
+- Prefer sentence fragments over full sentences where possible. No filler ("It is worth noting…"), no hedging.`;
 
 // Main entry: runs the full AI analysis pipeline.
 export async function getSmartAIAnalysis(
@@ -4527,7 +4535,7 @@ TASK: Analyze this market data and return ONLY a valid JSON object (no markdown,
   ]
 }
 
-Generate 3-5 insights, 2-4 patterns, 2-3 risks, 2-4 actions. Every claim must trace back to the numbers above.`;
+Generate exactly 3 insights, 2-3 patterns, 2 risks, 3 actions. Keep every string SHORT (title ≤ 60 chars, detail ≤ 140 chars). Every claim must quote a number from the data above.`;
 
   // Cache: analysis is a pure function of (facts, opportunities). Same
   // inputs → same cached output (no model re-roll), so repeat scans show
@@ -4559,13 +4567,14 @@ Generate 3-5 insights, 2-4 patterns, 2-3 risks, 2-4 actions. Every claim must tr
     const parsed = extractJson(raw);
     if (!parsed) throw new Error('no-json');
 
-    // Validate + normalize the model output
+    // Validate + normalize the model output (v6.9.15: clamps enforce the
+    // SHORT-output contract even when a model ignores the length rules)
     const insights: AIInsight[] = (parsed.insights || [])
       .filter((x: any) => x && typeof x.title === 'string' && typeof x.detail === 'string')
       .slice(0, 5)
       .map((x: any) => ({
-        title: String(x.title).slice(0, 120),
-        detail: String(x.detail).slice(0, 400),
+        title: String(x.title).slice(0, 80),
+        detail: String(x.detail).slice(0, 160),
         severity: (['high', 'medium', 'low'] as const).includes(x.severity) ? x.severity : 'medium',
         categories: Array.isArray(x.categories)
           ? x.categories.filter((c: any) => typeof c === 'string').slice(0, 4)
@@ -4575,8 +4584,8 @@ Generate 3-5 insights, 2-4 patterns, 2-3 risks, 2-4 actions. Every claim must tr
       .filter((x: any) => x && typeof x.name === 'string' && typeof x.description === 'string')
       .slice(0, 4)
       .map((x: any) => ({
-        name: String(x.name).slice(0, 120),
-        description: String(x.description).slice(0, 400),
+        name: String(x.name).slice(0, 80),
+        description: String(x.description).slice(0, 160),
         categories: Array.isArray(x.categories)
           ? x.categories.filter((c: any) => sortableStrictCategories(c)).slice(0, 4)
           : undefined,
@@ -4584,13 +4593,13 @@ Generate 3-5 insights, 2-4 patterns, 2-3 risks, 2-4 actions. Every claim must tr
     const risks: string[] = (parsed.risks || [])
       .filter((x: any) => typeof x === 'string')
       .slice(0, 4)
-      .map((x: any) => String(x).slice(0, 300));
+      .map((x: any) => String(x).slice(0, 140));
     const actions: AIAction[] = (parsed.actions || [])
              .filter((x: any) => x && typeof x.action === 'string' && typeof x.rationale === 'string')
       .slice(0, 4)
       .map((x: any) => ({
-        action: String(x.action).slice(0, 200),
-        rationale: String(x.rationale).slice(0, 400),
+        action: String(x.action).slice(0, 100),
+        rationale: String(x.rationale).slice(0, 140),
         timeframe: (['immediate', '1-3 months', '6-12 months'] as const).includes(x.timeframe)
           ? x.timeframe : undefined,
       }));
@@ -4629,8 +4638,8 @@ function deterministicAIAnalysis(
   if (gapped.length > 0) {
     const big = gapped.reduce((best, o) => (o.gap as number) > (best.gap as number) ? o : best, gapped[0]);
     insights.push({
-      title: `Largest underserved category: ${big.categoryLabel}`,
-      detail: `Only ${big.existing} existing vs ${((big.gap as number) + big.existing).toLocaleString()} expected (${(big.gap as number)} gap). Per-capita density ${big.per10k}/10k.`,
+      title: `Biggest gap: ${big.categoryLabel}`,
+      detail: `${big.existing} exist vs ~${((big.gap as number) + big.existing).toLocaleString()} expected → ${big.gap} missing (${big.per10k}/10k).`,
       severity: big.score >= 70 ? 'high' : 'medium',
       categories: [big.category],
     });
@@ -4639,8 +4648,8 @@ function deterministicAIAnalysis(
   // 2. Saturation warning
   if (facts.saturationCluster.length > 0) {
     insights.push({
-      title: `${facts.saturationCluster.length} saturated categories detected`,
-      detail: `High density detected in: ${facts.saturationCluster.map(label).join(', ')}. These markets show signs of being crowded — differentiate or avoid.`,
+      title: `${facts.saturationCluster.length} saturated categories`,
+      detail: `Crowded: ${facts.saturationCluster.map(label).join(', ')}. Differentiate or avoid.`,
       severity: 'medium',
       categories: facts.saturationCluster.slice(0, 4),
     });
@@ -4650,7 +4659,7 @@ function deterministicAIAnalysis(
   if (facts.lowCompetition.length > 0) {
     insights.push({
       title: `${facts.lowCompetition.length} low-competition categories`,
-      detail: `Fewer than 5 businesses found: ${facts.lowCompetition.slice(0, 5).map(label).join(', ')}. First-mover positioning is available.`,
+      detail: `Under 5 businesses each: ${facts.lowCompetition.slice(0, 5).map(label).join(', ')}. First-mover space.`,
       severity: facts.lowCompetition.length >= 3 ? 'medium' : 'low',
       categories: facts.lowCompetition.slice(0, 4),
     });
@@ -4659,8 +4668,8 @@ function deterministicAIAnalysis(
   // 4. Geo-concentration insight
   if (facts.hubStats.concentration >= 25) {
     insights.push({
-      title: `High geo-concentration (${facts.hubStats.concentration}%)`,
-      detail: `${facts.hubStats.clusters} distinct clusters detected; the largest (dominated by ${facts.hubStats.dominant ?? 'mixed categories'}) holds ${facts.hubStats.concentration}% of all businesses. Outlying districts are underserved.`,
+      title: `Businesses cluster in one zone (${facts.hubStats.concentration}%)`,
+      detail: `${facts.hubStats.clusters} clusters; biggest (${facts.hubStats.dominant ?? 'mixed'}) holds ${facts.hubStats.concentration}%. Outlier districts underserved.`,
       severity: 'medium',
     });
   }
@@ -4670,7 +4679,7 @@ function deterministicAIAnalysis(
   if (facts.saturationCluster.length > 0 && facts.underservedCluster.length > 0) {
     patterns.push({
       name: 'Saturation–gap asymmetry',
-      description: `Saturated categories (${facts.saturationCluster.slice(0, 2).map(label).join(', ')}) coexist with underserved ones (${facts.underservedCluster.slice(0, 2).map(label).join(', ')}) — capital and attention are flowing to crowded markets while gaps persist elsewhere.`,
+      description: `Crowded (${facts.saturationCluster.slice(0, 2).map(label).join(', ')}) coexists with underserved (${facts.underservedCluster.slice(0, 2).map(label).join(', ')}).`,
       categories: [...facts.saturationCluster.slice(0, 2), ...facts.underservedCluster.slice(0, 2)],
     });
   }
@@ -4689,7 +4698,7 @@ function deterministicAIAnalysis(
     const cb = facts.categories.find(c => c.category === b)!;
     patterns.push({
       name: `Complementary pair: ${label(a)} ↔ ${label(b)}`,
-      description: `${ca.existing} ${label(a)} and ${cb.existing} ${label(b)} businesses. Traffic from one typically feeds the other — co-location or bundled positioning can capture spillover demand.`,
+      description: `${ca.existing} ${label(a)} and ${cb.existing} ${label(b)} — shared foot traffic; co-location captures spillover demand.`,
       categories: [a, b],
     });
   }
@@ -4699,17 +4708,17 @@ function deterministicAIAnalysis(
   if (facts.totalBusinesses > 10 && coverage.emails / facts.totalBusinesses < 0.3) {
     patterns.push({
       name: 'Low digital presence',
-      description: `Only ${coverage.emails}/${facts.totalBusinesses} businesses have a discoverable email and ${coverage.websites} have websites. Widespread low digital maturity = opening for digital-first competitors.`,
+      description: `Only ${coverage.emails}/${facts.totalBusinesses} have an email, ${coverage.websites} a website — room for digital-first entrants.`,
     });
   }
 
   // ── Risks (deterministic) ──
   if (facts.population === 0) {
-    risks.push('Population unknown for this city — per-capita gap estimates are unreliable; verify demographics before investing.');
+    risks.push('Population unknown — per-capita gap estimates unreliable.');
   }
-  risks.push('OpenStreetMap coverage is volunteered data — informal or newly opened businesses may be missing from the scan.');
+  risks.push('OSM is volunteer data — informal/new businesses may be missing.');
   if (coverage.emails + coverage.phones + coverage.websites < facts.totalBusinesses * 0.5) {
-    risks.push('Contact enrichment is incomplete — reachability estimates may understate the actual competitive set.');
+    risks.push('Contact enrichment incomplete — reachability may be understated.');
   }
 
   // ── Actions (deterministic) ──
@@ -4717,21 +4726,21 @@ function deterministicAIAnalysis(
     const top = gapped[0];
     actions.push({
       action: `Validate demand for ${top.categoryLabel}`,
-      rationale: `Highest-scoring gap (${top.gap} businesses missing, score ${top.score}/100). Confirm with 10-20 customer interviews before committing.`,
+      rationale: `Top gap: ${top.gap} missing, score ${top.score}/100. Run 10-20 customer interviews first.`,
       timeframe: 'immediate',
     });
   }
   if (facts.lowCompetition.length > 0) {
     actions.push({
       action: `Pilot a ${label(facts.lowCompetition[0])} offering`,
-      rationale: `Only ${facts.categories.find(c => c.category === facts.lowCompetition[0])?.existing ?? 0} competitors — a low-cost pilot can test the market with minimal exposure.`,
+      rationale: `Only ${facts.categories.find(c => c.category === facts.lowCompetition[0])?.existing ?? 0} competitors — cheap low-risk test.`,
       timeframe: '1-3 months',
     });
   }
   if (facts.hubStats.concentration >= 25) {
     actions.push({
       action: 'Scout locations outside the main cluster',
-      rationale: `${facts.hubStats.concentration}% of businesses concentrate in one area — outlying districts have demand but little supply.`,
+      rationale: `${facts.hubStats.concentration}% of businesses sit in one zone — outer districts have demand, little supply.`,
       timeframe: '1-3 months',
     });
   }
@@ -4794,16 +4803,26 @@ export function sanityCheckOpportunities(
     const band = BANDS[opp.category];
     if (!band) continue;
     if (per10k < band.min) {
+      // v6.9.15: structured fields (kind/found/per10k/expected) power the UI
+      // "explain" panel; expected = absolute minimum count for this population.
       out.push({
         category: opp.category,
         verdict: 'absurd',
-        reason: `${opp.existing} ${opp.categoryLabel} in a city of ${population.toLocaleString()} (${per10k.toFixed(2)}/10k) is implausibly low — the scan almost certainly missed most of them. Treat this number as incomplete coverage, not as a real market gap.`,
+        kind: 'low',
+        found: opp.existing,
+        per10k,
+        expected: Math.max(1, Math.round(band.min * population / 10000)),
+        reason: `Scan found only ${opp.existing} ${opp.categoryLabel} (${per10k.toFixed(2)} per 10k residents) — far below the normal range for a city this size. Most were likely missed: OSM coverage here is thin. The real number is higher, so don't treat this gap as real demand.`,
       });
     } else if (per10k > band.max) {
       out.push({
         category: opp.category,
         verdict: 'absurd',
-        reason: `${opp.existing} ${opp.categoryLabel} (${per10k.toFixed(1)}/10k) is implausibly high — likely mis-categorized or double-counted entries. Verify a sample before trusting this count.`,
+        kind: 'high',
+        found: opp.existing,
+        per10k,
+        expected: Math.max(1, Math.round(band.max * population / 10000)),
+        reason: `Scan found ${opp.existing} ${opp.categoryLabel} (${per10k.toFixed(1)} per 10k residents) — above the normal range. Some entries are probably mis-tagged or duplicated. Check a few samples before trusting this count.`,
       });
     }
   }
@@ -4856,8 +4875,8 @@ Your job:
 Rules:
 - Use ONLY the numbers given. NEVER invent statistics.
 - When population is unknown, avoid per-capita claims.
-- Be specific: prefer "only 34% of existing pharmacies list a phone" style over generic advice.
-- Keep every string under 200 chars. Be concise but analytical.`;
+- ALWAYS quote the exact number that backs the claim ("only 34% list a phone", "12 competitors").
+- Be SHORT: title ≤ 60 chars; detail ≤ 140 chars; description ≤ 140 chars; risk ≤ 120 chars; action ≤ 90 chars; rationale ≤ 120 chars. No filler, no hedging.`;
 
   const user = `${catFacts}
 
@@ -4875,7 +4894,7 @@ TASK: Analyze this single-category market and return ONLY a valid JSON object (n
   ]
 }
 
-Generate 3-5 insights, 2-3 patterns, 1-3 risks, 2-4 actions. Every claim must trace back to the numbers above.`;
+Generate exactly 3 insights, 2 patterns, 1-2 risks, 3 actions. Keep every string SHORT (title ≤ 60 chars, detail ≤ 140 chars). Every claim must quote a number from the data above.`;
 
   // Cache keyed on the category+city+count+demand — stable inputs → stable output.
   const ck = 'aicat_' + cacheKey(
@@ -4900,24 +4919,24 @@ Generate 3-5 insights, 2-3 patterns, 1-3 risks, 2-4 actions. Every claim must tr
       .filter((x: any) => x && typeof x.title === 'string' && typeof x.detail === 'string')
       .slice(0, 5)
       .map((x: any) => ({
-        title: String(x.title).slice(0, 120),
-        detail: String(x.detail).slice(0, 400),
+        title: String(x.title).slice(0, 80),
+        detail: String(x.detail).slice(0, 160),
         severity: (['high', 'medium', 'low'] as const).includes(x.severity) ? x.severity : 'medium',
       }));
     const patterns: AIPattern[] = (parsed.patterns || [])
       .filter((x: any) => x && typeof x.name === 'string' && typeof x.description === 'string')
       .slice(0, 3)
-      .map((x: any) => ({ name: String(x.name).slice(0, 120), description: String(x.description).slice(0, 400) }));
+      .map((x: any) => ({ name: String(x.name).slice(0, 80), description: String(x.description).slice(0, 160) }));
     const risks: string[] = (parsed.risks || [])
       .filter((x: any) => typeof x === 'string')
       .slice(0, 3)
-      .map((x: any) => String(x).slice(0, 300));
+      .map((x: any) => String(x).slice(0, 140));
     const actions: AIAction[] = (parsed.actions || [])
       .filter((x: any) => x && typeof x.action === 'string' && typeof x.rationale === 'string')
       .slice(0, 4)
       .map((x: any) => ({
-        action: String(x.action).slice(0, 200),
-        rationale: String(x.rationale).slice(0, 400),
+        action: String(x.action).slice(0, 100),
+        rationale: String(x.rationale).slice(0, 140),
         timeframe: (['immediate', '1-3 months', '6-12 months'] as const).includes(x.timeframe) ? x.timeframe : undefined,
       }));
     if (insights.length === 0 && patterns.length === 0) throw new Error('empty-analysis');
@@ -5115,18 +5134,18 @@ export async function rescanWideNet(
 // variants that the focused query missed still surface). English keywords
 // catch international chains; the app's query engine handles i18n via tags.
 const WIDE_NET_KEYWORDS: Record<string, string> = {
-  printing: '["name"~"print|druck|typograf",i]',
-  cleaning: '["name"~"clean|cleaning|hygiene service",i]',
-  yoga: '["name"~"yoga",i]',
-  books: '["name"~"book|bücher",i]',
-  bookstore: '["name"~"book|bibli",i]',
-  coworking: '["name"~"cowork|work Lab|hub",i]',
-  tattoo: '["name"~"tattoo",i]',
-  music_school: '["name"~"music school|musik|piano|guitar",i]',
-  art: '["name"~"art|gallery|atelier",i]',
-  wedding: '["name"~"wedding|bridal|braut",i]',
-  courier: '["name"~"courier|delivery|express",i]',
-  dance: '["name"~"dance|danz|ballet",i]',
+  printing: '["name"~"print|druck|typograf|печать|друк|ბეჭდვ",i]',
+  cleaning: '["name"~"clean|cleaning|hygiene service|уборк|чистк|temizlik|წმენდ",i]',
+  yoga: '["name"~"yoga|йога|յոգա|იოგა",i]',
+  books: '["name"~"book|bücher|книг|գրք|წიგн",i]',
+  bookstore: '["name"~"book|bibli|книг|գրախանութ|წიგн",i]',
+  coworking: '["name"~"cowork|work Lab|hub|коворк",i]',
+  tattoo: '["name"~"tattoo|тат|տատու|ტატუ",i]',
+  music_school: '["name"~"music school|musik|piano|guitar|музык|երաժշտ|მუსიკ",i]',
+  art: '["name"~"art|gallery|atelier|галер|արվեստ|ხელოვნ",i]',
+  wedding: '["name"~"wedding|bridal|braut|свадеб|հարսան|ქორწი",i]',
+  courier: '["name"~"courier|delivery|express|курьер|курʼєр|მიწოდებ|առաքում",i]',
+  dance: '["name"~"dance|danz|ballet|танц|պար|ცეკვ",i]',
 };
 
 export function getGoogleMapsUrl(b: Business): string {
