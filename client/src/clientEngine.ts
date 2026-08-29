@@ -3334,10 +3334,15 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         await Promise.all([
           // Brave API (free tier) → fallback: Mojeek HTML (keyless)
           engineArm('brave', 'Brave', async () => {
-            if (!braveOkToCall()) return false; // v6.9.9: surge guard
+            // v6.9.12: stagger + gate re-check, same as the email arm —
+            // the 10-business batch fires this arm in parallel, so without
+            // a mid-wave failure to trip the surge guard all 10 429s print
+            // at once. Span 400ms×9 > the 2s timeout below.
+            if (bi > 0) await wait(400 * bi);
+            if (!braveOkToCall()) return false;
             const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=5`, {
               headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
-              signal: AbortSignal.timeout(3000),
+              signal: AbortSignal.timeout(2000),
             });
             if (!r.ok) {
                 braveNoteFail(classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
