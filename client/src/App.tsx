@@ -16,6 +16,11 @@ import {
   runDiscoveryPhases,
   getSmartCategoryAnalysis,
   sanityCheckOpportunities,
+  aiVerifyOpportunities,
+  rescanWideNet,
+  getEngineHealthSnapshot,
+  type EngineHealthEntry,
+  type VerificationResult,
   type EnrichmentProgress,
   setScanContext, buildScanContext,
 } from './clientEngine';
@@ -116,7 +121,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '6.9.1';
+const APP_VERSION = '6.9.2';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -141,6 +146,10 @@ export default function App() {
   const [aiAnalysis, setAiAnalysis] = useState<AIAnalysis | null>(null);
   const [selectedBiz, setSelectedBiz] = useState<{name:string;category:string;categoryLabel:string;color:string;phone:string;email:string;website:string;address:string;facebook:string;instagram:string;linkedin:string;youtube:string;tiktok:string;twitter:string;pinterest:string;rating:number;reviewCount:number;hours:string;lat:number;lon:number}|null>(null);
   const [enrichProgress, setEnrichProgress] = useState<EnrichmentProgress | null>(null);
+  // v6.9.2: engine health (quota / fallback banners) + AI verification notes
+  const [engineHealth, setEngineHealth] = useState<EngineHealthEntry[]>([]);
+  const [aiVerification, setAiVerification] = useState<VerificationResult | null>(null);
+  const [rescanNote, setRescanNote] = useState('');
 
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
@@ -415,11 +424,14 @@ export default function App() {
     setEnrichProgress(null);
     setDiscoverProgress(null);
     setAiAnalysis(null);
+    setAiVerification(null);
+    setRescanNote('');
+    setEngineHealth(getEngineHealthSnapshot());
 
     try {
       // Native-language context for this city (helps contact discovery)
       setScanContext(buildScanContext(selectedCity.countryCode, selectedCity.country, selectedCity.name));
-      const biz = await queryBusinesses(
+      let biz = await queryBusinesses(
         selectedCity.lat, selectedCity.lon, 10000,
         (pct, msg) => { setProgress(pct); setLoadingStage(msg); },
         undefined, true,
@@ -450,6 +462,50 @@ export default function App() {
       setDemandSignals(signals);
       if (aiInsights) setAiInsights(aiInsights);
       setAiAnalysis(analysis ?? null);
+
+      // ── Second-chance rescan (v6.9.2): AI-checked absurd-low counts ──
+      // The sanity pass flags categories whose counts fail plausibility bands.
+      // For those with a name-based wide-net filter available, re-query OSM
+      // once and merge newly found businesses; then recompute opportunities.
+      const absurdCats = (analysis?.sanity || [])
+        .filter(s => s.verdict === 'absurd')
+        .map(s => s.category);
+      if (absurdCats.length > 0 && !ac.signal.aborted) {
+        try {
+          setLoadingStage(`Re-checking ${absurdCats.length} suspicious categor${absurdCats.length > 1 ? 'ies' : 'y'}…`);
+          const merged = await rescanWideNet(biz, absurdCats, selectedCity.lat, selectedCity.lon, 10000, {
+            signal: ac.signal,
+            onProgress: (msg) => setRescanNote(msg),
+          });
+          const addedTotal = Array.from(merged.entries()).reduce((s, [c, arr]) => {
+            const before = biz.get(c)?.length ?? 0;
+            return s + Math.max(0, arr.length - before);
+          }, 0);
+          if (addedTotal > 0) {
+            biz = merged;
+            setBusinesses(merged);
+            const opps2 = computeOpportunities(merged, selectedCity.population || 0, signals);
+            setOpportunities(opps2);
+            if (analysis) {
+              analysis.sanity = sanityCheckOpportunities(opps2, selectedCity.population || 0);
+              setAiAnalysis(analysis);
+            }
+          }
+          setRescanNote(addedTotal > 0
+            ? `Re-check added ${addedTotal} businesses missed by the first scan.`
+            : 'Re-check confirmed the first scan — no additional businesses found.');
+        } catch { /* rescan best-effort */ }
+      }
+
+      // ── AI verification pass (v6.9.2): LLM cross-checks the flags ──
+      if (!ac.signal.aborted) {
+        try {
+          setLoadingStage('AI verifying results…');
+          const ver = await aiVerifyOpportunities(opportunities, selectedCity.population || 0, selectedCity.name, selectedCity.country, { signal: ac.signal });
+          setAiVerification(ver);
+          setEngineHealth(getEngineHealthSnapshot());
+        } catch { /* verification best-effort */ }
+      }
       setProgress(100);
     } catch (e: any) {
       if (e.message !== 'Cancelled') setError(e.message || 'Analysis failed');
@@ -475,6 +531,9 @@ export default function App() {
     setDemandSignals(new Map());
     setEnrichProgress(null);
     setAiAnalysis(null);
+    setAiVerification(null);
+    setRescanNote('');
+    setEngineHealth(getEngineHealthSnapshot());
 
     try {
       setLoadingStage(`Scanning ${getCategoryLabel(selectedCategory)}…`);
@@ -482,7 +541,7 @@ export default function App() {
 
       // Native-language context for this city (helps contact discovery)
       setScanContext(buildScanContext(selectedCity.countryCode, selectedCity.country, selectedCity.name));
-      const biz = await queryBusinesses(
+      let biz = await queryBusinesses(
         selectedCity.lat, selectedCity.lon, 10000,
         (pct, msg) => { setProgress(Math.max(pct, 5)); setLoadingStage(msg); },
         selectedCategory,
@@ -516,9 +575,10 @@ export default function App() {
       // Real LLM insights grounded in this category's scan + demand data,
       // plus the sanity-check pass that flags implausible counts before
       // the results are shown.
+      let analysis: AIAnalysis | null = null;
       try {
         setLoadingStage('AI market analysis…');
-        const analysis = await getSmartCategoryAnalysis(
+        analysis = await getSmartCategoryAnalysis(
           selectedCategory, selectedCity.name, selectedCity.country,
           selectedCity.population || 0,
           biz.get(selectedCategory) || [], sig,
@@ -528,15 +588,52 @@ export default function App() {
         const absurd = sanity.filter(s => s.verdict === 'absurd');
         if (absurd.length > 0) {
           analysis.insights = [{
-            title: `⚠ Data warning: scan coverage looks incomplete for ${getCategoryLabel(absurd[0].category)}`,
+            title: `⚠ Data warning: ${absurd.length > 1 ? `${absurd.length} categories` : 'this category'} failed the plausibility check`,
             detail: absurd[0].reason,
             severity: 'medium',
-            categories: [absurd[0].category],
+            categories: absurd.slice(0, 4).map(s => s.category),
           }, ...analysis.insights];
         }
         setAiAnalysis(analysis);
       } catch {
         // AI unavailable → panel stays hidden; results remain fully usable.
+      }
+      // ── Second-chance rescan for this category (v6.9.2) ──
+      const absurdCats1 = (analysis?.sanity || [])
+        .filter(s => s.verdict === 'absurd' && s.category === selectedCategory)
+        .map(s => s.category);
+      if (absurdCats1.includes(selectedCategory) && !ac.signal.aborted) {
+        try {
+          setLoadingStage('Re-checking with a wider search…');
+          const merged = await rescanWideNet(biz, [selectedCategory], selectedCity.lat, selectedCity.lon, 10000, {
+            signal: ac.signal,
+            onProgress: (msg) => setRescanNote(msg),
+          });
+          const before = biz.get(selectedCategory)?.length ?? 0;
+          const after = merged.get(selectedCategory)?.length ?? 0;
+          if (after > before) {
+            biz = merged;
+            setBusinesses(merged);
+            const opps2 = computeOpportunities(merged, selectedCity.population || 0, signals);
+            setOpportunities(opps2);
+            if (analysis) {
+              analysis.sanity = sanityCheckOpportunities(opps2, selectedCity.population || 0);
+              setAiAnalysis(analysis);
+            }
+            setRescanNote(`Re-check found ${after - before} more businesses missed by the first scan.`);
+          } else {
+            setRescanNote('Re-check confirmed the first scan — no additional businesses found.');
+          }
+        } catch { /* rescan best-effort */ }
+      }
+
+      // ── AI verification pass (v6.9.2) ──
+      if (!ac.signal.aborted) {
+        try {
+          const ver = await aiVerifyOpportunities(opps, selectedCity.population || 0, selectedCity.name, selectedCity.country, { signal: ac.signal });
+          setAiVerification(ver);
+          setEngineHealth(getEngineHealthSnapshot());
+        } catch { /* verification best-effort */ }
       }
       setProgress(100);
     } catch (e: any) {
@@ -1310,19 +1407,82 @@ export default function App() {
             </div>
           </div>
 
-          {/* AI Insights */}
+          {/* v6.9.2: Engine health — quota / fallback / down banners */}
+          {engineHealth.length > 0 && (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4">
+              <div className="text-xs font-semibold text-amber-300 mb-2 flex items-center gap-2 flex-wrap">
+                ⚙ Engine status
+                <span className="font-normal text-muted-foreground">some data sources hit limits — the scan continues on backup engines</span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {engineHealth.map(e => (
+                  <span key={e.id}
+                    title={e.detail || e.status}
+                    className={`inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-full border font-medium ${
+                      e.status === 'quota' ? 'bg-red-500/10 border-red-500/30 text-red-300'
+                      : e.status === 'down' ? 'bg-orange-500/10 border-orange-500/30 text-orange-300'
+                      : 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+                    }`}>
+                    {e.status === 'quota' ? '⛔' : e.status === 'down' ? '🔴' : '🟡'} {e.label}
+                    <span className="opacity-70">
+                      {e.status === 'quota'
+                        ? 'quota — backups in use'
+                        : e.cooldownUntil > 0
+                          ? `cooldown ${Math.ceil(e.cooldownUntil / 1000)}s`
+                          : e.status}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* v6.9.2: second-chance rescan note */}
+          {rescanNote && (
+            <div className="rounded-xl border border-sky-500/30 bg-sky-500/5 px-4 py-3 text-xs text-sky-200 flex items-center gap-2">
+              🔁 {rescanNote}
+            </div>
+          )}
+
+          {/* AI Insights (v6.9.2 redesign: model badge + source chip + verification) */}
           {(aiAnalysis || aiInsights) && (
-            <div className="rounded-xl border border-emerald-500/30 bg-gradient-to-br from-emerald-500/10 to-transparent p-5">
-              <h3 className="text-sm font-bold mb-3 flex items-center gap-2 flex-wrap">
-                🤖 AI Market Analysis
-                <span className="font-normal text-muted-foreground">
-                  {aiAnalysis
-                    ? aiAnalysis.isAI
-                      ? `(model-generated from live scan data · ${aiAnalysis.model})`
-                      : '(deterministic analysis — AI models unavailable, same real data)'
-                    : '(model-generated from live scan data)'}
-                </span>
-              </h3>
+            <div className="rounded-xl border border-emerald-500/30 bg-gradient-to-br from-emerald-500/10 via-emerald-500/5 to-transparent p-5 relative overflow-hidden">
+              {/* decorative glow */}
+              <div className="absolute -top-16 -right-16 h-40 w-40 rounded-full bg-emerald-500/10 blur-3xl pointer-events-none" />
+              <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span className="shrink-0 inline-flex items-center justify-center h-8 w-8 rounded-lg bg-emerald-500/15 text-base">🤖</span>
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-bold leading-tight">AI Market Analysis</h3>
+                    <div className="text-[11px] text-muted-foreground">from live scan data · {selectedCity.name}</div>
+                  </div>
+                </div>
+                {/* Source + model badges (v6.9.2) */}
+                <div className="flex items-center gap-2 flex-wrap shrink-0">
+                  {aiAnalysis ? (
+                    aiAnalysis.isAI ? (
+                      <>
+                        <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300">
+                          ✦ LLM-GENERATED
+                        </span>
+                        <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-full bg-background/60 border border-border text-foreground/80 font-mono"
+                          title="Model that produced these insights">
+                          🧠 {aiAnalysis.model}
+                        </span>
+                      </>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300"
+                        title="AI providers unreachable — rules-based analysis on the same real data">
+                        ⚙ DETERMINISTIC FALLBACK
+                      </span>
+                    )
+                  ) : (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300">
+                      ✦ LLM-GENERATED
+                    </span>
+                  )}
+                </div>
+              </div>
 
               {aiAnalysis ? (
                 <div className="space-y-4">
@@ -1408,6 +1568,34 @@ export default function App() {
                   {aiInsights.split('\n').map((line, i) => (
                     <p key={i} className="mb-2" dangerouslySetInnerHTML={{ __html: escapeHtml(line).replace(/\*\*(.*?)\*\*/g, '<strong class="text-foreground">$1</strong>') }} />
                   ))}
+                </div>
+              )}
+
+              {/* v6.9.2: AI verification pass results */}
+              {aiVerification && aiVerification.checked > 0 && (
+                <div className="mt-4 pt-3 border-t border-emerald-500/20">
+                  <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                    <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
+                      aiVerification.aiVerified
+                        ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                        : 'bg-amber-500/15 border-amber-500/30 text-amber-300'
+                    }`}>
+                      {aiVerification.aiVerified ? '✓ AI-VERIFIED' : '⚠ RULES-CHECKED'}
+                    </span>
+                    <span className="text-[11px] text-muted-foreground">
+                      {aiVerification.checked} count{aiVerification.checked > 1 ? 's' : ''} flagged by plausibility bands, {aiVerification.notes.length} re-reviewed{aiVerification.aiVerified ? ' by the model' : ''}
+                    </span>
+                  </div>
+                  {aiVerification.notes.length > 0 && (
+                    <ul className="space-y-1 mt-1.5">
+                      {aiVerification.notes.map((n, i) => (
+                        <li key={i} className="text-[11px] text-muted-foreground leading-relaxed flex gap-2">
+                          <span className="text-emerald-400/70 shrink-0">✓</span>
+                          <span>{n}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
             </div>

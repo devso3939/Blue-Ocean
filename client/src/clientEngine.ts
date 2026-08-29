@@ -976,6 +976,95 @@ function hostRecordSuccess(u: string): void {
   _hostFails.delete(hostKey(u));
 }
 
+// ─── Engine health + fallback registry (v6.9.2) ────────────────────────
+// Every outbound dependency (search engines, AI provider, proxies) gets a
+// health record: consecutive failures → short cooldown; explicit quota /
+// payment errors → long cooldown; success → clear. Dead engines are skipped
+// instantly for the rest of the scan instead of re-failing on every request
+// (kills the console-error storm AND the wasted latency), and the UI banner
+// tells the user which engine is down / which fallback took over.
+export type EngineHealthKind = 'net' | 'quota' | 'challenge';
+export interface EngineHealthEntry {
+  id: string;                 // stable id, e.g. 'brave', 'serper', 'ddg'
+  label: string;              // human name for UI
+  status: 'ok' | 'cooldown' | 'down' | 'quota';
+  detail: string;             // last known reason (for tooltips/banners)
+  fails: number;
+  since: number;              // ms timestamp of last state change
+  cooldownUntil: number;      // 0 = live
+}
+const _engineHealth = new Map<string, EngineHealthEntry>();
+const COOLDOWN_NET_MS = 45_000;      // transient failures: retry after 45s
+const COOLDOWN_CHALLENGE_MS = 90_000; // captcha/challenge pages: 90s
+const COOLDOWN_QUOTA_MS = 30 * 60_000; // quota exhausted: 30 min (per scan-life)
+
+// Quota / auth error fingerprints across providers (Brave, Serper, Tavily,
+// OpenRouter, proxies). Matched against status + response body snippets.
+function classifyEngineError(status: number, body?: string): EngineHealthKind {
+  const b = (body || '').slice(0, 600).toLowerCase();
+  if (
+    status === 402 || status === 429 ||
+    /quota|limit exceeded|rate limit|exceeded your|payment required|insufficient|subscription|credit|balance/i.test(b)
+  ) return 'quota';
+  if (/captcha|challenge|verify|akchal|cloudflare|ddos-guard|just a moment/i.test(b)) return 'challenge';
+  return 'net';
+}
+
+function engineHealthGet(id: string, label: string): EngineHealthEntry {
+  let e = _engineHealth.get(id);
+  if (!e) { e = { id, label, status: 'ok', detail: '', fails: 0, since: Date.now(), cooldownUntil: 0 }; _engineHealth.set(id, e); }
+  return e;
+}
+
+/** True when the engine may be called right now. */
+export function engineAvailable(id: string): boolean {
+  const e = _engineHealth.get(id);
+  if (!e) return true;
+  if (e.cooldownUntil > Date.now()) return false;
+  if (e.status === 'quota') return false; // quota is sticky for the session
+  return true;
+}
+
+export function engineNoteSuccess(id: string, label: string): void {
+  const e = engineHealthGet(id, label);
+  if (e.status !== 'ok') { e.status = 'ok'; e.since = Date.now(); e.detail = ''; e.cooldownUntil = 0; }
+  e.fails = 0;
+}
+
+export function engineNoteFail(id: string, label: string, kind: EngineHealthKind, detail?: string): void {
+  const e = engineHealthGet(id, label);
+  e.fails++;
+  e.detail = detail || e.detail || kind;
+  e.since = Date.now();
+  if (kind === 'quota') {
+    e.status = 'quota';
+    e.cooldownUntil = Date.now() + COOLDOWN_QUOTA_MS;
+  } else if (kind === 'challenge' || e.fails >= 3) {
+    e.status = 'cooldown';
+    e.cooldownUntil = Date.now() + (kind === 'challenge' ? COOLDOWN_CHALLENGE_MS : COOLDOWN_NET_MS);
+  }
+  if (e.fails >= 6 && e.status !== 'quota') { e.status = 'down'; e.cooldownUntil = Date.now() + COOLDOWN_NET_MS * 4; }
+}
+
+export function engineCooldownRemaining(id: string): number {
+  const e = _engineHealth.get(id);
+  return e ? Math.max(0, e.cooldownUntil - Date.now()) : 0;
+}
+
+/** Snapshot for the UI banner + engine panel (live entries only). */
+export function getEngineHealthSnapshot(): EngineHealthEntry[] {
+  const out: EngineHealthEntry[] = [];
+  const now = Date.now();
+  for (const e of _engineHealth.values()) {
+    if (e.cooldownUntil > now || e.status === 'quota') {
+      out.push({ ...e, cooldownUntil: Math.max(0, e.cooldownUntil - now) });
+    }
+  }
+  return out;
+}
+
+export function resetEngineHealth(): void { _engineHealth.clear(); }
+
 async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', ...init?.headers };
   const callerSignal = init?.signal;
@@ -1591,7 +1680,10 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
             for (const entity of entities) {
               const types = Array.isArray(entity['@type']) ? entity['@type'] : [entity['@type']];
               if (types.some((t: string) => /LocalBusiness|Restaurant|Bar|Cafe|Store|Hotel|Organization/i.test(t || ''))) {
-                if (!b.phone && entity.telephone) b.phone = entity.telephone;
+                if (!b.phone && entity.telephone) {
+                  const digits = String(entity.telephone).replace(/\D/g, '');
+                  if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(String(entity.telephone))) b.phone = String(entity.telephone).trim();
+                }
                 if (!b.email && entity.email) b.email = entity.email;
                 if (!b.website && entity.url && !EXCLUDE.test(entity.url) && isLikelyBusinessWebsite(entity.url, b.name)) b.website = entity.url;
                 if (!b.facebook && entity.sameAs) {
@@ -1621,7 +1713,10 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
           const prop = m[1].toLowerCase();
           const val = m[2];
           if (!b.email && prop === 'og:email') { b.email = val.replace('mailto:', ''); }
-          if (!b.phone && prop === 'og:phone') { b.phone = val; }
+          if (!b.phone && prop === 'og:phone') {
+            const digits = val.replace(/\D/g, '');
+            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(val)) b.phone = val.trim();
+          }
         }
       }
 
@@ -1907,7 +2002,11 @@ async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct:
         const html = await r.text();
         if (!b.phone) {
           const m = html.match(/\+\d[\d\s\-\.\(\)]{7,18}/);
-          if (m && m[0].length >= 8) { b.phone = m[0].trim(); found++; }
+          // Digit-count + plausibility guard (digits, not string length)
+          if (m) {
+            const digits = m[0].replace(/\D/g, '');
+            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(m[0])) { b.phone = m[0].trim(); found++; }
+          }
         }
         if (!b.website) {
           const m = html.match(/(?:www\.|https?:\/\/)([^"\s<>]+\.(com|ge|net|org|io|co)[^"\s<>]*)/i);
@@ -2006,7 +2105,12 @@ function extractFromText(text: string, b: Business): boolean {
   let touched = false;
   if (!b.phone) {
     const m = text.match(/\+?\d[\d\s\-\.\(\)]{7,18}/);
-    if (m && m[0].length >= 8) { b.phone = m[0].trim(); touched = true; }
+    // Digit-count + plausibility guard: snippet fragments like "2026) -" or
+    // dates ("2026-06-11") match the char class but aren't phone numbers.
+    if (m) {
+      const digits = m[0].replace(/\D/g, '');
+      if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(m[0])) { b.phone = m[0].trim(); touched = true; }
+    }
   }
   if (!b.email) {
     const m = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
@@ -2266,7 +2370,8 @@ function applySearchResult(b: Business, url: string, text: string, found: { n: n
     const m = text.match(/\+?\d[\d\s\-\.\(\)]{7,18}/);
     if (m) {
       const norm = normalizePhone(m[0], cc);
-      if (norm.replace(/\D/g, '').length >= 8) { b.phone = norm; found.n++; }
+      const normDigits = norm.replace(/\D/g, '');
+      if (normDigits.length >= 8 && normDigits.length <= 15 && plausiblePhone(m[0])) { b.phone = norm; found.n++; }
     }
   }
   if (!b.website && url) {
@@ -2293,7 +2398,7 @@ function applySearchResult(b: Business, url: string, text: string, found: { n: n
 
 // ─── Serper.dev engine (free tier: 2,500 one-time queries, key optional) ──
 async function enrichFromSerper(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
-  if (!SERPER_API_KEY) return;
+  if (!SERPER_API_KEY || !engineAvailable('serper')) return;
   const NEEDS = businesses.filter(b => !b.website || !b.phone || !b.email);
   const max = Math.min(NEEDS.length, 80);
   const BATCH = 3;
@@ -2306,13 +2411,18 @@ async function enrichFromSerper(businesses: Business[], onProgress?: (pct: numbe
         // Native-language query first (site-restricted), then plain
         const queries = buildSearchQueries(b).slice(0, 2);
         for (const q of queries) {
+          if (!engineAvailable('serper')) return;
           const r = await fetch('https://google.serper.dev/search', {
             method: 'POST',
             headers: { 'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json' },
             body: JSON.stringify({ q: decodeURIComponent(q), num: 5 }),
             signal: AbortSignal.timeout(10000),
           });
-          if (!r.ok) return;
+          if (!r.ok) {
+            engineNoteFail('serper', 'Serper', classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
+            return;
+          }
+          engineNoteSuccess('serper', 'Serper');
           const data = await r.json();
           for (const res of (data.organic || []).slice(0, 5)) {
             applySearchResult(b, res.link || '', `${res.title || ''} ${res.snippet || ''}`, found);
@@ -2330,7 +2440,7 @@ async function enrichFromSerper(businesses: Business[], onProgress?: (pct: numbe
 
 // ─── Tavily engine (free tier: 1,000 searches/month, key optional) ──
 async function enrichFromTavily(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
-  if (!TAVILY_API_KEY) return;
+  if (!TAVILY_API_KEY || !engineAvailable('tavily')) return;
   const NEEDS = businesses.filter(b => !b.website || !b.phone || !b.email);
   const max = Math.min(NEEDS.length, 60);
   const BATCH = 3;
@@ -2348,7 +2458,11 @@ async function enrichFromTavily(businesses: Business[], onProgress?: (pct: numbe
           body: JSON.stringify({ api_key: TAVILY_API_KEY, query: q, max_results: 5, search_depth: 'basic' }),
           signal: AbortSignal.timeout(12000),
         });
-        if (!r.ok) return;
+        if (!r.ok) {
+          engineNoteFail('tavily', 'Tavily', classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
+          return;
+        }
+        engineNoteSuccess('tavily', 'Tavily');
         const data = await r.json();
         for (const res of (data.results || []).slice(0, 5)) {
           applySearchResult(b, res.url || '', `${res.title || ''} ${res.content || ''}`, found);
@@ -2601,7 +2715,10 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
           }
           if (!b.phone) {
             const labeledPh = html.match(/(?:phone|tel|telephone|mobile|cell|fax|calls)\s*[:;]\s*([+\d][\d\s\-\.()]{7,18})/i);
-            if (labeledPh && labeledPh[1].replace(/[^\d]/g, '').length >= 8) b.phone = labeledPh[1].trim();
+            if (labeledPh) {
+              const digits = labeledPh[1].replace(/\D/g, '');
+              if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(labeledPh[1])) b.phone = labeledPh[1].trim();
+            }
           }
         }
         // Also extract social media links from contact page
@@ -2657,7 +2774,11 @@ async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number
           // Extract phone
           if (!b.phone) {
             const m = desc.match(/\+?\d[\d\s\-\.\(\)]{7,18}/);
-            if (m && m[0].length >= 8) { b.phone = m[0].trim(); found++; }
+            // Digit-count + plausibility guard (reject "2026) -" style fragments)
+            if (m) {
+              const digits = m[0].replace(/\D/g, '');
+              if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(m[0])) { b.phone = m[0].trim(); found++; }
+            }
           }
           // Extract website from result URL
           if (!b.website && res.url && !res.url.includes('google.com') && !res.url.includes('facebook.com') && isLikelyBusinessWebsite(res.url, b.name, desc)) {
@@ -2721,7 +2842,9 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           const phoneMatch = html.match(/(?:\+?\d[\d\s\-\.\(\)]{7,15})/);
           if (phoneMatch) {
             const phone = phoneMatch[0].trim();
-            if (phone.length >= 8 && phone.length <= 20) {
+            const digits = phone.replace(/\D/g, '');
+            // Digit-count + plausibility guard (digits, not string length)
+            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(phone)) {
               b.phone = phone;
               found++;
             }
@@ -2820,6 +2943,8 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     engines: [
       { name: 'DuckDuckGo', icon: '🦆', status: 'idle', found: 0 },
       { name: 'Brave', icon: '🦁', status: 'idle', found: 0 },
+      { name: 'Mojeek', icon: '🔆', status: 'idle', found: 0 },
+      { name: 'Startpage', icon: '🌱', status: 'idle', found: 0 },
       ...(SERPER_API_KEY ? [{ name: 'Serper', icon: '⚡', status: 'idle' as const, found: 0 }] : []),
       ...(TAVILY_API_KEY ? [{ name: 'Tavily', icon: '🧭', status: 'idle' as const, found: 0 }] : []),
       { name: 'Bing', icon: '🔍', status: 'idle', found: 0 },
@@ -2967,73 +3092,128 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
 
         // ═══ PHASE 1: ALL search engines in PARALLEL (3-4s total, not 20s) ═══
         const q = buildSearchQuery(b);
+        // Helper: run one search-engine arm with health tracking + skip when
+        // the engine is cooling down / quota-dead (no wasted failing fetches).
+        const engineArm = async (id: string, label: string, fn: () => Promise<boolean>) => {
+          if (!engineAvailable(id)) return;
+          try {
+            const ok = await fn();
+            if (ok) engineNoteSuccess(id, label);
+          } catch (e: any) {
+            if (e?.message === 'Cancelled') return;
+            engineNoteFail(id, label, 'net', String(e?.message || '').slice(0, 80));
+          }
+        };
         await Promise.all([
-          // Brave API
-          (async () => {
-            try {
-              const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=5`, {
-                headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
-                signal: AbortSignal.timeout(3000),
-              });
-              if (r.ok) {
-                const data = await r.json();
-                let touched = false;
-                for (const res of (data.web?.results || [])) {
-                  if (extractFromText((res.description || '') + ' ' + (res.title || ''), b)) touched = true;
-                  if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('google.com/maps') && isLikelyBusinessWebsite(res.url, b.name, (res.description || '') + ' ' + (res.title || ''))) b.website = res.url;
-                }
-                if (!b.website && data.knowledge_graph?.url && !_EXCLUDE.test(data.knowledge_graph.url) && isLikelyBusinessWebsite(data.knowledge_graph.url, b.name)) b.website = data.knowledge_graph.url;
-                if (touched || b.website) markEngine(b, 'Brave');
-              }
-            } catch {}
-          })(),
-          // DuckDuckGo HTML
-          (async () => {
-            try {
-              const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
-                headers: { 'User-Agent': 'Mozilla/5.0' },
-                signal: AbortSignal.timeout(4000),
-              });
-              if (r.ok && extractFromHtml(await r.text(), b)) markEngine(b, 'DuckDuckGo');
-            } catch {}
-          })(),
+          // Brave API (free tier) → fallback: Mojeek HTML (keyless)
+          engineArm('brave', 'Brave', async () => {
+            const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=5`, {
+              headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
+              signal: AbortSignal.timeout(3000),
+            });
+            if (!r.ok) {
+              const kind = classifyEngineError(r.status, await r.text().catch(() => ''));
+              engineNoteFail('brave', 'Brave', kind, `HTTP ${r.status}`);
+              return false;
+            }
+            const data = await r.json();
+            let touched = false;
+            for (const res of (data.web?.results || [])) {
+              if (extractFromText((res.description || '') + ' ' + (res.title || ''), b)) touched = true;
+              if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('google.com/maps') && isLikelyBusinessWebsite(res.url, b.name, (res.description || '') + ' ' + (res.title || ''))) b.website = res.url;
+            }
+            if (!b.website && data.knowledge_graph?.url && !_EXCLUDE.test(data.knowledge_graph.url) && isLikelyBusinessWebsite(data.knowledge_graph.url, b.name)) b.website = data.knowledge_graph.url;
+            if (touched || b.website) markEngine(b, 'Brave');
+            return true;
+          }),
+          engineArm('mojeek', 'Mojeek', async () => {
+            if (engineAvailable('brave') && BRAVE_API_KEY) return false; // Brave is primary when healthy
+            const r = await corsFetch('https://www.mojeek.com/search?q=' + q, {
+              headers: { 'User-Agent': 'Mozilla/5.0' },
+              signal: AbortSignal.timeout(5000),
+            });
+            if (!r.ok) return false;
+            const html = await r.text();
+            if (!/<ul class="results"/i.test(html) && /captcha|challenge|verify/i.test(html)) {
+              engineNoteFail('mojeek', 'Mojeek', 'challenge', 'challenge page');
+              return false;
+            }
+            let touched = false;
+            const blocks = html.matchAll(/<a class="ob"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi);
+            for (const m of blocks) {
+              const url = m[1];
+              const title = m[2].replace(/<[^>]+>/g, '').trim();
+              if (extractFromText(title, b)) touched = true;
+              if (!b.website && url.startsWith('http') && !_EXCLUDE.test(url) && isLikelyBusinessWebsite(url, b.name, title)) { b.website = url; touched = true; }
+            }
+            if (touched || b.website) markEngine(b, 'Mojeek');
+            return true;
+          }),
+          // DuckDuckGo HTML (keyless) → fallback: Startpage HTML via proxy
+          engineArm('ddg', 'DuckDuckGo', async () => {
+            const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + q, {
+              headers: { 'User-Agent': 'Mozilla/5.0' },
+              signal: AbortSignal.timeout(4000),
+            });
+            if (!r.ok) {
+              engineNoteFail('ddg', 'DuckDuckGo', classifyEngineError(r.status), `HTTP ${r.status}`);
+              return false;
+            }
+            const html = await r.text();
+            if (extractFromHtml(html, b)) { markEngine(b, 'DuckDuckGo'); return true; }
+            // Challenge/anomaly page → cooldown so we stop hammering it
+            if (/anomaly|challenge|captcha|blocked/i.test(html)) {
+              engineNoteFail('ddg', 'DuckDuckGo', 'challenge', 'challenge page');
+              return false;
+            }
+            return true;
+          }),
+          engineArm('startpage', 'Startpage', async () => {
+            if (engineAvailable('ddg')) return false; // DDG primary when healthy
+            const r = await corsFetch('https://www.startpage.com/sp/search?query=' + q, {
+              headers: { 'User-Agent': 'Mozilla/5.0' },
+              signal: AbortSignal.timeout(5000),
+            });
+            if (!r.ok) return false;
+            return extractFromHtml(await r.text(), b);
+          }),
           // Bing
-          (async () => {
-            try {
-              const bingResults = await searchBing(q);
-              let touched = false;
-              for (const res of bingResults) {
-                if (extractFromText((res.snippet || '') + ' ' + (res.title || ''), b)) touched = true;
-                if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('bing.com') && isLikelyBusinessWebsite(res.url, b.name, (res.snippet || '') + ' ' + (res.title || ''))) b.website = res.url;
-              }
-              if (touched || b.website) markEngine(b, 'Bing');
-            } catch {}
-          })(),
+          engineArm('bing', 'Bing', async () => {
+            const bingResults = await searchBing(q);
+            let touched = false;
+            for (const res of bingResults) {
+              if (extractFromText((res.snippet || '') + ' ' + (res.title || ''), b)) touched = true;
+              if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('bing.com') && isLikelyBusinessWebsite(res.url, b.name, (res.snippet || '') + ' ' + (res.title || ''))) b.website = res.url;
+            }
+            if (touched || b.website) markEngine(b, 'Bing');
+            return true;
+          }),
           // DDG Lite
-          (async () => {
-            try {
-              const spResults = await searchDDGLite(decodeURIComponent(q));
-              let touched = false;
-              for (const res of spResults) {
-                if (extractFromText((res.snippet || '') + ' ' + (res.title || ''), b)) touched = true;
-                if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('duckduckgo.com/lite') && isLikelyBusinessWebsite(res.url, b.name, (res.snippet || '') + ' ' + (res.title || ''))) b.website = res.url;
-              }
-              if (touched || b.website) markEngine(b, 'DDG Lite');
-            } catch {}
-          })(),
+          engineArm('ddglite', 'DDG Lite', async () => {
+            const spResults = await searchDDGLite(decodeURIComponent(q));
+            let touched = false;
+            for (const res of spResults) {
+              if (extractFromText((res.snippet || '') + ' ' + (res.title || ''), b)) touched = true;
+              if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('duckduckgo.com/lite') && isLikelyBusinessWebsite(res.url, b.name, (res.snippet || '') + ' ' + (res.title || ''))) b.website = res.url;
+            }
+            if (touched || b.website) markEngine(b, 'DDG Lite');
+            return true;
+          }),
           // Serper (Google SERP API — free tier, optional key)
           ...(SERPER_API_KEY ? [(async () => {
+            if (!engineAvailable('serper')) return;
             const before = `${b.website||''}|${b.phone||''}|${b.email||''}`;
             await enrichFromSerper([b]);
             const after = `${b.website||''}|${b.phone||''}|${b.email||''}`;
-            if (before !== after) markEngine(b, 'Serper');
+            if (before !== after) { markEngine(b, 'Serper'); engineNoteSuccess('serper', 'Serper'); }
           })()] : []),
           // Tavily (AI search API — free tier, optional key)
           ...(TAVILY_API_KEY ? [(async () => {
+            if (!engineAvailable('tavily')) return;
             const before = `${b.website||''}|${b.phone||''}|${b.email||''}`;
             await enrichFromTavily([b]);
             const after = `${b.website||''}|${b.phone||''}|${b.email||''}`;
-            if (before !== after) markEngine(b, 'Tavily');
+            if (before !== after) { markEngine(b, 'Tavily'); engineNoteSuccess('tavily', 'Tavily'); }
           })()] : []),
         ]);
 
@@ -3169,8 +3349,9 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                 if (!b.phone && item.contact_groups) {
                   for (const grp of item.contact_groups) {
                     for (const contact of (grp.contacts || [])) {
-                      if (contact.type === 'phone' && contact.value && contact.value.replace(/\D/g, '').length >= 8) {
-                        b.phone = contact.value;
+                      if (contact.type === 'phone' && contact.value) {
+                        const digits = String(contact.value).replace(/\D/g, '');
+                        if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(String(contact.value))) b.phone = contact.value;
                       }
                     }
                   }
@@ -3392,7 +3573,7 @@ export async function runDiscoveryPhases(
     if (absurd.length > 0) {
       analysis.insights = [{
         title: `⚠ Data warning: ${absurd.length} category count${absurd.length > 1 ? 's' : ''} failed the plausibility check`,
-        detail: absurd.slice(0, 3).map(s => s.category).join(', ') + (absurd.length > 3 ? ` +${absurd.length - 3} more` : '') + ' — scan coverage looks incomplete there. See flagged rows in the table before acting on gap numbers.',
+        detail: absurd.slice(0, 3).map(s => getCategoryLabel(s.category)).join(', ') + (absurd.length > 3 ? ` +${absurd.length - 3} more` : '') + ' — treat these gap numbers as incomplete coverage, not a real market gap.',
         severity: 'medium',
         categories: absurd.slice(0, 4).map(s => s.category),
       }, ...analysis.insights];
@@ -3527,6 +3708,13 @@ const AI_MODEL_CHAIN: string[] = [
 // `validate` lets callers reject a successful-but-unusable reply (e.g. JSON
 // that didn't parse) so the chain moves on to the next model instead of
 // returning garbage.
+// Resolves to { text, model } so callers can show WHICH model produced the
+// insights; failures are reported to the engine-health registry (quota ->
+// sticky cooldown; net -> short cooldown) so the UI banner can tell the user
+// the AI provider status.
+let _lastLlmModel: string | null = null;
+export function getLastLlmModel(): string | null { return _lastLlmModel; }
+
 async function llmCall(
   systemPrompt: string,
   userPrompt: string,
@@ -3537,6 +3725,20 @@ async function llmCall(
     validate?: (text: string) => boolean;
   },
 ): Promise<string> {
+  const res = await llmCallModel(systemPrompt, userPrompt, opts);
+  return res.text;
+}
+
+async function llmCallModel(
+  systemPrompt: string,
+  userPrompt: string,
+  opts?: {
+    maxTokens?: number;
+    temperature?: number;
+    signal?: AbortSignal;
+    validate?: (text: string) => boolean;
+  },
+): Promise<{ text: string; model: string }> {
   if (!OPENROUTER_API_KEY) throw new Error('no-key');
   const maxTokens = opts?.maxTokens ?? 900;
   const temperature = opts?.temperature ?? 0.3;
@@ -3574,21 +3776,30 @@ async function llmCall(
             if (validate && !validate(text)) {
               break;
             }
-            return text;
+            engineNoteSuccess('openrouter', 'AI (OpenRouter)');
+            _lastLlmModel = model;
+            return { text, model };
           }
           // Empty reply — try next model
           break;
         }
 
-        // Rate-limited upstream — brief pause then retry same model
+        // Rate-limited / quota — brief pause then retry same model
         if (r.status === 429) {
+          const body = await r.text().catch(() => '');
+          engineNoteFail('openrouter', 'AI (OpenRouter)', 'quota', 'rate-limited (429)');
           await new Promise(res => setTimeout(res, 1500 * (attempt + 1)));
           continue;
         }
         // 4xx (except 429) or 5xx — try next model in chain
+        if (r.status >= 400) {
+          const body = await r.text().catch(() => '');
+          engineNoteFail('openrouter', 'AI (OpenRouter)', classifyEngineError(r.status, body), `HTTP ${r.status}`);
+        }
         break;
       } catch (e: any) {
         if (e?.name === 'AbortError' || e?.message === 'Cancelled') throw new Error('Cancelled');
+        engineNoteFail('openrouter', 'AI (OpenRouter)', 'net', String(e?.message || 'network error').slice(0, 80));
         // network error — try next model
         break;
       }
@@ -3878,7 +4089,7 @@ Generate 3-5 insights, 2-4 patterns, 2-3 risks, 2-4 actions. Every claim must tr
     // Walk the model chain; a reply only counts when its JSON parses AND
     // contains at least one usable insight/pattern — otherwise the chain
     // moves to the next model instead of feeding garbage downstream.
-    const raw = await llmCall(AI_SYSTEM_PROMPT, userPrompt, {
+    const { text: raw, model: usedModel } = await llmCallModel(AI_SYSTEM_PROMPT, userPrompt, {
       maxTokens: 3000,
       temperature: 0.4,
       signal: opts?.signal,
@@ -3932,7 +4143,7 @@ Generate 3-5 insights, 2-4 patterns, 2-3 risks, 2-4 actions. Every claim must tr
 
     if (insights.length === 0 && patterns.length === 0) throw new Error('empty-analysis');
 
-    const result: AIAnalysis = { model: 'openrouter', insights, patterns, risks, actions, isAI: true };
+    const result: AIAnalysis = { model: usedModel, insights, patterns, risks, actions, isAI: true };
     cacheSet(aiCk, result);
     return result;
   } catch {
@@ -4221,7 +4432,7 @@ Generate 3-5 insights, 2-3 patterns, 1-3 risks, 2-4 actions. Every claim must tr
   if (cached) return cached;
 
   try {
-    const raw = await llmCall(sys, user, {
+    const { text: raw, model: usedModel } = await llmCallModel(sys, user, {
       maxTokens: 2500,
       temperature: 0.4,
       validate: (text) => {
@@ -4256,7 +4467,7 @@ Generate 3-5 insights, 2-3 patterns, 1-3 risks, 2-4 actions. Every claim must tr
         timeframe: (['immediate', '1-3 months', '6-12 months'] as const).includes(x.timeframe) ? x.timeframe : undefined,
       }));
     if (insights.length === 0 && patterns.length === 0) throw new Error('empty-analysis');
-    const result: AIAnalysis = { model: 'openrouter', insights, patterns, risks, actions, isAI: true };
+    const result: AIAnalysis = { model: usedModel, insights, patterns, risks, actions, isAI: true };
     cacheSet(ck, result);
     return result;
   } catch {
@@ -4297,6 +4508,172 @@ Generate 3-5 insights, 2-3 patterns, 1-3 risks, 2-4 actions. Every claim must tr
   }
 }
 
+// ─── AI result verification (v6.9.2) ───────────────────────────────────────
+// Before results are shown, an LLM cross-checks the deterministic per-capita
+// verdicts. The model sees exact per-category numbers (existing, per-10k,
+// expected, gap) for the categories the bands flagged as suspicious and
+// returns corrected verdicts + reasons in its own words. Deterministic flags
+// always stand — the LLM can only upgrade absurd→uncertain with a better
+// explanation, never downgrade a mismatch the bands caught silently.
+export interface VerificationResult {
+  checked: number;
+  aiVerified: boolean;      // true when an LLM reviewed the data
+  notes: string[];          // per-category AI commentary (category → note)
+}
+
+export async function aiVerifyOpportunities(
+  opportunities: OpportunityResult[],
+  population: number,
+  cityName: string,
+  countryName: string,
+  opts?: { signal?: AbortSignal },
+): Promise<VerificationResult> {
+  const out: VerificationResult = { checked: 0, aiVerified: false, notes: [] };
+  const sanity = sanityCheckOpportunities(opportunities, population);
+  const flagged = sanity.filter(s => s.verdict !== 'plausible');
+  if (flagged.length === 0) return out;
+  out.checked = flagged.length;
+
+  const lines = flagged.slice(0, 12).map(s => {
+    const o = opportunities.find(x => x.category === s.category);
+    if (!o) return `- ${s.category}: existing=${s.verdict}`;
+    return `- ${o.categoryLabel} (id=${s.category}): found=${o.existing}, per10k=${o.per10k.toFixed(2)}, expected=${o.expected ?? 'n/a'}, population=${population.toLocaleString()} — band verdict: ${s.verdict}`;
+  }).join('\n');
+
+  const sys = `You are a data-quality auditor for a business-density scanner built on OpenStreetMap.
+You receive per-category business counts for one city and per-capita plausibility flags.
+For each flagged category decide if the count is truly implausible or actually reasonable
+(some categories are genuinely rare; OSM tags are sometimes sparse in some countries).
+Reply ONLY with JSON: {"verdicts": [{"id": "category_id", "verdict": "plausible"|"absurd"|"uncertain", "note": "one-sentence reason in plain English"}]}`;
+  const user = `CITY: ${cityName}, ${countryName}\nPOPULATION: ${population.toLocaleString()}\nFLAGGED CATEGORIES:\n${lines}\n\nReturn one verdict object per input line.`;
+
+  try {
+    const { text } = await llmCallModel(sys, user, {
+      maxTokens: 1200,
+      temperature: 0.2,
+      signal: opts?.signal,
+      validate: (t) => {
+        const p = extractJson(t);
+        return !!p && Array.isArray(p.verdicts) && p.verdicts.length > 0;
+      },
+    });
+    const parsed = extractJson(text);
+    if (!parsed?.verdicts) return out;
+    out.aiVerified = true;
+    for (const v of parsed.verdicts) {
+      if (v && typeof v.id === 'string' && typeof v.note === 'string') {
+        out.notes.push(`${getCategoryLabel(v.id)}: ${String(v.note).slice(0, 220)}`);
+      }
+    }
+  } catch {
+    // AI unavailable — deterministic verdicts already cover it.
+  }
+  return out;
+}
+
+// ─── Second-chance rescan for absurd-low categories (v6.9.2) ───────────────
+// When the sanity bands flag a category as absurdly LOW (likely a tag gap —
+// e.g. the focused query missed local tag variants), re-query OpenStreetMap
+// once with the WIDE-Net filter (name-based) and merge any NEW businesses
+// into the results. Returns the number of newly found businesses per category.
+export async function rescanWideNet(
+  businesses: Map<string, Business[]>,
+  absurdCategories: string[],
+  lat: number,
+  lon: number,
+  radiusMeters: number,
+  opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void },
+): Promise<Map<string, Business[]>> {
+  if (absurdCategories.length === 0) return businesses;
+  const south = lat - radiusMeters / 111000;
+  const north = lat + radiusMeters / 111000;
+  const cosLat = Math.cos((lat * Math.PI) / 180);
+  const west = lon - radiusMeters / (111000 * cosLat);
+  const east = lon + radiusMeters / (111000 * cosLat);
+  const bbox = `${south},${west},${north},${east}`;
+  const merged = new Map(businesses);
+
+  for (const cat of absurdCategories.slice(0, 6)) {
+    if (opts?.signal?.aborted) break;
+    const kw = WIDE_NET_KEYWORDS[cat];
+    if (!kw) continue;
+    const q = `[out:json][timeout:60];(
+  node(${bbox})${kw};
+  way(${bbox})${kw};
+);out center body;`;
+    try {
+      opts?.onProgress?.(`Re-checking ${getCategoryLabel(cat)} with a wider search…`);
+      const d = await fetchOverpass(q, 60);
+      if (!d?.elements) continue;
+      const existing = merged.get(cat) || [];
+      const seenIds = new Set(existing.map(b => b.id));
+      const seenLocs = new Set(existing.map(b => `${Math.round(b.lat * 1000)},${Math.round(b.lon * 1000)}`));
+      let added = 0;
+      for (const el of d.elements) {
+        const elLat = el.lat || el.center?.lat;
+        const elLon = el.lon || el.center?.lon;
+        if (!elLat || !elLon) continue;
+        const tags = el.tags || {};
+        if (categorizeBusiness(tags) !== cat) continue; // must categorize into this bucket
+        const name = tags.name || tags['name:en'] || tags['name:int'] || tags.brand || tags.operator || '';
+        if (!name.trim()) continue;
+        const locKey = `${Math.round(elLat * 1000)},${Math.round(elLon * 1000)}`;
+        if (seenIds.has(`${el.type}/${el.id}`) || seenLocs.has(locKey)) continue;
+        seenIds.add(`${el.type}/${el.id}`);
+        seenLocs.add(locKey);
+        const ctx = getScanContext();
+        existing.push({
+          id: `${el.type}/${el.id}`,
+          name: name.trim(),
+          lat: elLat,
+          lon: elLon,
+          category: cat,
+          categoryLabel: getCategoryLabel(cat),
+          address: formatAddress(tags),
+          phone: extractPhone(tags, ctx?.countryCode),
+          website: extractWebsite(tags),
+          email: extractEmail(tags),
+          brand: tags.brand || '',
+          cuisine: tags.cuisine || '',
+          facebook: extractFacebook(tags),
+          instagram: extractInstagram(tags),
+          linkedin: extractLinkedIn(tags),
+          youtube: extractYouTube(tags),
+          tiktok: extractTikTok(tags),
+          rating: 0,
+          reviewCount: 0,
+          hours: tags.opening_hours || '',
+          twitter: extractTwitter(tags),
+          pinterest: '',
+        });
+        added++;
+      }
+      if (added > 0) {
+        merged.set(cat, existing);
+        opts?.onProgress?.(`Found ${added} more ${getCategoryLabel(cat)} businesses in the re-check`);
+      }
+    } catch { /* mirror busy — keep original count */ }
+  }
+  return merged;
+}
+
+// Name-keyword filters for the second-chance rescan (name-based so local tag
+// variants that the focused query missed still surface). English keywords
+// catch international chains; the app's query engine handles i18n via tags.
+const WIDE_NET_KEYWORDS: Record<string, string> = {
+  printing: '["name"~"print|druck|typograf",i]',
+  cleaning: '["name"~"clean|cleaning|hygiene service",i]',
+  yoga: '["name"~"yoga",i]',
+  books: '["name"~"book|bücher",i]',
+  bookstore: '["name"~"book|bibli",i]',
+  coworking: '["name"~"cowork|work Lab|hub",i]',
+  tattoo: '["name"~"tattoo",i]',
+  music_school: '["name"~"music school|musik|piano|guitar",i]',
+  art: '["name"~"art|gallery|atelier",i]',
+  wedding: '["name"~"wedding|bridal|braut",i]',
+  courier: '["name"~"courier|delivery|express",i]',
+  dance: '["name"~"dance|danz|ballet",i]',
+};
 
 export function getGoogleMapsUrl(b: Business): string {
   if (b.name) {
@@ -4592,7 +4969,10 @@ function extractFromHtmlModule(html: string, b: Business): void {
     // 3. Labeled phone patterns (Phone: +xxx, Tel: xxx, etc.)
     if (!b.phone) {
       const labeledPh = html.match(/(?:phone|tel|telephone|mobile|cell|fax|calls?|whatsapp|viber|contact)\s*[:;=\s"'>]*([+\d][\d\s\-\.()]{7,18})/i);
-      if (labeledPh && labeledPh[1].replace(/[^\d]/g, '').length >= 8 && plausiblePhone(labeledPh[1])) b.phone = labeledPh[1].trim();
+      if (labeledPh) {
+        const digits = labeledPh[1].replace(/\D/g, '');
+        if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(labeledPh[1])) b.phone = labeledPh[1].trim();
+      }
     }
     // 4. General phone regex (fallback). Unlabeled text is noisy: require a
     // leading '+' so floats/coordinates (2.3333…), IDs and fragments don't
