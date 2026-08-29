@@ -121,7 +121,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '6.9.2';
+const APP_VERSION = '6.9.3';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -591,7 +591,7 @@ export default function App() {
             title: `⚠ Data warning: ${absurd.length > 1 ? `${absurd.length} categories` : 'this category'} failed the plausibility check`,
             detail: absurd[0].reason,
             severity: 'medium',
-            categories: absurd.slice(0, 4).map(s => s.category),
+            categories: absurd.slice(0, 4).map(s => s.category).filter(c => c !== selectedCategory),
           }, ...analysis.insights];
         }
         setAiAnalysis(analysis);

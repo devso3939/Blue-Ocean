@@ -976,6 +976,21 @@ function hostRecordSuccess(u: string): void {
   _hostFails.delete(hostKey(u));
 }
 
+// ─── Direct-fetch dead-host memory (console noise reduction, v6.9.3) ───
+// A DIRECT (no-proxy) fetch to a host fails DETERMINISTICALLY when the
+// origin doesn't send CORS headers or the host is unreachable — retrying
+// direct later can never succeed, and every attempt prints a browser
+// console error (net::ERR_FAILED / ERR_ABORTED). Remember the failure and
+// go straight to the proxy chain for that host for the rest of the session.
+const _directDead = new Map<string, number>();
+const DIRECT_DEAD_TTL = 10 * 60_000;
+function directIsDead(u: string): boolean {
+  const t = _directDead.get(hostKey(u));
+  return !!t && Date.now() - t < DIRECT_DEAD_TTL;
+}
+function markDirectDead(u: string): void { _directDead.set(hostKey(u), Date.now()); }
+function markDirectAlive(u: string): void { _directDead.delete(hostKey(u)); }
+
 // ─── Engine health + fallback registry (v6.9.2) ────────────────────────
 // Every outbound dependency (search engines, AI provider, proxies) gets a
 // health record: consecutive failures → short cooldown; explicit quota /
@@ -1657,16 +1672,27 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
   if (!b.website) return;
   const EXCLUDE = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com/i;
 
-  async function deepScrape(url: string): Promise<void> {
+  async function deepScrape(url: string): Promise<boolean> {
+    // Contact-fill snapshot: did this fetch change any field?
+    const snapDS = () => [b.email, b.phone, b.facebook, b.instagram, b.website].join('|');
+    const beforeDS = snapDS();
     try {
-      // Try direct fetch first (most websites work from browser)
+      // Try direct fetch first (most websites work from browser) — but only
+      // if this host hasn't already proven direct-dead (CORS-refusing or
+      // unreachable). Every rejected direct attempt prints a console error,
+      // so we never repeat a known-hopeless direct try.
       let r: Response;
-      try {
-        r = await fetch(url, { signal: AbortSignal.timeout(5000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
-      } catch {
+      if (!directIsDead(url)) {
+        try {
+          r = await fetch(url, { signal: AbortSignal.timeout(5000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
+        } catch {
+          markDirectDead(url); // CORS-rejected / network-dead for this host
+          r = await corsFetch(url, { signal: AbortSignal.timeout(5000) });
+        }
+      } else {
         r = await corsFetch(url, { signal: AbortSignal.timeout(5000) });
       }
-      if (!r.ok) return;
+      if (!r.ok) return false;
       const html = await r.text();
       const full = html.substring(0, 80000);
 
@@ -1829,6 +1855,7 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
         }
       }
     } catch {}
+    return snapDS() !== beforeDS;
   }
 
   // Scrape main page
@@ -1842,11 +1869,16 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
                    '/where-to-find-us', '/reach-us', '/get-in-touch',
                    '/kontaktay', '/kavshiri', '/momkhmarebeli', '/tsmrunebi',
                    '/contactos', '/contato', '/联系我们', '/お問い合わせ', '/اتصل بنا', '/написать-нам'];
+    let deadPaths = 0; // consecutive probes that yielded nothing
     for (const path of paths) {
       if (b.email && b.phone && b.facebook) break;
       // Host went network-dead mid-loop: bail out (circuit breaker)
       if (hostIsOpen(base)) break;
-      await deepScrape(base + path);
+      const touched = await deepScrape(base + path);
+      // A site that answers 6 straight probes with nothing (dead host,
+      // 404 SPA fallback, or hard-CORS) won't answer the remaining 18
+      // either — stop instead of spraying 18 more failing requests.
+      if (!touched) { deadPaths++; if (deadPaths >= 6) break; } else { deadPaths = 0; }
     }
   }
 }
@@ -2066,13 +2098,16 @@ async function tryCommonEmailPatterns(b: Business): Promise<void> {
     // We verify by checking if the contact page exists
     const base = b.website.replace(/\/$/, '');
     const contactPaths = ['/contact', '/contact-us', '/about', '/about-us'];
+    let deadEmailPaths = 0;
     for (const path of contactPaths) {
       if (b.email) break;
       // Host went network-dead mid-loop: bail out (circuit breaker)
       if (hostIsOpen(base)) break;
+      if (deadEmailPaths >= 3) break; // repeated dead probes — stop early
       try {
         const r = await corsFetch(base + path, { signal: AbortSignal.timeout(3000) });
-        if (!r.ok) continue;
+        if (!r.ok) { deadEmailPaths++; continue; }
+        deadEmailPaths = 0;
         const html = await r.text();
         // Look for any email on the contact page
         const emails = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
@@ -2260,11 +2295,19 @@ async function wikidataContacts(b: Business): Promise<void> {
     'OPTIONAL { ?item wdt:P968 ?email } OPTIONAL { ?item wdt:P1329 ?phone } } LIMIT 1';
   const run = async () => {
     try {
+      // Engine health: after repeated failures (rate-limit / network), stop
+      // hammering Wikidata for the rest of the scan — deterministic retries
+      // just print more console errors and add latency.
+      if (!engineAvailable('wikidata')) return;
       const r = await fetch('https://query.wikidata.org/sparql?query=' + encodeURIComponent(sparql), {
         headers: { Accept: 'application/sparql-results+json', 'User-Agent': 'BlueOcean/6.2 (market-gap research demo; contact@blueocean.app)' },
         signal: AbortSignal.timeout(30000),
       });
-      if (!r.ok) return;
+      if (!r.ok) {
+        engineNoteFail('wikidata', 'Wikidata', classifyEngineError(r.status), 'HTTP ' + r.status);
+        return;
+      }
+      engineNoteSuccess('wikidata', 'Wikidata');
       const data = await r.json();
       const row = data?.results?.bindings?.[0];
       if (!row) return;
@@ -2284,13 +2327,19 @@ async function wikidataContacts(b: Business): Promise<void> {
 
 // Wayback Machine: recover contact data for DEAD websites. CORS-native
 // availability API, snapshot fetch routed through corsFetch.
+let _waybackFails = 0;
 async function waybackContacts(b: Business): Promise<void> {
   if (!b.website || (b.email && b.phone)) return;
+  // Engine health: archive.org rate-limits aggressively; after 3 straight
+  // failures stop calling it for the rest of the scan (avoids the abort
+  // storm in Pass 4 and the wasted seconds per business).
+  if (_waybackFails >= 3) return;
   try {
     const av = await fetch('https://archive.org/wayback/available?url=' + encodeURIComponent(b.website), {
       signal: AbortSignal.timeout(10000),
     });
-    if (!av.ok) return;
+    if (!av.ok) { _waybackFails++; return; }
+    engineNoteSuccess('wayback', 'Wayback');
     const j = await av.json();
     const snap = j?.archived_snapshots?.closest?.url;
     if (!snap || !j.archived_snapshots.closest.available) return;
@@ -2298,7 +2347,11 @@ async function waybackContacts(b: Business): Promise<void> {
     if (!r.ok) return;
     const html = await r.text();
     if (html && html.length > 200) extractFromHtmlModule(html, b);
-  } catch { /* best effort */ }
+  } catch {
+    _waybackFails++;
+    engineNoteFail('wayback', 'Wayback', 'net', 'archive.org unreachable');
+    /* best effort */
+  }
 }
 
 // Domain probing - check if common domain patterns exist for a business.
@@ -2662,19 +2715,28 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
       '/kontaktay', '/momkhmarebeli', '/联系方式', '/お問い合わせ',
       '/اتصل-بنا', '/написать-нам', '/联系我们',
     ];
+    let deadContactPaths = 0;
     for (const path of paths) {
       if (b.email) break;
       // Host went network-dead mid-loop: bail out (circuit breaker)
       if (hostIsOpen(base)) break;
+      if (deadContactPaths >= 4) break; // repeated dead probes — stop early
       try {
-        // Try direct fetch first (most websites support CORS)
+        // Try direct fetch first (most websites support CORS) — skip the
+        // direct attempt when this host already proved direct-dead.
         let r: Response;
-        try {
-          r = await fetch(base + path, { signal: AbortSignal.timeout(2500), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
-        } catch {
+        if (!directIsDead(base + path)) {
+          try {
+            r = await fetch(base + path, { signal: AbortSignal.timeout(2500), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
+          } catch {
+            markDirectDead(base + path);
+            r = await corsFetch(base + path, { signal: AbortSignal.timeout(2500) });
+          }
+        } else {
           r = await corsFetch(base + path, { signal: AbortSignal.timeout(2500) });
         }
-        if (!r.ok) continue;
+        if (!r.ok) { deadContactPaths++; continue; }
+        deadContactPaths = 0;
         const html = await r.text();
         const junk = /example\.com|wixpress|sentry|googleapis|google\.com|cloudflare|schema\.org|duckduckgo/i;
         // Look for email patterns
