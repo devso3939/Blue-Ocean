@@ -1018,6 +1018,16 @@ function markDirectAlive(u: string): void { _directDead.delete(hostKey(u)); }
 // gates between phases — this sticky counter doesn't reset mid-scan.
 let _braveFails = 0;
 
+// v6.9.8: hard budget on doomed outbound requests. Every proxied request
+// that ends in a network-level failure (CORS-refused host, dead proxy,
+// rate-limited engine) increments this. Past the budget, corsFetch
+// short-circuits for any host that is not a known CORS-open API — the
+// scan keeps running on already-fetched data and the engines that ARE
+// healthy, instead of spraying hundreds of futile requests (which each
+// print an uncatchable browser console error).
+const MAX_NET_FAILS = 120;
+let _netFails = 0;
+
 // ─── Engine health + fallback registry (v6.9.2) ────────────────────────
 // Every outbound dependency (search engines, AI provider, proxies) gets a
 // health record: consecutive failures → short cooldown; explicit quota /
@@ -1115,6 +1125,14 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   //    level — fail instantly instead of burning 5-30s on every request.
   if (hostIsOpen(url)) return new Response('', { status: 0, statusText: 'Host unreachable (circuit open)' });
 
+  // 0b) v6.9.8 scan-wide failure budget: once enough proxied requests have
+  //     failed, stop spending new ones on non-allowlist hosts (they are the
+  //     source of the uncatchable console errors). CORS-open APIs stay
+  //     available so core data (OSM, AI, Wikidata) keeps flowing.
+  if (_netFails >= MAX_NET_FAILS && !hostAllowsDirect(url)) {
+    return new Response('', { status: 0, statusText: 'Network budget exhausted' });
+  }
+
   // 1) Try direct fetch — instant for CORS-enabled, instant error for others.
   //    Only for known CORS-open API hosts. For every other host, the first
   //    proxy-chain failure marks it direct-dead, so later requests to the
@@ -1178,6 +1196,7 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   // to it go straight to the proxies with zero new console noise. (A short
   // circuit-breaker cooldown still applies to the proxy chain itself.)
   if (firstTouch) markDirectDead(url);
+  _netFails++;
   hostRecordFail(url);
   _lastProxyFail = Date.now();
   return new Response('', { status: 0, statusText: 'CORS unavailable' });
@@ -2939,7 +2958,7 @@ async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number
       } catch (e: any) {
         // v6.9.6: count thrown errors (429 CORS-less / timeout) so the gate
         // trips quickly instead of re-firing per business.
-        if (e?.message !== 'Cancelled') { _braveFails++; engineNoteFail('brave', 'Brave', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : e?.message || 'network error').slice(0, 60)); }
+        if (e?.message !== 'Cancelled') { _braveFails++; _netFails++; engineNoteFail('brave', 'Brave', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : e?.message || 'network error').slice(0, 60)); }
       }
     }));
     if (i + BATCH < max) await wait(1500);
@@ -3247,11 +3266,11 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               signal: AbortSignal.timeout(3000),
             });
             if (!r.ok) {
-              const kind = classifyEngineError(r.status, await r.text().catch(() => ''));
-              _braveFails++;
-              engineNoteFail('brave', 'Brave', kind, `HTTP ${r.status}`);
-              return false;
-            }
+                const kind = classifyEngineError(r.status, await r.text().catch(() => ''));
+                _braveFails++; _netFails++;
+                engineNoteFail('brave', 'Brave', kind, `HTTP ${r.status}`);
+                return false;
+              }
             const data = await r.json();
             let touched = false;
             for (const res of (data.web?.results || [])) {
@@ -3391,10 +3410,14 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                   engineNoteFail('brave', 'Brave', classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
                 }
               } catch (e: any) {
-                if (e?.message !== 'Cancelled') { _braveFails++; engineNoteFail('brave', 'Brave', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : 'network error').slice(0, 60)); }
-              }
+                  if (e?.message !== 'Cancelled') { _braveFails++; _netFails++; engineNoteFail('brave', 'Brave', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : 'network error').slice(0, 60)); }
+                }
             })(),
             (async () => {
+              // v6.9.8: gate — when the shared DDG engine is cooling down,
+              // this per-business email query would just print another
+              // allorigins abort error for zero data.
+              if (!engineAvailable('ddg')) return;
               try {
                 const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + emailQ, {
                   headers: { 'User-Agent': 'Mozilla/5.0' },
