@@ -1013,6 +1013,11 @@ function directIsDead(u: string): boolean {
 function markDirectDead(u: string): void { _directDead.set(hostKey(u), Date.now()); }
 function markDirectAlive(u: string): void { _directDead.delete(hostKey(u)); }
 
+// v6.9.6: dedicated Brave failure counter. engineNoteFail resets on any
+// later version-bump success, which let a dead Brave slip through the
+// gates between phases — this sticky counter doesn't reset mid-scan.
+let _braveFails = 0;
+
 // ─── Engine health + fallback registry (v6.9.2) ────────────────────────
 // Every outbound dependency (search engines, AI provider, proxies) gets a
 // health record: consecutive failures → short cooldown; explicit quota /
@@ -2876,7 +2881,7 @@ async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number
   // v6.9.6: engine-health gate — a rate-limited Brave returns 429 WITHOUT
   // CORS headers, so the fetch throws and prints a console error. After
   // 3 failures stop calling it entirely (Mojeek/DDG take over).
-  if (!engineAvailable('brave')) return;
+  if (!engineAvailable('brave') || _braveFails >= 3) return;
   const BATCH = 3;
   const max = Math.min(NEEDS.length, 50); // Brave free tier: 2000 req/mo
   let found = 0;
@@ -2934,7 +2939,7 @@ async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number
       } catch (e: any) {
         // v6.9.6: count thrown errors (429 CORS-less / timeout) so the gate
         // trips quickly instead of re-firing per business.
-        if (e?.message !== 'Cancelled') engineNoteFail('brave', 'Brave', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : e?.message || 'network error').slice(0, 60));
+        if (e?.message !== 'Cancelled') { _braveFails++; engineNoteFail('brave', 'Brave', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : e?.message || 'network error').slice(0, 60)); }
       }
     }));
     if (i + BATCH < max) await wait(1500);
@@ -3236,12 +3241,14 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         await Promise.all([
           // Brave API (free tier) → fallback: Mojeek HTML (keyless)
           engineArm('brave', 'Brave', async () => {
+            if (_braveFails >= 3) return false; // v6.9.6: sticky scan-wide gate
             const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=5`, {
               headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
               signal: AbortSignal.timeout(3000),
             });
             if (!r.ok) {
               const kind = classifyEngineError(r.status, await r.text().catch(() => ''));
+              _braveFails++;
               engineNoteFail('brave', 'Brave', kind, `HTTP ${r.status}`);
               return false;
             }
@@ -3361,7 +3368,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             (async () => {
               // v6.9.6: gate on engine health — a cooled-down / dead Brave
               // must not re-fire here for every business.
-              if (!engineAvailable('brave')) return;
+              if (!engineAvailable('brave') || _braveFails >= 3) return;
               try {
                 const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${emailQ}&count=5`, {
                   headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
@@ -3380,10 +3387,11 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                     }
                   }
                 } else {
+                  _braveFails++;
                   engineNoteFail('brave', 'Brave', classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
                 }
               } catch (e: any) {
-                if (e?.message !== 'Cancelled') engineNoteFail('brave', 'Brave', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : 'network error').slice(0, 60));
+                if (e?.message !== 'Cancelled') { _braveFails++; engineNoteFail('brave', 'Brave', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : 'network error').slice(0, 60)); }
               }
             })(),
             (async () => {
