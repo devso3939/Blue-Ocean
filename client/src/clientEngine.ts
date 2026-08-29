@@ -947,16 +947,20 @@ function isCancelled(): boolean { return _cancelSignal?.aborted ?? false; }
 // Multi-proxy strategy: try 3 different CORS proxies in parallel
 let _lastProxyFail = 0; // 30s cooldown instead of permanent block
 
-// v6.9.4: hosts that NEVER serve CORS to browsers (search engines). Every
-// direct fetch() attempt to these prints an uncatchable console error and
-// always fails, so we skip the direct arm and go straight through proxies.
-const _NO_DIRECT_HOSTS = new Set([
-  'lite.duckduckgo.com', 'html.duckduckgo.com', 'duckduckgo.com',
-  'www.startpage.com', 'startpage.com', 'www.mojeek.com', 'www.bing.com',
-  'www.google.com', 'yandex.com', 'yandex.ru', 'web.archive.org',
+// v6.9.5: hosts known to SERVE CORS headers to browsers (public APIs).
+// These get the instant direct fetch; every other host goes through the
+// proxy chain first — a direct attempt at an unknown host is usually a
+// CORS rejection, which the browser prints as an uncatchable console
+// error even when caught in JS.
+const _CORS_OPEN_HOSTS = new Set([
+  'api.search.brave.com', 'google.serper.dev', 'api.tavily.com',
+  'openrouter.ai', 'text.pollinations.ai', 'query.wikidata.org',
+  'archive.org', 'nominatim.openstreetmap.org', 'photon.komoot.io',
+  'api.allorigins.win', 'r.jina.ai', 'cors.sh', 'api.open-meteo.com',
+  'en.wikipedia.org', 'ru.wikipedia.org', 'ka.wikipedia.org',
 ]);
 function hostAllowsDirect(u: string): boolean {
-  try { return !_NO_DIRECT_HOSTS.has(new URL(u).host); } catch { return true; }
+  try { return _CORS_OPEN_HOSTS.has(new URL(u).host); } catch { return false; }
 }
 
 // ─── Per-host circuit breaker (quality-neutral) ───────────────────
@@ -994,11 +998,14 @@ function hostRecordSuccess(u: string): void {
 // direct later can never succeed, and every attempt prints a browser
 // console error (net::ERR_FAILED / ERR_ABORTED). Remember the failure and
 // go straight to the proxy chain for that host for the rest of the session.
+//
+// v6.9.5: keyed by HOST (not full URL) and STICKY for the session. CORS
+// refusal is a whole-origin property — a host that rejected /contact will
+// reject /about too, so the first failed path must silence every later
+// direct attempt on that host, not just its own path.
 const _directDead = new Map<string, number>();
-const DIRECT_DEAD_TTL = 10 * 60_000;
 function directIsDead(u: string): boolean {
-  const t = _directDead.get(hostKey(u));
-  return !!t && Date.now() - t < DIRECT_DEAD_TTL;
+  return _directDead.has(hostKey(u));
 }
 function markDirectDead(u: string): void { _directDead.set(hostKey(u), Date.now()); }
 function markDirectAlive(u: string): void { _directDead.delete(hostKey(u)); }
@@ -1101,13 +1108,18 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   if (hostIsOpen(url)) return new Response('', { status: 0, statusText: 'Host unreachable (circuit open)' });
 
   // 1) Try direct fetch — instant for CORS-enabled, instant error for others.
-  //    Skipped entirely for known CORS-blocked search hosts (never succeeds,
-  //    and each attempt logs an uncatchable browser console error).
-  if (hostAllowsDirect(url)) {
-    try {
-      const r = await fetch(url, { ...init, headers });
-      if (r.ok) { hostRecordSuccess(url); return r; }
-    } catch { /* CORS error */ }
+  //    Only for known CORS-open API hosts. For every other host, the first
+  //    proxy-chain failure marks it direct-dead, so later requests to the
+  //    same host skip this arm without printing a new browser console error.
+  const firstTouch = !directIsDead(url);
+  if (firstTouch) {
+    if (hostAllowsDirect(url)) {
+      try {
+        const r = await fetch(url, { ...init, headers });
+        if (r.ok) { hostRecordSuccess(url); return r; }
+      } catch { /* CORS error */ }
+    }
+    markDirectDead(url);
   }
   if (callerSignal?.aborted) throw new Error('Cancelled');
 
@@ -1145,6 +1157,11 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
     }
   } catch {}
 
+  // v6.9.5: whole chain failed. CORS refusal is host-wide and sticky, so
+  // lock the direct arm off for this host for the session — later requests
+  // to it go straight to the proxies with zero new console noise. (A short
+  // circuit-breaker cooldown still applies to the proxy chain itself.)
+  if (firstTouch) markDirectDead(url);
   hostRecordFail(url);
   _lastProxyFail = Date.now();
   return new Response('', { status: 0, statusText: 'CORS unavailable' });
@@ -1693,21 +1710,11 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
     const snapDS = () => [b.email, b.phone, b.facebook, b.instagram, b.website].join('|');
     const beforeDS = snapDS();
     try {
-      // Try direct fetch first (most websites work from browser) — but only
-      // if this host hasn't already proven direct-dead (CORS-refusing or
-      // unreachable). Every rejected direct attempt prints a console error,
-      // so we never repeat a known-hopeless direct try.
-      let r: Response;
-      if (!directIsDead(url)) {
-        try {
-          r = await fetch(url, { signal: AbortSignal.timeout(5000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
-        } catch {
-          markDirectDead(url); // CORS-rejected / network-dead for this host
-          r = await corsFetch(url, { signal: AbortSignal.timeout(5000) });
-        }
-      } else {
-        r = await corsFetch(url, { signal: AbortSignal.timeout(5000) });
-      }
+      // v6.9.5: route through corsFetch directly — its host-keyed direct
+      // fetch already covers CORS-open hosts, and business websites reject
+      // CORS far more often than they allow it, so direct-first just paid
+      // one unavoidable console error per host-path for no gain.
+      const r = await corsFetch(url, { signal: AbortSignal.timeout(5000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
       if (!r.ok) return false;
       const html = await r.text();
       const full = html.substring(0, 80000);
@@ -2330,9 +2337,13 @@ async function wikidataContacts(b: Business): Promise<void> {
       // hammering Wikidata for the rest of the scan — deterministic retries
       // just print more console errors and add latency.
       if (!engineAvailable('wikidata')) return;
+      // v6.9.5: re-check the gate when the queued call actually RUNS — the
+      // 30s serialization can hold a call for minutes, and a cooldown that
+      // trips while it waits used to admit exactly one doomed request.
+      if (!engineAvailable('wikidata')) return;
       const r = await fetch('https://query.wikidata.org/sparql?query=' + encodeURIComponent(sparql), {
         headers: { Accept: 'application/sparql-results+json', 'User-Agent': 'BlueOcean/6.2 (market-gap research demo; contact@blueocean.app)' },
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(12000),
       });
       if (!r.ok) {
         engineNoteFail('wikidata', 'Wikidata', classifyEngineError(r.status), 'HTTP ' + r.status);
@@ -2766,19 +2777,10 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
       if (hostIsOpen(base)) break;
       if (deadContactPaths >= 4) break; // repeated dead probes — stop early
       try {
-        // Try direct fetch first (most websites support CORS) — skip the
-        // direct attempt when this host already proved direct-dead.
-        let r: Response;
-        if (!directIsDead(base + path)) {
-          try {
-            r = await fetch(base + path, { signal: AbortSignal.timeout(2500), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
-          } catch {
-            markDirectDead(base + path);
-            r = await corsFetch(base + path, { signal: AbortSignal.timeout(2500) });
-          }
-        } else {
-          r = await corsFetch(base + path, { signal: AbortSignal.timeout(2500) });
-        }
+        // v6.9.5: corsFetch only — same rationale as deepScrape (direct
+        // fetches to random business hosts print console errors when
+        // CORS-refused; corsFetch's allowlist already covers CORS-open APIs).
+        const r = await corsFetch(base + path, { signal: AbortSignal.timeout(2500), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
         if (!r.ok) { deadContactPaths++; continue; }
         deadContactPaths = 0;
         const html = await r.text();
