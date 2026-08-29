@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import {
   resolveCity,
   queryBusinesses,
@@ -14,6 +14,8 @@ import {
   type DiscoveryProgress,
   type AIAnalysis,
   runDiscoveryPhases,
+  getSmartCategoryAnalysis,
+  sanityCheckOpportunities,
   type EnrichmentProgress,
   setScanContext, buildScanContext,
 } from './clientEngine';
@@ -114,7 +116,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '6.8.0';
+const APP_VERSION = '6.9.1';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -472,6 +474,7 @@ export default function App() {
     setOpportunities([]);
     setDemandSignals(new Map());
     setEnrichProgress(null);
+    setAiAnalysis(null);
 
     try {
       setLoadingStage(`Scanning ${getCategoryLabel(selectedCategory)}…`);
@@ -507,6 +510,34 @@ export default function App() {
       const opps = computeOpportunities(biz, selectedCity.population || 0, signals);
       setOpportunities(opps);
       setSelectedOppCategory(selectedCategory);
+      setProgress(90);
+
+      // ── AI analysis for this single category (v6.9.1) ──
+      // Real LLM insights grounded in this category's scan + demand data,
+      // plus the sanity-check pass that flags implausible counts before
+      // the results are shown.
+      try {
+        setLoadingStage('AI market analysis…');
+        const analysis = await getSmartCategoryAnalysis(
+          selectedCategory, selectedCity.name, selectedCity.country,
+          selectedCity.population || 0,
+          biz.get(selectedCategory) || [], sig,
+        );
+        const sanity = sanityCheckOpportunities(opps, selectedCity.population || 0);
+        analysis.sanity = sanity;
+        const absurd = sanity.filter(s => s.verdict === 'absurd');
+        if (absurd.length > 0) {
+          analysis.insights = [{
+            title: `⚠ Data warning: scan coverage looks incomplete for ${getCategoryLabel(absurd[0].category)}`,
+            detail: absurd[0].reason,
+            severity: 'medium',
+            categories: [absurd[0].category],
+          }, ...analysis.insights];
+        }
+        setAiAnalysis(analysis);
+      } catch {
+        // AI unavailable → panel stays hidden; results remain fully usable.
+      }
       setProgress(100);
     } catch (e: any) {
       if (e.message !== 'Cancelled') setError(e.message || 'Analysis failed');
@@ -555,6 +586,22 @@ export default function App() {
       if (av > bv) return sortDir === 'asc' ? 1 : -1;
       return 0;
     });
+
+  // ── Contact coverage summary (v6.9.1): how many of the found businesses
+  // have each contact channel filled. Computed over the FULL filtered set,
+  // shown as a strip of stat chips on top of the results table.
+  const contactStats = useMemo(() => {
+    const n = filteredBiz.length;
+    const count = (pred: (b: Business) => boolean) => filteredBiz.reduce((s, b) => (pred(b) ? s + 1 : s), 0);
+    const phones = count(b => !!b.phone);
+    const emails = count(b => !!b.email);
+    const websites = count(b => !!b.website);
+    const socials = count(b => !!(b.facebook || b.instagram || b.linkedin || b.youtube || b.tiktok || b.twitter || b.pinterest));
+    const anyContact = count(b => !!(b.phone || b.email || b.website || b.facebook || b.instagram || b.linkedin || b.youtube || b.tiktok || b.twitter || b.pinterest));
+    const full = count(b => !!(b.phone && b.email && b.website));
+    const pct = (v: number) => (n ? Math.round((v / n) * 100) : 0);
+    return { n, phones, emails, websites, socials, anyContact, full, pct };
+  }, [filteredBiz]);
 
   const handleSort = (col: string) => {
     if (sortCol === col) {
@@ -1580,6 +1627,36 @@ export default function App() {
                   </button>
                 </div>
               </div>
+              {/* ── Contact coverage summary (v6.9.1) ── */}
+              {filteredBiz.length > 0 && (
+                <div className="px-5 py-2.5 border-b border-border bg-muted/30 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
+                  <span className="text-muted-foreground">Contact data ({contactStats.n} businesses):</span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="text-emerald-400 font-semibold">{contactStats.pct(contactStats.anyContact)}%</span>
+                    <span className="text-muted-foreground">have any contact</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="text-blue-400 font-semibold">📞 {contactStats.phones}</span>
+                    <span className="text-muted-foreground">phones ({contactStats.pct(contactStats.phones)}%)</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="text-amber-400 font-semibold">✉️ {contactStats.emails}</span>
+                    <span className="text-muted-foreground">emails ({contactStats.pct(contactStats.emails)}%)</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="text-purple-400 font-semibold">🌐 {contactStats.websites}</span>
+                    <span className="text-muted-foreground">websites ({contactStats.pct(contactStats.websites)}%)</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="text-pink-400 font-semibold">🔗 {contactStats.socials}</span>
+                    <span className="text-muted-foreground">socials ({contactStats.pct(contactStats.socials)}%)</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="text-emerald-400 font-semibold">★ {contactStats.full}</span>
+                    <span className="text-muted-foreground">full trio (phone+email+site)</span>
+                  </span>
+                </div>
+              )}
               <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
                 <table className="w-full text-left text-sm">
                   <thead className="sticky top-0 bg-card z-10">
@@ -1616,7 +1693,10 @@ export default function App() {
                             <div className="flex flex-col gap-0.5">
                               {b.facebook && <a href={b.facebook} target="_blank" rel="noopener" className="text-blue-400 hover:underline text-[11px]">Facebook</a>}
                               {b.instagram && <a href={b.instagram} target="_blank" rel="noopener" className="text-pink-400 hover:underline text-[11px]">Instagram</a>}
-                              {(!b.facebook && !b.instagram) && <span className="text-muted-foreground">—</span>}
+                              {b.linkedin && <a href={b.linkedin} target="_blank" rel="noopener" className="text-sky-400 hover:underline text-[11px]">LinkedIn</a>}
+                              {b.youtube && <a href={b.youtube} target="_blank" rel="noopener" className="text-red-400 hover:underline text-[11px]">YouTube</a>}
+                              {b.tiktok && <a href={b.tiktok} target="_blank" rel="noopener" className="text-slate-300 hover:underline text-[11px]">TikTok</a>}
+                              {(!b.facebook && !b.instagram && !b.linkedin && !b.youtube && !b.tiktok) && <span className="text-muted-foreground">—</span>}
                             </div>
                           </td>
                           <td className="px-4 py-3 text-right">
@@ -1692,16 +1772,22 @@ export default function App() {
                     const demand = demandSignals.get(opp.category);
                     const isSelected = selectedOppCategory === opp.category;
                     const color = CAT_COLORS[opp.category] || '#94a3b8';
+                    // v6.9.1 sanity badge: category count failed the AI
+                    // plausibility check — numbers likely reflect scan
+                    // coverage gaps, not the real market.
+                    const sanityFlag = aiAnalysis?.sanity?.find(s => s.category === opp.category && s.verdict === 'absurd');
                     return (
                       <tr
                         key={opp.category}
                         onClick={() => setSelectedOppCategory(isSelected ? null : opp.category)}
                         className={`border-b border-border/50 last:border-0 cursor-pointer transition-colors ${isSelected ? 'bg-primary/10' : 'hover:bg-muted/30'}`}
+                        title={sanityFlag?.reason}
                       >
                         <td className="px-5 py-3 text-xs text-muted-foreground">{i + 1}</td>
                         <td className="px-4 py-3 font-medium flex items-center gap-2">
                           <span className="w-2.5 h-2.5 rounded-full inline-block flex-shrink-0" style={{background: color}} />
                           {opp.categoryLabel}
+                          {sanityFlag && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400 font-normal">⚠ check</span>}
                         </td>
                         <td className="px-4 py-3 text-right tabular-nums">{fmtNum(opp.existing)}</td>
                         <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">{opp.per10k}</td>

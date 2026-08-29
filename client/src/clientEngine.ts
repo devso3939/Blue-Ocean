@@ -241,41 +241,89 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   const s = tags.shop;
   const t = tags.tourism;
   const l = tags.leisure;
+  const o = tags.office;
+  // Name used for sub-bucketing (beauty→nail, fitness→yoga, …). Computed
+  // lazily below only where it matters.
+  const nameOf = () => (tags.name || tags['name:en'] || '').toLowerCase();
 
   // ─── Shops (always businesses) ───
-  if (s === 'beauty' || s === 'cosmetics') {
+  if (s === 'beauty' || s === 'cosmetics' || s === 'beauty_salon') {
     // A "beauty" shop named like a nail salon is a nail salon, not a beauty salon
-    const nm = (tags.name || tags['name:en'] || '').toLowerCase();
+    const nm = nameOf();
     if (/(nail|manikюр|pedikюр)/.test(nm)) return 'nail_salon';
     return 'beauty_salon';
   }
-  if (s === 'hairdresser' || s === 'wigs') return 'hair_salon';
-  if (s === 'tattoo' || s === 'tattoo_piercing') return 'tattoo';
-  if (s === 'printing' || s === 'print') return 'printing';
-  if (s === 'market') return 'market';
-  if (s === 'nail_salon') return 'nail_salon';
-  if (s === 'supermarket' || s === 'greengrocer' || s === 'deli') return 'supermarket';
-  if (s === 'grocery' || s === 'health_food') return 'grocery';
-  if (s === 'convenience' || s === 'kiosk' || s === 'newsagent') return 'convenience';
-  if (s === 'clothes' || s === 'fashion' || s === 'boutique') return 'clothing';
-  if (s === 'shoes' || s === 'shoe') return 'clothing';
-  if (s === 'electronics' || s === 'mobile_phone' || s === 'computer' || s === 'hifi') return 'electronics';
-  if (s === 'furniture' || s === 'interior_decoration') return 'furniture';
-  if (s === 'doityourself' || s === 'trade' || s === 'hardware') return 'hardware';
-  if (s === 'bakery' || s === 'pastry') return 'bakery';
-  if (s === 'butcher') return 'butcher';
-  if (s === 'florist') return 'florist';
+  if (s === 'hairdresser' || s === 'wigs' || s === 'hairdresser_supply') return 'hair_salon';
+  if (s === 'tattoo' || s === 'tattoo_piercing' || s === 'piercing') return 'tattoo';
+  if (s === 'printing' || s === 'print' || s === 'copyshop' || s === 'copywriter') return 'printing';
+  if (s === 'market' || s === 'second_hand' || s === 'charity' || s === 'antiques') return 'market';
+  if (s === 'nail_salon' || s === 'nails') return 'nail_salon';
+  if (s === 'supermarket' || s === 'greengrocer' || s === 'deli' || s === 'cheese' ||
+      s === 'chocolate' || s === 'coffee' || s === 'tea' || s === 'seafood' ||
+      s === 'farm' || s === 'greasy') return 'supermarket';
+  if (s === 'grocery' || s === 'health_food' || s === 'organic' || s === 'nuts' ||
+      s === 'spices' || s === 'honey' || s === 'bread' || s === 'pasta' ||
+      s === 'rice' || s === 'dairy' || s === 'eggs' || s === 'milk' ||
+      s === 'bulk_food' || s === 'frozen_food' || s === 'baby_food') return 'grocery';
+  if (s === 'convenience' || s === 'kiosk' || s === 'newsagent' || s === 'variety_store' ||
+      s === 'general' || s === 'mini_market' || s === 'outpost' || s === 'nh' ||
+      s === 'cigarettes' || s === 'e-cigarette') return 'convenience';
+  if (s === 'clothes' || s === 'fashion' || s === 'boutique' || s === 'shoes' || s === 'shoe' ||
+      s === 'kids' || s === 'baby' || s === 'children' || s === 'underwear' || s === 'lingerie' ||
+      s === 'swimwear' || s === 'maternity' || s === 'traumatology' || s === 'fabric' ||
+      s === 'tailor_supply' || s === 'wool' || s === 'accessories' || s === 'fashion_accessories' ||
+      s === 'sportswear' || s === 'workwear' || s === 'costume' || s === 'formal' ||
+      s === 'wedding_dress' || s === 'leather' || s === 'fur' || s === 'denim') return 'clothing';
+  if (s === 'electronics' || s === 'mobile_phone' || s === 'computer' || s === 'hifi' ||
+      s === 'video_games' || s === 'radiotechnics' || s === 'appliance' || s === 'camera' ||
+      s === 'electrical' || s === 'lighting' || s === 'solar' || s === 'security' ||
+      s === 'pos_terminal' || s === 'hearing_aids') return 'electronics';
+  if (s === 'furniture' || s === 'interior_decoration' || s === 'mattress' ||
+      s === 'curtain' || s === 'kitchen' || s === 'bathroom_furnishing' ||
+      s === 'doors' || s === 'windows' || s === 'bed' || s === 'bedding' ||
+      s === 'ceramics' || s === 'tiles' || s === 'flooring' || s === 'houseware' ||
+      s === 'home_accessories' || s === 'candles' || s === 'fireplace') return 'furniture';
+  if (s === 'doityourself' || s === 'trade' || s === 'hardware' || s === 'paint' ||
+      s === 'building_materials' || s === 'tools' || s === 'sawmill' || s === 'plumber' ||
+      s === 'glaziery' || s === 'locksmith' || s === 'electrician' || s === 'shuttering') return 'hardware';
+  if (s === 'bakery' || s === 'pastry' || s === 'confectionery' || s === 'patisserie') return 'bakery';
+  if (s === 'butcher' || s === 'charcuterie') return 'butcher';
+  if (s === 'florist' || s === 'garden_centre' || s === 'seeds' || s === 'agrarian' ||
+      s === 'fertilizer' || s === 'garden_furniture' || s === 'plants') return 'florist';
   if (s === 'optician' || s === 'eyewear') return 'optician';
-  if (s === 'car_repair' || s === 'car_parts') return 'car_repair';
+  if (s === 'car_repair' || s === 'car_parts' || s === 'car' || s === 'tyres' ||
+      s === 'motorcycle' || s === 'motorcycle_repair' || s === 'truck_repair' ||
+      s === 'truck' || s === 'caravan' || s === 'boat' || s === 'oil' ||
+      s === 'agrarian_machine' || s === 'caravan_site') return 'car_repair';
   if (s === 'laundry' || s === 'dry_cleaning') return 'laundry';
-  if (s === 'pet_grooming' || s === 'pet') return 'pet_groomer';
+  if (s === 'pet_grooming' || s === 'pet' || s === 'pet_groomer') return 'pet_groomer';
   if (s === 'jewelry' || s === 'jewellery' || s === 'watches') return 'jewelry';
-  if (s === 'sports' || s === 'outdoor') return 'sports';
-  if (s === 'books' || s === 'stationery') return 'books';
-  if (s === 'department_store') return 'department_store';
-  if (s === 'art') return 'art';
+  if (s === 'sports' || s === 'outdoor' || s === 'bicycle_rental' || s === 'ski' ||
+      s === 'fishing' || s === 'hunting' || s === 'scuba_diving' || s === 'surf' ||
+      s === 'skateboard' || s === 'diving') return 'sports';
+  if (s === 'books' || s === 'stationery' || s === 'bookmaker' || s === 'copyshop_books') return 'books';
+  if (s === 'department_store' || s === 'mall' || s === 'wholesale') return 'department_store';
+  if (s === 'art' || s === 'frame' || s === 'gallery') return 'art';
   if (s === 'bicycle') return 'bicycle';
-  if (s === 'fuel') return 'fuel';
+  if (s === 'fuel' || s === 'fuel_station') return 'fuel';
+  // ─── Shops that map to SERVICE categories (v6.9 fix — these were the
+  // biggest drop buckets in the Tbilisi probe: chemist=130, alcohol=121,
+  // travel_agency=29, massage=26, money_lender=67, toys=70…) ───
+  if (s === 'chemist') return 'pharmacy';                    // drugstore (no prescription)
+  if (s === 'alcohol' || s === 'wine' || s === 'beer' || s === 'spirits' ||
+      s === 'beverages' || s === 'tobacco' || s === 'cannabis') return 'convenience';
+  if (s === 'toys' || s === 'games' || s === 'model' || s === 'musical_instrument' ||
+      s === 'gift' || s === 'party' || s === 'collectibles' || s === 'lottery' ||
+      s === 'trophy' || s === 'novelty') return 'art';       // gift/specialty retail → art bucket
+  if (s === 'massage') return 'spa';
+  if (s === 'money_lender' || s === 'pawnbroker' || s === 'currency_exchange' || s === 'financial') return 'bank';
+  if (s === 'ticket' || s === 'lottery_tickets') return 'travel_agency';
+  if (s === 'travel_agency') return 'travel_agency';
+  if (s === 'medical_supply' || s === 'orthopedic' || s === 'medical_devices') return 'pharmacy';
+  if (s === 'vacant' || s === 'yes' || s === 'other' || s === 'unknown') return null; // no signal
+  if (s === 'storage_rental' || s === 'funeral_directors' || s === 'funeral') return 'market';
+  if (s === 'trash') return null;                            // waste infra, not a business
+  if (s) return 'market'; // remaining named specialty shops count as local market
 
   // ─── Amenity-based ───
   if (a === 'cafe') return 'cafe';
@@ -289,62 +337,199 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   if (a === 'clinic' || a === 'doctors') return 'clinic';
   if (a === 'dentist') return 'dentist';
   if (a === 'bank') return 'bank';
-  if (a === 'school' || a === 'college' || a === 'university') return 'school';
+  if (a === 'school' || a === 'college' || a === 'university' ||
+      a === 'kindergarten' || a === 'language_school' || a === 'driving_school' ||
+      a === 'training' || a === 'prep_school' || a === 'childcare') return 'school';
   if (a === 'cinema') return 'cinema';
   if (a === 'veterinary') return 'veterinary';
-  if (a === 'library') return 'library';
-  if (a === 'post_office') return 'post_office';
-  if (a === 'car_rental') return 'car_rental';
+  if (a === 'library' || a === 'books_mobile') return 'library';
+  if (a === 'post_office' || a === 'post_partner') return 'post_office';
+  if (a === 'car_rental' || a === 'boat_rental') return 'car_rental';
   if (a === 'nightclub' || a === 'casino') return 'night_club';
-  if (a === 'music_school' || a === 'dancing_school' || a === 'arts_centre') return 'music_school';
-  if (a === 'spa' || a === 'sauna') return 'spa';
+  if (a === 'music_school' || a === 'dancing_school' || a === 'arts_centre' ||
+      a === 'studio') return 'music_school';
+  if (a === 'spa' || a === 'sauna' || a === 'public_bath' || a === 'tanning_salon' ||
+      a === 'massage') return 'spa';
   if (a === 'marketplace') return 'marketplace';
   if (a === 'fuel') return 'fuel';
+  // ─── Amenity service buckets (v6.9) ───
+  if (a === 'car_wash') return 'car_wash';
+  if (a === 'bureau_de_change' || a === 'money_transfer' || a === 'microfinance') return 'bank';
+  if (a === 'internet_cafe') return 'electronics';
+  if (a === 'courier' || a === 'parcel_pickup' || a === 'parcel_locker' ||
+      a === 'delivery_company') return 'courier';
+  if (a === 'coworking_space') return 'coworking';
+  if (a === 'events_venue') return 'wedding';   // wedding/event halls
+  if (a === 'funeral_hall' || a === 'crematorium') return 'market';
+  if (a === 'photo_studio' || a === 'photography') return 'art';
+  if (a === 'dive_centre') return 'sports';
+  if (a === 'conference_centre' || a === 'monastery' || a === 'place_of_worship' ||
+      a === 'public_building' || a === 'community_centre' || a === 'toilets' ||
+      a === 'drinking_water' || a === 'parking' || a === 'bench' || a === 'shelter' ||
+      a === 'waste_basket' || a === 'recycling' || a === 'fountain' ||
+      a === 'charging_station' || a === 'atm' || a === 'vending_machine' ||
+      a === 'telephone' || a === 'telephone_exchange' || a === 'bus_station' ||
+      a === 'bus_stop' || a === 'ferry_terminal' || a === 'taxi' || a === 'police' ||
+      a === 'fire_station' || a === 'townhall' || a === 'courthouse' || a === 'prison' ||
+      a === 'grave_yard' || a === 'waste_transfer_station') return null; // public/civic infra
 
-    // Craft businesses (Georgia, Russia, CIS)
-  if (tags.craft === 'bakery') return 'bakery';
-  if (tags.craft === 'car_repair' || tags.craft === 'car_paint') return 'car_repair';
-  if (tags.craft === 'tailor' || tags.craft === 'dressmaker') return 'clothing';
-  if (tags.craft === 'jeweler') return 'jewelry';
+  // ─── Craft businesses (Georgia, Russia, CIS) ───
+  if (tags.craft === 'bakery' || tags.craft === 'confectionery' || tags.craft === 'pastry') return 'bakery';
+  if (tags.craft === 'car_repair' || tags.craft === 'car_paint' || tags.craft === 'car_repair vehicle' ||
+      tags.craft === 'joiner' || tags.craft === 'carpenter' || tags.craft === 'upholsterer' ||
+      tags.craft === 'metal_construction' || tags.craft === 'stonemason' ||
+      tags.craft === 'window_construction' || tags.craft === 'blacksmith') return 'car_repair';
+  if (tags.craft === 'tailor' || tags.craft === 'dressmaker' || tags.craft === 'seamstress') return 'clothing';
+  if (tags.craft === 'jeweler' || tags.craft === 'jewellery_repair') return 'jewelry';
   if (tags.craft === 'optician') return 'optician';
   if (tags.craft === 'florist') return 'florist';
-  // Healthcare (UK, Germany, Scandinavia)
-  if (tags.healthcare === 'dentist') return 'dentist';
-  if (tags.healthcare === 'clinic' || tags.healthcare === 'doctor') return 'clinic';
-  if (tags.healthcare === 'pharmacy') return 'pharmacy';
+  if (tags.craft === 'shoemaker' || tags.craft === 'cobbler') return 'clothing';
+  if (tags.craft === 'key_cutter' || tags.craft === 'engraver') return 'printing';
+  if (tags.craft === 'photographer' || tags.craft === 'photographic_laboratory') return 'art';
+  if (tags.craft === 'beekeeper' || tags.craft === 'brewery' || tags.craft === 'distillery' ||
+      tags.craft === 'winery') return 'supermarket';
+  if (tags.craft === 'plasterer' || tags.craft === 'roofer' || tags.craft === 'insulation' ||
+      tags.craft === 'scaffolder' || tags.craft === 'builder') return 'hardware';
+  if (tags.craft === 'clockmaker' || tags.craft === 'electronics_repair') return 'electronics';
+  if (tags.craft === 'pottery' || tags.craft === 'basket_maker' || tags.craft === 'bookbinder' ||
+      tags.craft === 'handicraft' || tags.craft === 'candle_maker' || tags.craft === 'toymaker') return 'art';
+  if (tags.craft === 'carpet_layer' || tags.craft === 'picture_framing' ||
+      tags.craft === 'signmaker' || tags.craft === 'printer') return 'printing';
+  if (tags.craft) return 'market'; // remaining named crafts are real businesses
+
+  // ─── Healthcare (UK, Germany, Scandinavia) ───
+  if (tags.healthcare === 'dentist' || tags.healthcare === 'orthodontist') return 'dentist';
+  if (tags.healthcare === 'clinic' || tags.healthcare === 'doctor' ||
+      tags.healthcare === 'physiotherapist' || tags.healthcare === 'psychotherapist' ||
+      tags.healthcare === 'psychologist' || tags.healthcare === 'midwife' ||
+      tags.healthcare === 'occupational_therapist' || tags.healthcare === 'speech_therapist' ||
+      tags.healthcare === 'optometrist' || tags.healthcare === 'podiatrist' ||
+      tags.healthcare === 'chiropractor' || tags.healthcare === 'sample_collection' ||
+      tags.healthcare === 'vaccination_centre' || tags.healthcare === 'dialysis' ||
+      tags.healthcare === 'blood_donation' || tags.healthcare === 'rehab' ||
+      tags.healthcare === 'hospice') return 'clinic';
+  if (tags.healthcare === 'pharmacy' || tags.healthcare === 'chemist') return 'pharmacy';
   if (tags.healthcare === 'hospital') return 'hospital';
-  if (tags.healthcare === 'physiotherapist') return 'clinic';
-// ─── Tourism ───
-  if (t === 'hotel' || t === 'motel' || t === 'apartment') return 'hotel';
+  if (tags.healthcare === 'laboratory' || tags.healthcare === 'blood_bank') return 'clinic';
+  if (tags.healthcare === 'veterinary') return 'veterinary';
+  if (tags.healthcare) return 'clinic'; // any other healthcare=* is a real medical business
+
+  // ─── Tourism ───
+  if (t === 'hotel' || t === 'motel' || t === 'apartment' || t === 'bed_and_breakfast' ||
+      t === 'resort' || t === 'chalet' || t === 'aparthotel') return 'hotel';
   if (t === 'hostel') return 'hostel';
   if (t === 'guest_house') return 'hotel';
+  if (t === 'museum' || t === 'gallery' || t === 'aquarium' || t === 'zoo' ||
+      t === 'theme_park') return 'art';
+  // tourism=attraction/artwork deliberately NOT mapped: monuments, viewpoints
+  // and statues carry names but are not businesses.
+  if (t === 'caravan_site' || t === 'camp_site') return 'hostel';
 
   // ─── Leisure ───
-  if (l === 'fitness_centre' || l === 'sports_centre' || l === 'sports_hall' || l === 'swimming_pool') {
-    // Name-based split: yoga/pilates studios before the generic 'gym' bucket
-    const nameLower = (tags.name || tags['name:en'] || '').toLowerCase();
-    if (/(yoga|pilates)/.test(nameLower)) return 'yoga';
+  if (l === 'fitness_centre' || l === 'sports_centre' || l === 'sports_hall' ||
+      l === 'swimming_pool' || l === 'track' || l === 'stadium') {
+    // Name-based split: yoga/pilates/dance studios before the generic 'gym' bucket
+    const nm = nameOf();
+    if (/(yoga|pilates)/.test(nm)) return 'yoga';
+    if (/(danc|ballet|choreo)/.test(nm)) return 'dance';
+    if (/(box|mma|karate|judo|taekwondo|wrestl|fencing|kick|aikido|jui.?jitsu)/.test(nm)) return 'gym';
     return 'gym';
   }
+  if (l === 'yoga') return 'yoga';               // leisure=yoga exists in OSM
+  if (l === 'dance' || l === 'dance_hall') return 'dance';
+  if (l === 'bowling_alley' || l === 'escape_game' || l === 'amusement_arcade' ||
+      l === 'miniature_golf' || l === 'trampoline_park' || l === 'water_park') return 'night_club';
+  if (l === 'spa' || l === 'sauna') return 'spa';
+  if (l === 'tanning_salon') return 'spa';
+  if (l === 'horse_riding' || l === 'golf_course' || l === 'club' || l === 'padel' ||
+      l === 'tennis' || l === 'ice_rink' || l === 'pitch' || l === 'playground' ||
+      l === 'park' || l === 'garden' || l === 'dog_park' || l === 'track_outdoor' ||
+      l === 'pitch_outdoor' || l === 'common' || l === 'nature_reserve') return null; // venues/parks, not businesses
 
-  // ─── Amenity (car wash, etc) ───
-  if (a === 'car_wash') return 'car_wash';
+  // ─── Office-based businesses (v6.9: the single biggest drop bucket was
+  // office=company with 174 named instances in Tbilisi alone) ───
+  if (o === 'coworking' || o === 'coworking_space' || o === 'coworkingn') return 'coworking';
+  if (o === 'lawyer' || o === 'attorney' || o === 'notary' || o === 'bailiff' || o === 'law') return 'lawyer';
+  if (o === 'accountant' || o === 'tax_advisor' || o === 'tax' || o === 'audit' || o === 'bookkeeping') return 'accountant';
+  if (o === 'estate_agent' || o === 'real_estate' || o === 'property_management') return 'real_estate';
+  if (o === 'insurance' || o === 'insurance_broker') return 'insurance';
+  if (o === 'travel_agent' || o === 'tour_operator' || o === 'tourism') return 'travel_agency';
+  if (o === 'it' || o === 'software' || o === 'computer' || o === 'it_company' ||
+      o === 'web_design' || o === 'web_developer' || o === 'hosting' ||
+      o === 'game_developer' || o === 'technology' || o === 'digital') return 'software';
+  if (o === 'consulting' || o === 'business_consulting' || o === 'it_consulting' ||
+      o === 'management_consulting' || o === 'financial_consulting') return 'it_consulting';
+  if (o === 'marketing' || o === 'advertising' || o === 'advertising_agency' ||
+      o === 'marketing_agency' || o === 'pr_agency' || o === 'communications' ||
+      o === 'media' || o === 'newspaper' || o === 'publisher' || o === 'magazine' ||
+      o === 'broadcasting' || o === 'radio' || o === 'tv' || o === 'film' ||
+      o === 'video_production' || o === 'design' || o === 'graphic_design' ||
+      o === 'photography_studio') return 'digital_marketing';
+  if (o === 'telecommunication' || o === 'telecom') return 'web_agency';
+  if (o === 'company' || o === 'yes' || o === 'corporate' || o === 'private' ||
+      o === 'business' || o === 'services' || o === 'enterprise') {
+    // Generic office=company: sub-bucket by name, else 'software' bucket for
+    // generic companies (they are overwhelmingly private companies).
+    const nm = nameOf();
+    if (/(law|legal|attorney|advo[ck]at|notar)/.test(nm)) return 'lawyer';
+    if (/(account|buh|finance|audit|tax)/.test(nm)) return 'accountant';
+    if (/(real.?estate|property|immobili)/.test(nm)) return 'real_estate';
+    if (/(insur|strakhov)/.test(nm) || /(insur)/.test(nm)) return 'insurance';
+    if (/(travel|tur|tour)/.test(nm)) return 'travel_agency';
+    if (/(clean|ubor|cleaning)/.test(nm)) return 'cleaning';
+    if (/(car.?wash|moyk[ae]|автомойк)/.test(nm)) return 'car_wash';
+    if (/(nail|manikюр|pedikюр)/.test(nm)) return 'nail_salon';
+    if (/(yoga|pilates)/.test(nm)) return 'yoga';
+    if (/(soft|it|tech|digital|web|dev|data|ai|cloud|cyber|app)/.test(nm)) return 'software';
+    if (/(consult|консалт)/.test(nm)) return 'it_consulting';
+    if (/(market|advertis|reklam|agency|agenc|media|pr\b|brand|design|studio)/.test(nm)) return 'digital_marketing';
+    if (/(construct|building|development)/.test(nm)) return 'hardware';
+    if (/(logist|transport|delivery|courier)/.test(nm)) return 'courier';
+    if (/(security|guard|охран)/.test(nm)) return 'insurance';
+    if (/(recruit|hr\b|personnel|staff)/.test(nm)) return 'it_consulting';
+    if (/(med|clinic|doctor|health|dent|pharm)/.test(nm)) return 'clinic';
+    if (/(bank|financ|invest|credit|fund|capital)/.test(nm)) return 'bank';
+    if (/(energ|oil|gas|mining)/.test(nm)) return 'fuel';
+    if (/(hotel|hostel|motel)/.test(nm)) return 'hotel';
+    if (/(import|export|trade|wholesale|supply|distribut)/.test(nm)) return 'market';
+    return 'software'; // generic private company → closest service bucket
+  }
+  if (o === 'architect' || o === 'engineer' || o === 'engineering' || o === 'surveyor' ||
+      o === 'planner' || o === 'construction_company' || o === 'construction') return 'hardware';
+  if (o === 'cleaning' || o === 'cleaning_company') return 'cleaning';
+  if (o === 'courier' || o === 'logistics' || o === 'shipping' || o === 'forwarding' ||
+      o === 'transport' || o === 'delivery' || o === 'moving_company') return 'courier';
+  if (o === 'educational_institution' || o === 'education' || o === 'tutoring' ||
+      o === 'tutor' || o === 'training_institute') return 'school';
+  if (o === 'financial' || o === 'investment' || o === 'bank' || o === ' leasing' ||
+      o === 'microfinance' || o === 'money_lender') return 'bank';
+  if (o === 'security' || o === 'private_investigator' || o === 'guard') return 'insurance';
+  if (o === 'translator' || o === 'translation' || o === 'interpreter') return 'it_consulting';
+  if (o === 'medical' || o === 'doctor' || o === 'physician' || o === 'dentist' ||
+      o === 'veterinary' || o === 'clinic') return 'clinic';
+  if (o === 'pharmacy') return 'pharmacy';
+  if (o === 'ngo' || o === 'charity' || o === 'association' || o === 'foundation' ||
+      o === 'nonprofit' || o === 'religious' || o === 'religion' || o === 'political_party' ||
+      o === 'union' || o === 'movement') return 'market'; // civic orgs still appear in results
+  if (o === 'government' || o === 'public' || o === 'diplomatic' || o === 'embassy' ||
+      o === 'visa' || o === 'tax_office' || o === 'public_service' || o === 'authority' ||
+      o === 'municipality' || o === 'police' || o === 'court' || o === 'administrative' ||
+      o === 'regulatory' || o === 'council' || o === 'agency' || o === 'institution' ||
+      o === 'public_authority') return null; // public sector: not a private business
+  if (o === 'research' || o === 'educational_organisation' || o === 'exam_centre' ||
+      o === 'laboratory' || o === 'institute') return 'school';
+  if (o === 'energy_supplier' || o === 'utility' || o === 'water_utility' ||
+      o === 'gas_utility' || o === 'electric_utility') return 'fuel';
+  if (o === 'guide' || o === 'tour_guide') return 'travel_agency';
+  if (o === 'employment_agency' || o === 'staffing') return 'it_consulting';
+  if (o === 'newspaper' || o === 'publishing') return 'digital_marketing';
+  if (o === 'religion' || o === 'parish') return null;
+  if (o === 'vacant' || o === 'unknown') return null;
+  if (o) return 'software'; // remaining named offices are private companies
 
-  // ─── Office-based businesses ───
-  if (tags.office === 'coworking') return 'coworking';
-  if (tags.office === 'lawyer' || tags.office === 'attorney') return 'lawyer';
-  if (tags.office === 'accountant') return 'accountant';
-  if (tags.office === 'estate_agent' || tags.office === 'real_estate') return 'real_estate';
-  if (tags.office === 'insurance') return 'insurance';
-  if (tags.office === 'travel_agent') return 'travel_agency';
-  if (tags.office === 'it' || tags.office === 'software') return 'software';
-  if (tags.office === 'consulting') return 'it_consulting';
-  if (tags.office === 'marketing' || tags.office === 'advertising') return 'digital_marketing';
-  if (tags.office === 'telecommunication') return 'web_agency';
-
-  // ─── Name-based heuristics for new categories ───
-  const nameLower = (tags.name || tags['name:en'] || '').toLowerCase();
-  if (!tags.office && nameLower) {
+  // ─── Name-based heuristics for new categories (no office tag) ───
+  const nameLower = nameOf();
+  if (!o && nameLower) {
     if (/(law|legal|attorney|advo[ck]at)/.test(nameLower)) return 'lawyer';
     if (/(account|buh|finance|audit)/.test(nameLower)) return 'accountant';
     if (/(real.?estate|property|immobili)/.test(nameLower)) return 'real_estate';
@@ -851,6 +1036,10 @@ async function directFetch(url: string, init?: RequestInit): Promise<Response> {
 }
 
 // Map category IDs to OSM tag filters for focused queries
+// ── v6.9 — filters aligned with categorizeBusiness's expanded tag map.
+// A focused query must return every tag value that categorizes into the
+// requested category, otherwise the Fallback (below) fires and halves
+// precision. Each entry lists ALL tag values its categorizer branch uses.
 const CAT_OSM_FILTER: Record<string, string> = {
   cafe: '["amenity"="cafe"]',
   restaurant: '["amenity"="restaurant"]',
@@ -858,61 +1047,69 @@ const CAT_OSM_FILTER: Record<string, string> = {
   pub: '["amenity"="pub"]',
   fast_food: '["amenity"~"fast_food|food_court"]',
   ice_cream: '["amenity"="ice_cream"]',
-  hotel: '["tourism"~"hotel|hostel|motel|apartment|guest_house"]',
+  hotel: '["tourism"~"hotel|hostel|motel|apartment|guest_house|bed_and_breakfast|resort|chalet|aparthotel"]',
   gym: '["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool"]',
-  beauty_salon: '["shop"~"beauty|cosmetics|nail_salon"]',
-  hair_salon: '["shop"~"hairdresser|wigs"]',
-  pharmacy: '["amenity"~"pharmacy|chemist"]',
-  hospital: '["amenity"="hospital"]',
-  clinic: '["amenity"~"clinic|doctors"]',
-  dentist: '["amenity"="dentist"]',
-  supermarket: '["shop"~"supermarket|greengrocer|deli"]',
-  grocery: '["shop"~"grocery|health_food"]',
-  clothing: '["shop"~"clothes|fashion|boutique|shoes"]',
-  electronics: '["shop"~"electronics|mobile_phone|computer|hifi"]',
-  furniture: '["shop"~"furniture|interior_decoration"]',
-  hardware: '["shop"~"doityourself|trade|hardware"]',
-  bank: '["amenity"="bank"]',
-  school: '["amenity"~"school|college|university"]',
+  beauty_salon: '["shop"~"beauty|cosmetics|beauty_salon"]',
+  hair_salon: '["shop"~"hairdresser|wigs|hairdresser_supply"]',
+  pharmacy: '["amenity"~"pharmacy|chemist"]|["shop"~"chemist|medical_supply|orthopedic"]|["healthcare"~"pharmacy|chemist"]',
+  hospital: '["amenity"="hospital"]|["healthcare"="hospital"]',
+  clinic: '["amenity"~"clinic|doctors"]|["healthcare"~"clinic|doctor|physiotherapist|psychotherapist|psychologist|laboratory|midwife|optometrist|podiatrist|chiropractor|dialysis|rehab|hospice|sample_collection|vaccination_centre|blood_donation|occupational_therapist|speech_therapist"]',
+  dentist: '["amenity"="dentist"]|["healthcare"~"dentist|orthodontist"]',
+  supermarket: '["shop"~"supermarket|greengrocer|deli|cheese|chocolate|coffee|tea|seafood|farm|confectionery"]|["craft"~"brewery|winery|distillery|beekeeper"]',
+  grocery: '["shop"~"grocery|health_food|organic|nuts|spices|honey|bread|pasta|rice|dairy|eggs|milk|bulk_food|frozen_food|baby_food"]',
+  clothing: '["shop"~"clothes|fashion|boutique|shoes|shoe|kids|baby|children|underwear|lingerie|swimwear|maternity|fabric|wool|accessories|fashion_accessories|sportswear|workwear|costume|formal|wedding_dress|leather|fur|denim"]|["craft"~"tailor|dressmaker|seamstress|shoemaker|cobbler"]',
+  electronics: '["shop"~"electronics|mobile_phone|computer|hifi|video_games|radiotechnics|appliance|camera|electrical|lighting|solar|pos_terminal|hearing_aids"]|["amenity"="internet_cafe"]|["craft"~"clockmaker|electronics_repair"]',
+  furniture: '["shop"~"furniture|interior_decoration|mattress|curtain|kitchen|bathroom_furnishing|doors|windows|bed|bedding|ceramics|tiles|flooring|houseware|home_accessories|candles|fireplace"]',
+  hardware: '["shop"~"doityourself|trade|hardware|paint|building_materials|tools|sawmill|plumber|glaziery|locksmith|electrician|shuttering"]|["office"~"architect|engineer|engineering|surveyor|planner|construction_company|construction"]|["craft"~"plasterer|roofer|insulation|scaffolder|builder"]',
+  bank: '["amenity"="bank"]|["amenity"~"bureau_de_change|money_transfer|microfinance"]|["shop"~"money_lender|pawnbroker|currency_exchange|financial"]|["office"~"financial|investment|bank|microfinance|money_lender"]',
+  school: '["amenity"~"school|college|university|kindergarten|language_school|driving_school|training|prep_school|childcare"]|["office"~"educational_institution|education|tutoring|tutor|training_institute|research|institute"]',
   cinema: '["amenity"="cinema"]',
-  bakery: '["shop"~"bakery|pastry"]',
-  car_repair: '["shop"~"car_repair|car_parts"]',
+  bakery: '["shop"~"bakery|pastry|confectionery|patisserie"]|["craft"~"bakery|confectionery|pastry"]',
+  car_repair: '["shop"~"car_repair|car_parts|car|tyres|motorcycle|motorcycle_repair|truck_repair|truck|caravan|boat|oil"]|["craft"~"car_repair|car_paint|joiner|carpenter|upholsterer|metal_construction|stonemason|window_construction|blacksmith"]',
   laundry: '["shop"~"laundry|dry_cleaning"]',
-  pet_groomer: '["shop"~"pet_grooming|pet"]',
-  coworking: '["office"="coworking"]',
-  night_club: '["amenity"="night_club"]',
-  car_rental: '["amenity"="car_rental"]',
-  veterinary: '["amenity"="veterinary"]',
-  florist: '["shop"="florist"]',
-  optician: '["shop"~"optician|eyewear"]',
-  butcher: '["shop"="butcher"]',
+  pet_groomer: '["shop"~"pet_grooming|pet|pet_groomer"]',
+  coworking: '["office"~"coworking|coworking_space"]|["amenity"="coworking_space"]',
+  night_club: '["amenity"~"nightclub|casino"]|["leisure"~"bowling_alley|escape_game|amusement_arcade|miniature_golf|trampoline_park|water_park"]',
+  car_rental: '["amenity"~"car_rental|boat_rental"]',
+  veterinary: '["amenity"="veterinary"]|["healthcare"="veterinary"]',
+  florist: '["shop"~"florist|garden_centre|seeds|agrarian|fertilizer|garden_furniture|plants"]|["craft"="florist"]',
+  optician: '["shop"~"optician|eyewear"]|["craft"="optician"]',
+  butcher: '["shop"~"butcher|charcuterie"]',
   marketplace: '["amenity"="marketplace"]',
-  fuel: '["amenity"="fuel"]',
-  department_store: '["shop"="department_store"]',
-  jewelry: '["shop"~"jewelry|jewellery|watches"]',
-  sports: '["shop"~"sports|outdoor"]',
-  art: '["shop"="art"]',
+  fuel: '["amenity"="fuel"]|["office"~"energy_supplier|utility|water_utility|gas_utility|electric_utility"]',
+  department_store: '["shop"~"department_store|mall|wholesale"]',
+  jewelry: '["shop"~"jewelry|jewellery|watches"]|["craft"~"jeweler|jewellery_repair"]',
+  sports: '["shop"~"sports|outdoor|bicycle_rental|ski|fishing|hunting|scuba_diving|surf|skateboard|diving"]|["amenity"="dive_centre"]',
+  art: '["shop"~"art|frame|gallery|toys|games|model|musical_instrument|gift|party|collectibles|lottery|trophy|novelty"]|["tourism"~"museum|gallery|attraction|aquarium|zoo|theme_park"]|["amenity"~"photo_studio|photography"]|["craft"~"photographer|photographic_laboratory|pottery|basket_maker|bookbinder|handicraft|candle_maker|toymaker"]',
   bicycle: '["shop"="bicycle"]',
-  convenience: '["shop"~"convenience|kiosk|newsagent"]',
-  spa: '["amenity"~"spa|sauna"]',
-  yoga: '["leisure"="fitness_centre"]',
-  bookstore: '["shop"~"books|stationery"]',
-  library: '["amenity"="library"]',
-  post_office: '["amenity"="post_office"]',
+  convenience: '["shop"~"convenience|kiosk|newsagent|variety_store|general|mini_market|outpost|cigarettes|e-cigarette|alcohol|wine|beer|spirits|beverages|tobacco|cannabis"]',
+  spa: '["amenity"~"spa|sauna|public_bath|tanning_salon|massage"]|["leisure"~"spa|sauna|tanning_salon"]|["shop"="massage"]',
+  yoga: '["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool|yoga"]["name"~"yoga|pilates",i]|["leisure"="yoga"]|["office"="company"]["name"~"yoga|pilates",i]',
+  bookstore: '["shop"~"books|stationery|bookmaker"]',
+  library: '["amenity"~"library|books_mobile"]',
+  post_office: '["amenity"~"post_office|post_partner"]',
   // ── v3.5.0 new categories ──
-  web_agency: '["office"="telecommunication"]',
-  software: '["office"~"it|software"]',
-  it_consulting: '["office"="consulting"]',
-  digital_marketing: '["office"~"marketing|advertising"]',
-  lawyer: '["office"="lawyer"]',
-  accountant: '["office"="accountant"]',
-  real_estate: '["office"~"estate_agent|real_estate"]',
-  insurance: '["office"="insurance"]',
-  travel_agency: '["office"~"travel_agent"]',
-  cleaning: '["shop"="cleaning"]',
+  web_agency: '["office"~"telecommunication|telecom"]',
+  software: '["office"~"it|software|computer|it_company|web_design|web_developer|hosting|game_developer|technology|digital"]|["office"~"company|yes|corporate|private|business|services|enterprise"]',
+  it_consulting: '["office"~"consulting|business_consulting|it_consulting|management_consulting|financial_consulting|translator|translation|interpreter|employment_agency|staffing"]',
+  digital_marketing: '["office"~"marketing|advertising|advertising_agency|marketing_agency|pr_agency|communications|media|newspaper|publisher|magazine|broadcasting|radio|tv|film|video_production|design|graphic_design|photography_studio|publishing"]',
+  lawyer: '["office"~"lawyer|attorney|notary|bailiff|law"]',
+  accountant: '["office"~"accountant|tax_advisor|tax|audit|bookkeeping"]',
+  real_estate: '["office"~"estate_agent|real_estate|property_management"]',
+  insurance: '["office"~"insurance|insurance_broker|security|private_investigator|guard"]',
+  travel_agency: '["office"~"travel_agent|tour_operator|tourism|guide|tour_guide"]|["shop"~"travel_agency|ticket|lottery_tickets"]',
+  cleaning: '["shop"="cleaning"]|["office"~"cleaning|cleaning_company"]',
   car_wash: '["amenity"="car_wash"]',
-  nail_salon: '["shop"~"beauty|nail_salon|cosmetics"]',
-  massage: '["leisure"~"spa|sauna"]',
+  nail_salon: '["shop"~"beauty|nail_salon|nails|cosmetics"]',
+  massage: '["amenity"~"spa|sauna|massage"]|["leisure"~"spa|sauna"]|["shop"="massage"]',
+  // ── v6.9 new categories ──
+  dance: '["leisure"~"dance|dance_hall"]|["leisure"~"fitness_centre|sports_centre|sports_hall"]["name"~"danc|ballet|choreo",i]',
+  music_school: '["amenity"~"music_school|dancing_school|arts_centre|studio"]',
+  courier: '["amenity"~"courier|parcel_pickup|parcel_locker|delivery_company"]|["office"~"courier|logistics|shipping|forwarding|transport|delivery|moving_company"]',
+  market: '["shop"~"market|second_hand|charity|antiques"]|["office"~"ngo|charity|association|foundation|nonprofit"]',
+  tattoo: '["shop"~"tattoo|tattoo_piercing|piercing"]',
+  wedding: '["amenity"="events_venue"]',
+  printing: '["shop"~"printing|copyshop|print|printer_ink"]|["craft"~"printing|signmaker|bookbinder"]|["office"~"printing|publisher"]["name"~"print|printery|typography| Druckerei",i]',
 };
 
 // Set when fetchOverpass exhausts every mirror — lets callers distinguish
@@ -1050,12 +1247,14 @@ export async function queryBusinesses(
   way(${bbox})["amenity"~"pharmacy|hospital|clinic|dentist|veterinary"];
   node(${bbox})["amenity"~"bank|cinema|nightclub|car_rental|fuel|marketplace|spa|sauna|casino|music_school|dancing_school"];
   way(${bbox})["amenity"~"bank|cinema|nightclub|car_rental|fuel|marketplace|spa|sauna|casino|music_school|dancing_school"];
+  node(${bbox})["amenity"~"school|college|university|language_school|driving_school|car_wash|bureau_de_change|money_transfer|courier|parcel_pickup|parcel_locker|coworking_space|post_office|post_partner|library|internet_cafe|photo_studio|events_venue|massage|public_bath|tanning_salon|boat_rental|studio|arts_centre"];
+  way(${bbox})["amenity"~"school|college|university|language_school|driving_school|car_wash|bureau_de_change|money_transfer|courier|parcel_pickup|parcel_locker|coworking_space|post_office|post_partner|library|internet_cafe|photo_studio|events_venue|massage|public_bath|tanning_salon|boat_rental|studio|arts_centre"];
   node(${bbox})["shop"];
   way(${bbox})["shop"];
-  node(${bbox})["tourism"~"hotel|hostel|motel|apartment|guest_house"];
-  way(${bbox})["tourism"~"hotel|hostel|motel|apartment|guest_house"];
-  node(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool|spa|sauna"];
-  way(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool|spa|sauna"];
+  node(${bbox})["tourism"~"hotel|hostel|motel|apartment|guest_house|bed_and_breakfast|resort|chalet|aparthotel|museum|gallery|attraction"];
+  way(${bbox})["tourism"~"hotel|hostel|motel|apartment|guest_house|bed_and_breakfast|resort|chalet|aparthotel|museum|gallery|attraction"];
+  node(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool|spa|sauna|yoga|dance|bowling_alley|escape_game|amusement_arcade|water_park"];
+  way(${bbox})["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool|spa|sauna|yoga|dance|bowling_alley|escape_game|amusement_arcade|water_park"];
   node(${bbox})["office"];
   way(${bbox})["office"];
   node(${bbox})["craft"];
@@ -1097,11 +1296,16 @@ out center body;`;
 
   // ── FOCUSED MODE: Single category query (much faster) ──
   if (categoryFilter && CAT_OSM_FILTER[categoryFilter]) {
-    const filter = CAT_OSM_FILTER[categoryFilter];
+    // A filter spec may hold several selector groups joined by '|'
+    // (v6.9: e.g. `["shop"~"chemist|…"]|["healthcare"~"…"]`). Each group
+    // becomes its own node/way statement inside the union wrapper — the
+    // union makes the semantics OR, matching the categorizer's branches.
+    const groups = CAT_OSM_FILTER[categoryFilter]
+      .split('|[')
+      .map((g, i) => (i === 0 ? g : '[' + g));
     const qFocused = `[out:json][timeout:90][maxsize:536870912];
 (
-  node(${bbox})${filter};
-  way(${bbox})${filter};
+${groups.map(g => `  node(${bbox})${g};\n  way(${bbox})${g};`).join('\n')}
 );
 out center body;`;
     onProgress?.(10, `Scanning for ${getCategoryLabel(categoryFilter)}…`);
@@ -1737,205 +1941,21 @@ async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct:
 // enrichment phase share the exact same rules.
 
 // ── Unified extraction: pull phone, email, website, social from any HTML/text ──
+// v6.9.1: thin wrapper — the full implementation lives in extractFromHtmlModule
+// (bottom of file, exported). Both used to be maintained as duplicates; now
+// there is exactly one implementation, so any parsing improvement benefits
+// every call site at once.
 function extractFromHtml(html: string, b: Business): boolean {
+  const snap = (x: Business) =>
+    `${x.phone}|${x.email}|${x.website}|${x.facebook}|${x.instagram}|${x.twitter}|${x.pinterest}|${x.linkedin}|${x.youtube}|${x.tiktok}|${x.rating ?? ''}|${x.reviewCount ?? ''}`;
   // Snapshot before so caller can know whether anything was extracted
-  const before = `${b.phone}|${b.email}|${b.website}|${b.facebook}|${b.instagram}|${b.twitter}|${b.pinterest}|${b.rating ?? ''}|${b.reviewCount ?? ''}`;
-  const JUNK = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|duckduckgo|schema\.org|privacy.*policy|terms.*service|cookie/i;
-  const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
-
-  // Phone: tel: links, then text regex
-  if (!b.phone) {
-    // 1. tel: links (most reliable)
-    const telM = html.match(/href="tel:([^"]+)"/);
-    if (telM) b.phone = (() => { try { return decodeURIComponent(telM[1]).trim(); } catch { return telM[1].trim(); } })();
-    // 2. Country-specific formats
-    if (!b.phone) {
-      const geoM = html.match(/\+995\s?\d{3}\s?\d{2}\s?\d{2}\s?\d{2}/);
-      if (geoM) b.phone = geoM[0].trim();
-    }
-    if (!b.phone) {
-      const armM = html.match(/\+374\s?\d{2}\s?\d{2}\s?\d{2}\s?\d{2}/);
-      if (armM) b.phone = armM[0].trim();
-    }
-    if (!b.phone) {
-      const turM = html.match(/\+90\s?\d{3}\s?\d{3}\s?\d{2}\s?\d{2}/);
-      if (turM) b.phone = turM[0].trim();
-    }
-    if (!b.phone) {
-      const ruM = html.match(/\+7\s?\d{3}\s?\d{3}\s?\d{2}\s?\d{2}/);
-      if (ruM) b.phone = ruM[0].trim();
-    }
-    // 3. Labeled phone patterns (Phone: +xxx, Tel: xxx, etc.)
-    if (!b.phone) {
-      const labeledPh = html.match(/(?:phone|tel|telephone|mobile|cell|fax|calls?|whatsapp|viber|contact)\s*[:;=\s"'>]*([+\d][\d\s\-\.()]{7,18})/i);
-      if (labeledPh && labeledPh[1].replace(/[^\d]/g, '').length >= 8 && plausiblePhone(labeledPh[1])) b.phone = labeledPh[1].trim();
-    }
-    // 4. General phone regex (fallback). Unlabeled text is noisy: require a
-    // leading '+' so floats/coordinates (2.3333…), IDs and fragments don't
-    // match. Labeled/tel: paths above stay permissive for local formats.
-    if (!b.phone) {
-      const phM = html.match(/(?:\+?\d[\d\s\-\.\(\)]{7,18})/g);
-      if (phM) {
-        for (const p of phM) {
-          if (!p.includes('+')) continue;
-          const digits = p.replace(/[^\d+]/g, '');
-          if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(p) && !JUNK.test(p)) { b.phone = p.trim(); break; }
-        }
-      }
-    }
-  }
-
-  // Email: structured extraction with verification
-  // Strategy 1: Look for contact info in structured HTML (most reliable)
-  if (!b.email) {
-    // Contact section: look for labeled email near "contact" heading
-    const contactSection = html.match(/<(?:div|section|footer|aside)[^>]*class="[^"]*contact[^"]*"[^>]*>([\s\S]*?)<\/(?:div|section|footer|aside)/i);
-    if (contactSection) {
-      const emails = contactSection[1].match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
-      if (emails) {
-        for (const e of emails) {
-          const clean = e.replace(/[\s>);]+$/, '');
-          if (!JUNK.test(clean) && !EMAIL_FILE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
-        }
-      }
-    }
-  }
-
-  // Email: mailto, text, Cloudflare decode, &#64; encode, JSON-LD
-  if (!b.email) {
-    // 1. mailto: links (most reliable)
-    const mailM = html.match(/href="mailto:([^"\?\s]+)/i);
-    if (mailM && !JUNK.test(mailM[1]) && !EMAIL_FILE.test(mailM[1])) b.email = mailM[1].trim();
-    // 2. Labeled email patterns (Email: xxx@yyy.com)
-    if (!b.email) {
-      const labelM = html.match(/(?:email|e-mail|mail|contact)\s*[:;=\s"'>]*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
-      if (labelM && !JUNK.test(labelM[1]) && !EMAIL_FILE.test(labelM[1])) b.email = labelM[1];
-    }
-    // 3. JSON-LD structured data
-    if (!b.email) {
-      const jsonLdEmails = html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi);
-      for (const m of jsonLdEmails) {
-        try {
-          const data = JSON.parse(m[1]);
-          const entities = Array.isArray(data) ? data : [data];
-          for (const e of entities) {
-            if (e.email && !JUNK.test(e.email) && !EMAIL_FILE.test(e.email)) { b.email = e.email; break; }
-          }
-        } catch {}
-        if (b.email) break;
-      }
-    }
-    // 4. General email regex (fallback)
-    if (!b.email) {
-      const emails = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
-      if (emails) {
-        for (const e of emails) {
-          const clean = e.replace(/[\s>);]+$/, '');
-          if (!JUNK.test(clean) && !EMAIL_FILE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
-        }
-      }
-    }
-    // 5. Cloudflare encoded emails
-    if (!b.email) {
-      const cfM = html.match(/data-cfemail="([a-f0-9]+)"/i);
-      if (cfM) {
-        try {
-          const bytes = cfM[1].match(/.{2}/g)!.map(h => parseInt(h, 16));
-          const key = bytes[0];
-          const decoded = bytes.slice(1).map(x => x ^ key).map(x => String.fromCharCode(x)).join('');
-          if (decoded.includes('@') && !JUNK.test(decoded)) b.email = decoded;
-        } catch {}
-      }
-    }
-    // 6. HTML entity encoded (@)
-    if (!b.email) {
-      const entM = html.match(/([a-zA-Z0-9._%+-]+)&#64;([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
-      if (entM && !JUNK.test(entM[0])) b.email = entM[1] + '@' + entM[2];
-    }
-    // 7. JavaScript string literals
-    if (!b.email) {
-      const jsEmailM = html.match(/['"]([\w][\w._%+-]*@[\w.-]+\.[a-zA-Z]{2,})['"]/);
-      if (jsEmailM && !JUNK.test(jsEmailM[1]) && !EMAIL_FILE.test(jsEmailM[1]) && jsEmailM[1].length > 6) b.email = jsEmailM[1];
-    }
-    // 8. data-email attributes
-    if (!b.email) {
-      const dataEmailM = html.match(/data-email\s*=\s*["']([^"']+@[^"']+)/i);
-      if (dataEmailM && !JUNK.test(dataEmailM[1]) && !EMAIL_FILE.test(dataEmailM[1])) b.email = dataEmailM[1];
-    }
-  }
-
-  // Website: extract from links. Self-contained denylist (this variant must
-  // not depend on the nested DIRECTORY_SITES/_EXCLUDE helpers).
-  if (!b.website) {
-    const links = html.matchAll(/href="([^"]+)"/g);
-    const DENY = /yelp\.com|tripadvisor|foursquare|booking\.com|expedia|yellowpages|justdial|zomato|opentable|flickr|pinterest\.com|tumblr|reddit\.com|quora|wikipedia\.org|youtube\.com|tiktok\.com|linkedin\.com|facebook\.com|instagram\.com|twitter\.com|x\.com|snapchat|threads|medium\.com|substack|archive\.org|amazon\.|ebay\.|aliexpress|2gis\.|yandex\.|uber\.com|doordash|grubhub|glassdoor|indeed\.com|thumbtack|bbb\.org|trustpilot|google\.|gstatic|apple\.com|microsoft\.com/i;
-    for (const link of links) {
-      let url = link[1];
-      const uddg = url.match(/uddg=([^&]+)/);
-      if (uddg) url = decodeURIComponent(uddg[1]);
-      if (!url.startsWith('http')) continue;
-      let host = '';
-      try { host = new URL(url).hostname.replace(/^www\./, ''); } catch { continue; }
-      if (DENY.test(host)) continue;
-      if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) continue;
-      if (!isLikelyBusinessWebsite(url, b.name)) continue;
-      b.website = url; break;
-    }
-  }
-
-  // Facebook
-  if (!b.facebook) {
-    const fbM = html.match(/facebook\.com\/([a-zA-Z0-9._]+)/i);
-    if (fbM && !fbM[0].includes('login') && !fbM[0].includes('sharer') && !fbM[0].includes('dialog')) {
-      b.facebook = 'https://facebook.com/' + fbM[1].replace(/\/$/, '');
-    }
-  }
-
-  // Instagram
-  if (!b.instagram) {
-    const igM = html.match(/instagram\.com\/([a-zA-Z0-9._]+)/i);
-    if (igM && !igM[0].includes('accounts') && !igM[0].includes('explore')) {
-      b.instagram = 'https://instagram.com/' + igM[1].replace(/\/$/, '');
-    }
-  }
-
-  // Twitter/X
-  if (!b.twitter) {
-    const twM = html.match(/(?:twitter|x)\.com\/([a-zA-Z0-9._]+)/i);
-    if (twM && !twM[0].includes('login') && !twM[0].includes('intent') && !twM[0].includes('share')) {
-      b.twitter = 'https://twitter.com/' + twM[1].replace(/\/$/, '');
-    }
-  }
-
-  // Pinterest
-  if (!b.pinterest) {
-    const pinM = html.match(/pinterest\.com\/([a-zA-Z0-9._]+)/i);
-    if (pinM && !pinM[0].includes('login')) {
-      b.pinterest = 'https://pinterest.com/' + pinM[1].replace(/\/$/, '');
-    }
-  }
-
-  // Rating from meta/structured data
-  if (!b.rating) {
-    const ratingM = html.match(/(?:ratingValue|rating)["\s:=]*(?:content)?["\s:=]*(\d\.\d)/i)
-      || html.match(/(\d\.\d)\s*(?:out of|\/)\s*5/i);
-    if (ratingM) {
-      const val = parseFloat(ratingM[1]);
-      if (val >= 1 && val <= 5) b.rating = val;
-    }
-  }
-  // Review count
-  if (!b.reviewCount) {
-    const revM = html.match(/(?:reviewCount|ratingCount)["\s:=]+(\d+)/i)
-      || html.match(/(\d[\d,]*)\s*reviews?/i);
-    if (revM) {
-      const val = parseInt(revM[1].replace(/,/g, ''));
-      if (val > 0 && val < 100000) b.reviewCount = val;
-    }
-  }
-  const after = `${b.phone}|${b.email}|${b.website}|${b.facebook}|${b.instagram}|${b.twitter}|${b.pinterest}|${b.rating ?? ''}|${b.reviewCount ?? ''}`;
-  return before !== after;
+  const before = snap(b);
+  extractFromHtmlModule(html, b);
+  return snap(b) !== before;
 }
+
+// (legacy duplicate of extractFromHtml removed in v6.9.1 — single implementation
+// lives in extractFromHtmlModule below; wrapper `extractFromHtml` delegates to it.)
 
 // Try common email patterns by fetching the contact page
 async function tryCommonEmailPatterns(b: Business): Promise<void> {
@@ -3362,6 +3382,21 @@ export async function runDiscoveryPhases(
     const scoreByCat = new Map(opportunities.map(o => [o.category, o.score]));
     facts.categories.forEach(c => { c.score = scoreByCat.get(c.category) ?? 0; });
     const analysis = await getSmartAIAnalysis(facts, opportunities, { signal: abortSignal });
+    // ── AI sanity-check pass (v6.9.1): verify the result before final. ──
+    // Deterministic per-capita bands flag implausible counts; when a model
+    // is available it reviews the data warnings too. Flagged categories get
+    // a visible warning insight so absurd numbers can't pass silently.
+    const sanity = sanityCheckOpportunities(opportunities, population);
+    analysis.sanity = sanity;
+    const absurd = sanity.filter(s => s.verdict === 'absurd');
+    if (absurd.length > 0) {
+      analysis.insights = [{
+        title: `⚠ Data warning: ${absurd.length} category count${absurd.length > 1 ? 's' : ''} failed the plausibility check`,
+        detail: absurd.slice(0, 3).map(s => s.category).join(', ') + (absurd.length > 3 ? ` +${absurd.length - 3} more` : '') + ' — scan coverage looks incomplete there. See flagged rows in the table before acting on gap numbers.',
+        severity: 'medium',
+        categories: absurd.slice(0, 4).map(s => s.category),
+      }, ...analysis.insights];
+    }
     aiAnalysis = analysis;
     aiInsights = analysis.insights.map(i => `**${i.title}** — ${i.detail}`).join('\n\n');
     _dp.ai = 'done';
@@ -3622,6 +3657,17 @@ export interface AIAnalysis {
   risks: string[];
   actions: AIAction[];
   isAI: boolean;           // false => deterministic fallback was used
+  // v6.9.1 sanity-check pass: per-category plausibility verdicts that flag
+  // absurd data (e.g. "1 printing shop in a 1.1M city") before final results.
+  sanity?: SanityCheck[];
+}
+
+// Result of one category's plausibility check. 'absurd' = the number almost
+// certainly reflects incomplete scan coverage, not the real market.
+export interface SanityCheck {
+  category: string;
+  verdict: 'plausible' | 'absurd' | 'uncertain';
+  reason: string;
 }
 
 // Statistical pre-computation fed to the LLM as compact facts. Detecting
@@ -3677,12 +3723,9 @@ export function computeMarketFacts(
   const cityMedian = per10kValues.length > 0
     ? per10kValues[Math.floor(per10kValues.length / 2)]
     : 5;
-  const BASELINES: Record<string, number> = {
-    cafe: 4, restaurant: 5, bar: 2, pub: 1.5, fast_food: 3,
-    hotel: 1, gym: 1.5, beauty_salon: 2, hair_salon: 2,
-    pharmacy: 1.5, bank: 1, supermarket: 1.5, clothing: 3,
-    electronics: 2, bakery: 1.5, cinema: 0.3,
-  };
+  // v6.9: shared baseline table — computeOpportunities() uses the same one,
+  // so facts and opportunity scores can never diverge again.
+  const BASELINES = CATEGORY_BASELINES;
 
   const cats: MarketFacts['categories'] = [];
   const saturationCluster: string[] = [];
@@ -4031,6 +4074,229 @@ function deterministicAIAnalysis(
   return { model: 'deterministic', insights, patterns, risks, actions, isAI: false };
 }
 
+// ─── Sanity check: flag implausible category counts before final results ──
+// The user asked for an AI pass that "checks results before final results to
+// exclude such absurd data". Two layers:
+//   Layer 1 (deterministic, always runs): per-capita plausibility bands per
+//   category — e.g. a 1.1M city cannot plausibly have 1 printing shop.
+//   Layer 2 (AI, when a key is configured): an LLM double-checks the flagged
+//   categories and can also flag ones the bands missed.
+export function sanityCheckOpportunities(
+  opportunities: OpportunityResult[],
+  population: number,
+): SanityCheck[] {
+  const out: SanityCheck[] = [];
+  // Per-capita sanity bands (per 10k residents) per category.
+  // min: below this, the count is suspicious for a real market.
+  // max: above this, the count is suspiciously high (likely mis-categorized).
+  const BANDS: Record<string, { min: number; max: number }> = {
+    cafe: { min: 0.5, max: 40 }, restaurant: { min: 0.5, max: 40 },
+    fast_food: { min: 0.2, max: 25 }, bar: { min: 0.1, max: 20 },
+    convenience: { min: 1, max: 50 }, supermarket: { min: 0.5, max: 12 },
+    bakery: { min: 0.3, max: 15 }, pharmacy: { min: 0.4, max: 12 },
+    bank: { min: 0.4, max: 12 }, hotel: { min: 0.3, max: 25 },
+    beauty_salon: { min: 0.5, max: 30 }, clothing: { min: 0.5, max: 35 },
+    electronics: { min: 0.2, max: 15 }, furniture: { min: 0.1, max: 10 },
+    hardware: { min: 0.1, max: 10 }, car_repair: { min: 0.3, max: 15 },
+    gym: { min: 0.3, max: 12 }, school: { min: 0.8, max: 20 },
+    clinic: { min: 0.5, max: 15 }, dentist: { min: 0.3, max: 10 },
+    hair_salon: { min: 0.3, max: 20 }, software: { min: 0.5, max: 80 },
+    lawyer: { min: 0.2, max: 25 }, accountant: { min: 0.2, max: 20 },
+    real_estate: { min: 0.2, max: 20 }, travel_agency: { min: 0.1, max: 8 },
+    printing: { min: 0.15, max: 8 }, cleaning: { min: 0.05, max: 8 },
+    it_consulting: { min: 0.2, max: 60 }, digital_marketing: { min: 0.1, max: 30 },
+    courier: { min: 0.05, max: 8 }, coworking: { min: 0.05, max: 5 },
+    nail_salon: { min: 0.1, max: 15 }, spa: { min: 0.05, max: 10 },
+    dance: { min: 0.05, max: 8 }, yoga: { min: 0.05, max: 8 },
+    music_school: { min: 0.05, max: 8 }, art: { min: 0.1, max: 30 },
+    wedding: { min: 0.02, max: 5 }, veterinary: { min: 0.1, max: 6 },
+    insurance: { min: 0.1, max: 10 }, post_office: { min: 0.05, max: 3 },
+    library: { min: 0.02, max: 3 }, marketplace: { min: 0.02, max: 6 },
+    fuel: { min: 0.2, max: 8 }, night_club: { min: 0.05, max: 8 },
+    cinema: { min: 0.02, max: 4 }, car_wash: { min: 0.1, max: 8 },
+    car_rental: { min: 0.05, max: 6 }, laundry: { min: 0.05, max: 8 },
+    butcher: { min: 0.05, max: 8 }, florist: { min: 0.1, max: 8 },
+    optician: { min: 0.05, max: 6 }, jewelry: { min: 0.05, max: 8 },
+    books: { min: 0.05, max: 6 }, sports: { min: 0.05, max: 10 },
+    tattoo: { min: 0.02, max: 6 }, grocery: { min: 0.05, max: 15 },
+    ice_cream: { min: 0.02, max: 10 }, bookstore: { min: 0.02, max: 6 },
+    web_agency: { min: 0.05, max: 20 }, market: { min: 0.1, max: 30 },
+    pet_groomer: { min: 0.1, max: 20 }, hospital: { min: 0.01, max: 2 },
+  };
+  if (population <= 0) return out; // no population → nothing to check against
+  for (const opp of opportunities) {
+    const per10k = (opp.existing / population) * 10000;
+    const band = BANDS[opp.category];
+    if (!band) continue;
+    if (per10k < band.min) {
+      out.push({
+        category: opp.category,
+        verdict: 'absurd',
+        reason: `${opp.existing} ${opp.categoryLabel} in a city of ${population.toLocaleString()} (${per10k.toFixed(2)}/10k) is implausibly low — the scan almost certainly missed most of them. Treat this number as incomplete coverage, not as a real market gap.`,
+      });
+    } else if (per10k > band.max) {
+      out.push({
+        category: opp.category,
+        verdict: 'absurd',
+        reason: `${opp.existing} ${opp.categoryLabel} (${per10k.toFixed(1)}/10k) is implausibly high — likely mis-categorized or double-counted entries. Verify a sample before trusting this count.`,
+      });
+    }
+  }
+  return out;
+}
+
+// ─── Single-category AI analysis (used by the "Analyze Industry" flow) ───
+// Produces the same structured AIAnalysis shape as the full-discovery path,
+// but grounded in this one category's scan + demand data.
+export async function getSmartCategoryAnalysis(
+  category: string,
+  cityName: string,
+  countryName: string,
+  population: number,
+  bizs: Business[],
+  demand: DemandSignal | undefined,
+): Promise<AIAnalysis> {
+  const label = getCategoryLabel(category);
+  const withContact = {
+    phones: bizs.filter(b => b.phone).length,
+    emails: bizs.filter(b => b.email).length,
+    websites: bizs.filter(b => b.website).length,
+    socials: bizs.filter(b => b.facebook || b.instagram || b.linkedin || b.youtube || b.tiktok || b.twitter || b.pinterest).length,
+  };
+  const contactsTxt = `phones=${withContact.phones}, emails=${withContact.emails}, websites=${withContact.websites}, socials=${withContact.socials}`;
+  const sample = bizs.slice(0, 25).map(b =>
+    `- ${b.name}${b.brand ? ` (${b.brand})` : ''}: ${b.address || 'no address'}${b.website ? ' · site' : ''}${b.phone ? ' · phone' : ''}${b.email ? ' · email' : ''}`
+  ).join('\n');
+
+  const catFacts = `CATEGORY: ${label} (${category})
+CITY: ${cityName}, ${countryName}
+POPULATION: ${population > 0 ? population.toLocaleString() : 'unknown'}
+EXISTING BUSINESSES FOUND: ${bizs.length}
+CONTACT COVERAGE: ${contactsTxt}
+DEMAND SIGNALS: wikipedia=${demand?.wikipedia ?? 'n/a'}/100, reddit=${demand?.reddit ?? 'n/a'}/100, webSearch=${demand?.webSearch ?? 'n/a'}/100 (score ${demand?.score ?? 'n/a'}/100, confidence ${demand?.confidence ?? 'n/a'}%)${demand?.explanation ? `
+SIGNAL NOTES: ${demand.explanation}` : ''}
+SAMPLE BUSINESSES (up to 25):
+${sample || '- (none found)'}`;
+
+  const sys = `You are a senior market analyst specializing in blue-ocean opportunity discovery for small businesses.
+
+You analyze real OpenStreetMap scan data about ONE business category in ONE city, plus measured demand signals (Wikipedia pageviews, Reddit mentions, web search density).
+
+Your job:
+1. Assess COMPETITION (how crowded is this category here, chain vs independent mix if visible).
+2. Assess CONTACT GAPS (businesses missing phones/emails/websites — a digital-services opening).
+3. Assess DEMAND (what the measured signals say about real-world interest).
+4. Give concrete NEXT ACTIONS for someone considering entering this market.
+
+Rules:
+- Use ONLY the numbers given. NEVER invent statistics.
+- When population is unknown, avoid per-capita claims.
+- Be specific: prefer "only 34% of existing pharmacies list a phone" style over generic advice.
+- Keep every string under 200 chars. Be concise but analytical.`;
+
+  const user = `${catFacts}
+
+TASK: Analyze this single-category market and return ONLY a valid JSON object (no markdown, no explanation) with this exact structure:
+{
+  "insights": [
+    {"title": "string", "detail": "string", "severity": "high" | "medium" | "low"}
+  ],
+  "patterns": [
+    {"name": "string", "description": "string"}
+  ],
+  "risks": ["string", ...],
+  "actions": [
+    {"action": "string", "rationale": "string", "timeframe": "immediate" | "1-3 months" | "6-12 months"}
+  ]
+}
+
+Generate 3-5 insights, 2-3 patterns, 1-3 risks, 2-4 actions. Every claim must trace back to the numbers above.`;
+
+  // Cache keyed on the category+city+count+demand — stable inputs → stable output.
+  const ck = 'aicat_' + cacheKey(
+    hashStr(category + '|' + cityName + '|' + countryName), bizs.length,
+    hashStr(JSON.stringify(withContact) + (demand ? String(demand.score) : '')),
+  );
+  const cached = cacheGet<AIAnalysis>(ck, 12 * 60 * 60 * 1000);
+  if (cached) return cached;
+
+  try {
+    const raw = await llmCall(sys, user, {
+      maxTokens: 2500,
+      temperature: 0.4,
+      validate: (text) => {
+        const p = extractJson(text);
+        return !!p && Array.isArray(p.insights) && p.insights.length > 0;
+      },
+    });
+    const parsed = extractJson(raw);
+    if (!parsed) throw new Error('no-json');
+    const insights: AIInsight[] = (parsed.insights || [])
+      .filter((x: any) => x && typeof x.title === 'string' && typeof x.detail === 'string')
+      .slice(0, 5)
+      .map((x: any) => ({
+        title: String(x.title).slice(0, 120),
+        detail: String(x.detail).slice(0, 400),
+        severity: (['high', 'medium', 'low'] as const).includes(x.severity) ? x.severity : 'medium',
+      }));
+    const patterns: AIPattern[] = (parsed.patterns || [])
+      .filter((x: any) => x && typeof x.name === 'string' && typeof x.description === 'string')
+      .slice(0, 3)
+      .map((x: any) => ({ name: String(x.name).slice(0, 120), description: String(x.description).slice(0, 400) }));
+    const risks: string[] = (parsed.risks || [])
+      .filter((x: any) => typeof x === 'string')
+      .slice(0, 3)
+      .map((x: any) => String(x).slice(0, 300));
+    const actions: AIAction[] = (parsed.actions || [])
+      .filter((x: any) => x && typeof x.action === 'string' && typeof x.rationale === 'string')
+      .slice(0, 4)
+      .map((x: any) => ({
+        action: String(x.action).slice(0, 200),
+        rationale: String(x.rationale).slice(0, 400),
+        timeframe: (['immediate', '1-3 months', '6-12 months'] as const).includes(x.timeframe) ? x.timeframe : undefined,
+      }));
+    if (insights.length === 0 && patterns.length === 0) throw new Error('empty-analysis');
+    const result: AIAnalysis = { model: 'openrouter', insights, patterns, risks, actions, isAI: true };
+    cacheSet(ck, result);
+    return result;
+  } catch {
+    // Deterministic fallback — same real data, rules-based analysis.
+    const insights: AIInsight[] = [];
+    const patterns: AIPattern[] = [];
+    const risks: string[] = [];
+    const actions: AIAction[] = [];
+    if (population > 0) {
+      const per10k = (bizs.length / population) * 10000;
+      const bl = CATEGORY_BASELINES[category];
+      insights.push({
+        title: `${label} density: ${per10k.toFixed(1)} per 10k residents`,
+        detail: bl != null
+          ? `Typical city baseline is ${bl}/10k — ${per10k < bl ? `below baseline, room for ${Math.max(0, Math.round((bl * population) / 10000) - bizs.length)} more` : 'at or above baseline, market is saturated'}.`
+          : 'No cross-city baseline for this category — interpret density against similar cities.',
+        severity: per10k < (bl ?? per10k) * 0.6 ? 'medium' : 'low',
+      });
+    }
+    if (bizs.length > 0 && withContact.emails / bizs.length < 0.3) {
+      insights.push({
+        title: 'Low digital presence among competitors',
+        detail: `Only ${withContact.emails}/${bizs.length} have a discoverable email and ${withContact.websites} have websites — digital-first marketing would face little competition here.`,
+        severity: 'medium',
+      });
+    }
+    if (bizs.length === 0) {
+      insights.push({ title: `No ${label} found in the scan`, detail: 'Either a genuine blue-ocean or OSM coverage gap — verify with local directories before investing.', severity: 'medium' });
+    }
+    risks.push('OpenStreetMap coverage is volunteered data — informal or newly opened businesses may be missing.');
+    if (population <= 0) risks.push('Population unknown — per-capita estimates are unavailable.');
+    actions.push({
+      action: bizs.length > 0 ? `Interview 3-5 ${label.toLowerCase()} operators` : `Field-verify ${label.toLowerCase()} demand`,
+      rationale: 'Ground-truth the scan data before committing capital.',
+      timeframe: 'immediate',
+    });
+    return { model: 'deterministic', insights, patterns, risks, actions, isAI: false };
+  }
+}
+
 
 export function getGoogleMapsUrl(b: Business): string {
   if (b.name) {
@@ -4137,6 +4403,35 @@ export async function getDemandSignals(categoryLabel: string, cityName: string):
 
 // ─── Opportunity Scoring ───────────────────────────────────────────
 
+// ─── Opportunity scoring ───────────────────────────────────────────────
+// Shared baseline table (per 10k residents) — v6.9: expanded from 17 to 48
+// categories with realistic per-capita densities. Used by BOTH
+// computeOpportunities() and computeMarketFacts() so scores and the AI
+// prompt always agree. Categories not listed fall back to the live city
+// median (unchanged behavior). Only steers ranking — never a hard cutoff.
+export const CATEGORY_BASELINES: Record<string, number> = {
+  // food & drink
+  cafe: 4, restaurant: 5, bar: 2, pub: 1.5, fast_food: 3, ice_cream: 0.8,
+  bakery: 1.5, butcher: 0.6, supermarket: 1.5, grocery: 0.8, convenience: 3,
+  marketplace: 0.5, market: 0.5, department_store: 0.4,
+  // health
+  pharmacy: 1.5, hospital: 0.05, clinic: 1.2, dentist: 0.8, veterinary: 0.4,
+  // retail
+  clothing: 3, electronics: 1.5, furniture: 0.8, hardware: 0.8, books: 0.5,
+  jewelry: 0.5, optician: 0.4, florist: 0.5, sports: 0.6, bicycle: 0.3,
+  beauty_salon: 2, hair_salon: 2, nail_salon: 0.8, tattoo: 0.3, laundry: 0.5,
+  pet_groomer: 0.3, spa: 0.6,
+  // services
+  bank: 1, fuel: 0.5, hotel: 1, hostel: 0.4, gym: 1.5, cinema: 0.3,
+  night_club: 0.4, car_repair: 1.2, car_wash: 0.5, car_rental: 0.2,
+  school: 1.5, library: 0.15, post_office: 0.3, coworking: 0.3,
+  // offices & b2b
+  software: 1.5, it_consulting: 0.8, web_agency: 0.4, digital_marketing: 0.6,
+  lawyer: 0.8, accountant: 0.8, real_estate: 0.8, insurance: 0.5,
+  travel_agency: 0.5, printing: 0.5, cleaning: 0.4, courier: 0.3,
+  music_school: 0.3, dance: 0.3, yoga: 0.25, art: 0.4,
+};
+
 export interface OpportunityResult {
   category: string;
   categoryLabel: string;
@@ -4173,20 +4468,16 @@ export function computeOpportunities(
     ? per10kValues[Math.floor(per10kValues.length / 2)]
     : 5;
 
-  // Category baselines (per 10k residents) — heuristic starting points,
-  // replaced by the live city median for any category not listed.
-  const GLOBAL_BASELINES: Record<string, number> = {
-    cafe: 4, restaurant: 5, bar: 2, pub: 1.5, fast_food: 3,
-    hotel: 1, gym: 1.5, beauty_salon: 2, hair_salon: 2,
-    pharmacy: 1.5, bank: 1, supermarket: 1.5, clothing: 3,
-    electronics: 2, bakery: 1.5, cinema: 0.3,
-  };
+  // Baselines: shared module-level CATEGORY_BASELINES (v6.9) — identical
+  // table is used by computeMarketFacts(), so the AI prompt and the
+  // opportunity scores can never disagree again.
+  const baseline = (cat: string) => CATEGORY_BASELINES[cat] || median;
 
   for (const [cat, bizs] of businesses) {
     const existing = bizs.length;
     const per10k = (existing / Math.max(pop || 1, 1)) * 10000;
-    const baseline = GLOBAL_BASELINES[cat] || median;
-    const expected = pop ? Math.round((baseline * pop) / 10000) : null;
+    const bl = baseline(cat);
+    const expected = pop ? Math.round((bl * pop) / 10000) : null;
     const gap = expected != null ? Math.max(0, expected - existing) : null;
     const gapPct = expected ? (gap as number) / expected : 0;
 
@@ -4262,9 +4553,25 @@ function extractFromHtmlModule(html: string, b: Business): void {
 
   // Phone: tel: links, then text regex
   if (!b.phone) {
-    // 1. tel: links (most reliable)
-    const telM = html.match(/href="tel:([^"]+)"/);
+    // 1. tel: links (most reliable — tolerate single quotes & spacing)
+    const telM = html.match(/href\s*=\s*["']tel:([^"']+)["']/i);
     if (telM) b.phone = (() => { try { return decodeURIComponent(telM[1]).trim(); } catch { return telM[1].trim(); } })();
+    // 1b. WhatsApp click-to-chat links — wa.me/995… or api.whatsapp.com/send?phone=…
+    if (!b.phone) {
+      const waM = html.match(/(?:wa\.me\/(\+?\d{7,15})|whatsapp\.com\/send[^"']*\?phone=(\+?\d{7,15}))/i);
+      const raw = waM ? (waM[1] || waM[2]) : '';
+      if (raw) b.phone = raw.startsWith('+') ? raw : `+${raw}`;
+    }
+    // 1c. Viber deep links — viber://chat?number=%2B995…
+    if (!b.phone) {
+      const vbM = html.match(/viber:\/\/chat\?number=%2B(\d{7,15})/i);
+      if (vbM) b.phone = `+${vbM[1]}`;
+    }
+    // 1d. JSON-LD structured data: "telephone": "+995 …"
+    if (!b.phone) {
+      const ldPhoneM = html.match(/"telephone"\s*:\s*"(\+?[\d\s\-\(\)]{7,20})"/i);
+      if (ldPhoneM && plausiblePhone(ldPhoneM[1])) b.phone = ldPhoneM[1].trim();
+    }
     // 2. Country-specific formats
     if (!b.phone) {
       const geoM = html.match(/\+995\s?\d{3}\s?\d{2}\s?\d{2}\s?\d{2}/);
@@ -4379,13 +4686,21 @@ function extractFromHtmlModule(html: string, b: Business): void {
       const dataEmailM = html.match(/data-email\s*=\s*["']([^"']+@[^"']+)/i);
       if (dataEmailM && !JUNK.test(dataEmailM[1]) && !EMAIL_FILE.test(dataEmailM[1])) b.email = dataEmailM[1];
     }
+    // 9. Obfuscated forms — "name [at] domain [dot] com", "name(at)domain(dot)com"
+    if (!b.email) {
+      const obfM = html.match(/([\w][\w._%+-]{1,40})\s*(?:\(|\[|\{)?\s*(?:at|@|&#64;)\s*(?:\)|\]|\})?\s*([\w-]{2,40})\s*(?:\(|\[|\{)?\s*(?:dot|\.|&#46;)\s*(?:\)|\]|\})?\s*([a-zA-Z]{2,12})\b/i);
+      if (obfM) {
+        const cand = `${obfM[1]}@${obfM[2]}.${obfM[3]}`;
+        if (!JUNK.test(cand) && !EMAIL_FILE.test(cand)) b.email = cand.toLowerCase();
+      }
+    }
   }
 
   // Website: extract from links. Self-contained denylist (this variant must
   // not depend on the nested DIRECTORY_SITES/_EXCLUDE helpers).
+  const WEBSITE_DENY = /yelp\.com|tripadvisor|foursquare|booking\.com|expedia|yellowpages|justdial|zomato|opentable|flickr|pinterest\.com|tumblr|reddit\.com|quora|wikipedia\.org|youtube\.com|tiktok\.com|linkedin\.com|facebook\.com|instagram\.com|twitter\.com|x\.com|snapchat|threads|medium\.com|substack|archive\.org|amazon\.|ebay\.|aliexpress|2gis\.|yandex\.|uber\.com|doordash|grubhub|glassdoor|indeed\.com|thumbtack|bbb\.org|trustpilot|google\.|gstatic|apple\.com|microsoft\.com/i;
   if (!b.website) {
     const links = html.matchAll(/href="([^"]+)"/g);
-    const DENY = /yelp\.com|tripadvisor|foursquare|booking\.com|expedia|yellowpages|justdial|zomato|opentable|flickr|pinterest\.com|tumblr|reddit\.com|quora|wikipedia\.org|youtube\.com|tiktok\.com|linkedin\.com|facebook\.com|instagram\.com|twitter\.com|x\.com|snapchat|threads|medium\.com|substack|archive\.org|amazon\.|ebay\.|aliexpress|2gis\.|yandex\.|uber\.com|doordash|grubhub|glassdoor|indeed\.com|thumbtack|bbb\.org|trustpilot|google\.|gstatic|apple\.com|microsoft\.com/i;
     for (const link of links) {
       let url = link[1];
       const uddg = url.match(/uddg=([^&]+)/);
@@ -4393,10 +4708,24 @@ function extractFromHtmlModule(html: string, b: Business): void {
       if (!url.startsWith('http')) continue;
       let host = '';
       try { host = new URL(url).hostname.replace(/^www\./, ''); } catch { continue; }
-      if (DENY.test(host)) continue;
+      if (WEBSITE_DENY.test(host)) continue;
       if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) continue;
       if (!isLikelyBusinessWebsite(url, b.name)) continue;
       b.website = url; break;
+    }
+  }
+  // Website from meta signals — canonical link & og:url (page's own declared
+  // identity, higher-trust than scraping arbitrary anchors; try when anchor
+  // scan came up empty).
+  if (!b.website) {
+    const canonicalM = html.match(/<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i)
+      || html.match(/<meta[^>]+property=["']og:url["'][^>]+content=["']([^"']+)["']/i);
+    if (canonicalM) {
+      let url = canonicalM[1];
+      if (url.startsWith('//')) url = 'https:' + url;
+      if (/^https?:\/\//i.test(url) && !WEBSITE_DENY.test(url)) {
+        b.website = url;
+      }
     }
   }
 
@@ -4429,6 +4758,30 @@ function extractFromHtmlModule(html: string, b: Business): void {
     const pinM = html.match(/pinterest\.com\/([a-zA-Z0-9._]+)/i);
     if (pinM && !pinM[0].includes('login')) {
       b.pinterest = 'https://pinterest.com/' + pinM[1].replace(/\/$/, '');
+    }
+  }
+
+  // LinkedIn (company pages only — personal /in/ profiles are not the business)
+  if (!b.linkedin) {
+    const liM = html.match(/linkedin\.com\/company\/([a-zA-Z0-9._-]+)/i);
+    if (liM && !liM[0].includes('login') && !liM[0].includes('share')) {
+      b.linkedin = 'https://linkedin.com/company/' + liM[1].replace(/\/$/, '');
+    }
+  }
+
+  // YouTube — channel or @handle
+  if (!b.youtube) {
+    const ytM = html.match(/youtube\.com\/(?:channel\/([a-zA-Z0-9_-]+)|@([a-zA-Z0-9._-]+))/i);
+    if (ytM) b.youtube = ytM[1]
+      ? 'https://youtube.com/channel/' + ytM[1]
+      : 'https://youtube.com/@' + ytM[2];
+  }
+
+  // TikTok
+  if (!b.tiktok) {
+    const ttM = html.match(/tiktok\.com\/@([a-zA-Z0-9._-]+)/i);
+    if (ttM && !ttM[0].includes('discover')) {
+      b.tiktok = 'https://tiktok.com/@' + ttM[1].replace(/\/$/, '');
     }
   }
 
