@@ -15,7 +15,7 @@ export const COUNTRY_LANG: Record<string, string> = {
   BG: 'bg', GR: 'el', RS: 'sr', HR: 'hr', SI: 'sl', BA: 'bs',
   MK: 'mk', AL: 'sq', ME: 'sr', XK: 'sq', MD: 'ro', BY: 'be',
   EE: 'et', LV: 'lv', LT: 'lt', IL: 'he', SA: 'ar', AE: 'ar',
-  QA: 'ar', KW: 'ar', BH: 'bh', OM: 'ar', JO: 'ar', LB: 'ar',
+  QA: 'ar', KW: 'ar', BH: 'ar', OM: 'ar', JO: 'ar', LB: 'ar',
   IQ: 'ar', EG: 'ar', MA: 'ar', DZ: 'ar', TN: 'ar', LY: 'ar',
   IR: 'fa', AF: 'fa', PK: 'ur', IN: 'hi', BD: 'bn', LK: 'si',
   NP: 'ne', CN: 'zh', TW: 'zh', HK: 'zh', JP: 'ja', KR: 'ko',
@@ -23,7 +23,7 @@ export const COUNTRY_LANG: Record<string, string> = {
   TJ: 'tg', TH: 'th', VN: 'vi', KH: 'km', LA: 'lo', MM: 'my',
   MY: 'ms', SG: 'en', ID: 'id', PH: 'en', TL: 'pt',
   NG: 'en', GH: 'en', KE: 'en', TZ: 'sw', UG: 'en', ZA: 'en',
-  ET: 'am', MA2: 'ar',
+  ET: 'am',
 };
 
 /** ISO-2 → country-code top-level domain (for `site:.ge` style queries). */
@@ -156,4 +156,45 @@ export function categoryInNative(category: string, englishLabel: string): string
 export function countryTld(): string {
   if (!_scanCtx) return '';
   return COUNTRY_TLD[_scanCtx.countryCode] || '';
+}
+
+/**
+ * v6.9.16: native "contact / phone / email" search keywords for the scan's
+ * language. Local business sites write contact pages in the local language
+ * ("お問い合わせ", "联系", "تماس", "επικοινωνία"); English-only tails miss them.
+ * Returns English terms too — search engines treat extra terms loosely.
+ */
+const CONTACT_TERMS: Record<string, string> = {
+  en: 'contact phone email',
+  ka: 'კონტაქტი ტელეფონი',
+  hy: 'կապ հեռախոս',
+  az: 'əlaqə telefon',
+  ru: 'контакты телефон',
+  uk: 'контакти телефон',
+  tr: 'iletişim telefon',
+  de: 'kontakt telefon',
+  fr: 'contact téléphone',
+  es: 'contacto teléfono',
+  it: 'contatti telefono',
+  pt: 'contacto telefone',
+  pl: 'kontakt telefon',
+  nl: 'contact telefoon',
+  sv: 'kontakt telefon',
+  el: 'επικοινωνία τηλέφωνο',
+  ar: 'اتصال هاتف',
+  he: 'קשר טלפון',
+  fa: 'تماس تلفن',
+  hi: 'संपर्क फोन',
+  th: 'ติดต่อ โทร',
+  vi: 'liên hệ điện thoại',
+  id: 'kontak telepon',
+  ms: 'hubungi telefon',
+  ja: 'お問い合わせ 電話番号',
+  ko: '연락처 전화번호',
+  zh: '联系方式 电话',
+};
+
+export function contactTermsNative(): string {
+  if (!_scanCtx) return CONTACT_TERMS.en;
+  return CONTACT_TERMS[_scanCtx.lang] || CONTACT_TERMS.en;
 }

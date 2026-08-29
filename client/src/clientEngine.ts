@@ -13,7 +13,7 @@
 // libphonenumber-js (free, offline): parse/validate/normalize phone numbers
 import { parsePhoneNumberFromString, AsYouType } from 'libphonenumber-js';
 // Native-language scan context (country → language/ccTLD/category terms)
-import { setScanContext, getScanContext, buildScanContext, categoryInNative, countryTld, type ScanContext } from './lang';
+import { setScanContext, getScanContext, buildScanContext, categoryInNative, countryTld, contactTermsNative, type ScanContext } from './lang';
 export type { ScanContext };
 export { setScanContext, buildScanContext };
 
@@ -492,8 +492,10 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   if (t === 'caravan_site' || t === 'camp_site') return 'hostel';
 
   // ─── Leisure ───
+  // v6.9.16: track/stadium are public venues, not gyms — moved to the
+  // venues/null bucket below (they were inflating the gym count).
   if (l === 'fitness_centre' || l === 'sports_centre' || l === 'sports_hall' ||
-      l === 'swimming_pool' || l === 'track' || l === 'stadium') {
+      l === 'swimming_pool') {
     // Name-based split: yoga/pilates/dance studios before the generic 'gym' bucket
     const nm = nameOf();
     if (/(yoga|pilates)/.test(nm)) return 'yoga';
@@ -510,7 +512,8 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   if (l === 'horse_riding' || l === 'golf_course' || l === 'club' || l === 'padel' ||
       l === 'tennis' || l === 'ice_rink' || l === 'pitch' || l === 'playground' ||
       l === 'park' || l === 'garden' || l === 'dog_park' || l === 'track_outdoor' ||
-      l === 'pitch_outdoor' || l === 'common' || l === 'nature_reserve') return null; // venues/parks, not businesses
+      l === 'pitch_outdoor' || l === 'common' || l === 'nature_reserve' ||
+      l === 'track' || l === 'stadium') return null; // venues/parks, not businesses
 
   // ─── Office-based businesses (v6.9: the single biggest drop bucket was
   // office=company with 174 named instances in Tbilisi alone) ───
@@ -546,7 +549,9 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
     if (/(car.?wash|moyk[ae]|автомойк)/.test(nm)) return 'car_wash';
     if (/(nail|маникюр|педикюр)/.test(nm)) return 'nail_salon';
     if (/(yoga|pilates)/.test(nm)) return 'yoga';
-    if (/(soft|it|tech|digital|web|dev|data|ai|cloud|cyber|app)/.test(nm)) return 'software';
+    // v6.9.16: word-boundary 'it' — bare substring matched "Italian",
+    // "Capital", "Suite" etc. and misfiled them as software.
+    if (/(soft|\bit\b|tech|digital|web|dev|data|\bai\b|cloud|cyber|app)/.test(nm)) return 'software';
     if (/(consult|консалт)/.test(nm)) return 'it_consulting';
     if (/(market|advertis|reklam|agency|agenc|media|pr\b|brand|design|studio)/.test(nm)) return 'digital_marketing';
     if (/(construct|building|development)/.test(nm)) return 'hardware';
@@ -558,7 +563,10 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
     if (/(energ|oil|gas|mining)/.test(nm)) return 'fuel';
     if (/(hotel|hostel|motel)/.test(nm)) return 'hotel';
     if (/(import|export|trade|wholesale|supply|distribut)/.test(nm)) return 'market';
-    return 'software'; // generic private company → closest service bucket
+    return null; // v6.9.16: unmatched company names must NOT be filed as
+                 // software — that poisoned category counts. Drop instead;
+                 // tag-based classification above already handled the real
+                 // offices (law/estate/account have their own office=* tags).
   }
   if (o === 'architect' || o === 'engineer' || o === 'engineering' || o === 'surveyor' ||
       o === 'planner' || o === 'construction_company' || o === 'construction') return 'hardware';
@@ -846,6 +854,10 @@ function getEnglishCityName(name: string): string {
 // Pull significant Latin name tokens for hostname/path comparison. Handles
 // non-Latin names (Georgian/Armenian/Cyrillic/Chinese) via the shared
 // transliterators so e.g. "ლუის ყავის სახლი" still matches lui-coffee paths.
+// v6.9.16: mixed-script names ("Cafe ლუის", "Café東京") previously produced
+// ZERO tokens (the translit path was skipped because one Latin letter
+// existed, then non-ASCII was split away) — now CJK/Kana/Hangul runs are
+// kept as separate tokens alongside the Latin ones.
 function extractBizNameTokens(businessName: string): string[] {
   let name = businessName || '';
   if (!/[\u0041-\u005A\u0061-\u007A]/.test(name)) {
@@ -853,10 +865,12 @@ function extractBizNameTokens(businessName: string): string[] {
     if (en) name = en;
     else name = transliterateGeo(name);
   }
-  return name.toLowerCase().split(/[^a-z0-9]+/).filter(t =>
-    t.length >= 3 &&
-    !/^(cafe|café|coffee|restaurant|bar|pub|hotel|hostel|salon|shop|store|bakery|gym|fitness|club|spa|clinic|pharmacy|studio|the|and|of|la|le|de|da)$/i.test(t)
-  );
+  const stop = /^(cafe|café|coffee|restaurant|bar|pub|hotel|hostel|salon|shop|store|bakery|gym|fitness|club|spa|clinic|pharmacy|studio|the|and|of|la|le|de|da)$/i;
+  const latin = name.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length >= 3 && !stop.test(t));
+  // CJK/Kana/Hangul runs: keep each contiguous run as one token (hostnames
+  // rarely contain these, but page-title/text matching does).
+  const cjk = name.match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]{2,}/g) || [];
+  return [...latin, ...cjk.map(s => s.toLowerCase())];
 }
 
 /** OSM social values may be full URLs, 'www.', bare usernames or '@user'. */
@@ -2602,8 +2616,12 @@ async function probeDomains(b: Business): Promise<void> {
           const html = (await r.text()).toLowerCase();
           // Verify the page actually references the business (name, in any
           // of its written forms) before claiming it as the business's site.
+          // v6.9.16: keep ALL major scripts (CJK, Cyrillic, Greek, Arabic,
+          // Hebrew, Thai, Devanagari, Kana, Hangul) — Arabic/Hebrew/Korean
+          // names were stripped to empty tokens before, letting city-only
+          // matches claim wrong domains.
           const nameTokens = [nameEn, translit, b.name]
-            .map(n => (n || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff\u0400-\u04ff\u0370-\u03ff]+/g, ''))
+            .map(n => (n || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff\u0400-\u04ff\u0370-\u03ff\u0600-\u06ff\u0590-\u05ff\u0e00-\u0e7f\u0900-\u097f\u3040-\u30ff\uac00-\ud7af]+/g, ''))
             .filter(n => n.length >= 4);
           const nameMatch = nameTokens.some(tok => html.includes(tok.slice(0, 10)));
           const cityMatch = cityEn ? html.includes(cityEn.toLowerCase()) : true;
@@ -2788,7 +2806,9 @@ function buildSearchQuery(b: { name: string; address?: string; categoryLabel?: s
   // Native-language category term (e.g. 'კაფე') reaches local-only sites
   const nativeCat = categoryInNative(b.category || '', category);
   if (nativeCat && nativeCat !== category) parts.push(nativeCat);
-  parts.push('phone email website contact');
+  // v6.9.16: native contact terms (お問い合わせ/联系/تماس) instead of
+  // English-only tails — local-only sites label contact pages natively.
+  parts.push(contactTermsNative());
   return encodeURIComponent(parts.join(' '));
 }
 
@@ -2857,7 +2877,10 @@ function buildContactQuery(b: Business): string {
   }
   if (cityEn) parts.push(cityEn);
   // Use site: to search for contact pages specifically
-  parts.push('site:facebook.com OR site:instagram.com OR "contact us"');
+  // v6.9.16: native contact word replaces English-only "contact us"
+  parts.push('site:facebook.com OR site:instagram.com');
+  const nativeContact = contactTermsNative().split(' ')[0];
+  if (nativeContact) parts.push(`"${nativeContact}"`);
   return encodeURIComponent(parts.join(' '));
 }
 
@@ -2878,7 +2901,8 @@ function buildEmailQuery(b: Business): string {
     if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
   }
   if (cityEn) parts.push(cityEn);
-  parts.push('email address contact');
+  // v6.9.16: native email-contact terms
+  parts.push(contactTermsNative());
   return encodeURIComponent(parts.join(' '));
 }
 
@@ -2899,7 +2923,8 @@ function buildPhoneQuery(b: Business): string {
     if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
   }
   if (cityEn) parts.push(cityEn);
-  parts.push('phone number telephone call');
+  // v6.9.16: native phone-contact terms
+  parts.push(contactTermsNative());
   return encodeURIComponent(parts.join(' '));
 }
 // guessEmailsFromDomain removed
