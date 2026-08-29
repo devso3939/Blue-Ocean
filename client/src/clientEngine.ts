@@ -949,6 +949,13 @@ let _lastProxyFail = 0; // 30s cooldown instead of permanent block
 // v6.9.6: cors.sh consecutive-failure memory (3 fails → 5 min skip)
 let _corsshFails = 0;
 let _corsshLastFail = 0;
+// v6.9.9: failure memory for the Jina + allorigins proxy arms — same idea as
+// cors.sh: after 3 consecutive failures skip that arm for 5 minutes instead
+// of printing one uncatchable console error per proxied request.
+let _jinaFails = 0;
+let _jinaLastFail = 0;
+let _alloFails = 0;
+let _alloLastFail = 0;
 
 // v6.9.5: hosts known to SERVE CORS headers to browsers (public APIs).
 // These get the instant direct fetch; every other host goes through the
@@ -1017,6 +1024,20 @@ function markDirectAlive(u: string): void { _directDead.delete(hostKey(u)); }
 // later version-bump success, which let a dead Brave slip through the
 // gates between phases — this sticky counter doesn't reset mid-scan.
 let _braveFails = 0;
+// v6.9.9: surge guard. The per-business enrichment runs N businesses in
+// parallel, so N gates all pass BEFORE the first 429 lands — one rate-limit
+// episode used to print ~N console errors per wave. After any failure, new
+// Brave calls pause for 4s (in-flight ones can't be aborted), which caps
+// each episode at the initial in-flight count and serializes the failures
+// that follow.
+let _braveLastFail = 0;
+function braveOkToCall(): boolean {
+  return _braveFails < 3 && (_braveFails === 0 || Date.now() - _braveLastFail > 4000);
+}
+function braveNoteFail(kind: 'net' | 'quota' | 'challenge', detail: string): void {
+  _braveFails++; _netFails++; _braveLastFail = Date.now();
+  engineNoteFail('brave', 'Brave', kind, detail);
+}
 
 // v6.9.8: hard budget on doomed outbound requests. Every proxied request
 // that ends in a network-level failure (CORS-refused host, dead proxy,
@@ -1169,27 +1190,38 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   }
 
   // 4) Jina Reader (keyless, returns page text/markdown — good for contact
-  // extraction; works from real browser sessions)
-  try {
-    const r = await fetch('https://r.jina.ai/' + url, { headers, signal: AbortSignal.timeout(12000) });
-    if (r.ok) {
-      const text = await r.text();
-      if (text && text.length > 100) {
-        hostRecordSuccess(url);
-        return new Response(text, { status: 200, headers: { 'Content-Type': 'text/plain' } });
+  // extraction; works from real browser sessions). v6.9.9: failure memory —
+  // when Jina refuses (401/429) or times out repeatedly, skip it for 5 min
+  // instead of printing one console error per proxied request.
+  if (_jinaFails < 3 || Date.now() - _jinaLastFail > 300_000) {
+    try {
+      const r = await fetch('https://r.jina.ai/' + url, { headers, signal: AbortSignal.timeout(12000) });
+      if (r.ok) {
+        const text = await r.text();
+        if (text && text.length > 100) {
+          hostRecordSuccess(url);
+          _jinaFails = 0;
+          return new Response(text, { status: 200, headers: { 'Content-Type': 'text/plain' } });
+        }
       }
-    }
-  } catch {}
+      _jinaFails++; _jinaLastFail = Date.now();
+    } catch { _jinaFails++; _jinaLastFail = Date.now(); }
+  }
 
-  // 5) allorigins (demoted to last resort: 5xx/timeout failures observed 2026)
-  try {
-    const r = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(url), { headers, signal: AbortSignal.timeout(5000) });
-    if (r.ok) {
-      const json = await r.json();
-      hostRecordSuccess(url);
-      return new Response(json.contents || '', { status: 200, headers: { 'Content-Type': 'text/html' } });
-    }
-  } catch {}
+  // 5) allorigins (demoted to last resort: 5xx/timeout failures observed
+  // 2026). v6.9.9: same failure-memory pattern as cors.sh/Jina.
+  if (_alloFails < 3 || Date.now() - _alloLastFail > 300_000) {
+    try {
+      const r = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(url), { headers, signal: AbortSignal.timeout(5000) });
+      if (r.ok) {
+        const json = await r.json();
+        hostRecordSuccess(url);
+        _alloFails = 0;
+        return new Response(json.contents || '', { status: 200, headers: { 'Content-Type': 'text/html' } });
+      }
+      _alloFails++; _alloLastFail = Date.now();
+    } catch { _alloFails++; _alloLastFail = Date.now(); }
+  }
 
   // v6.9.5: whole chain failed. CORS refusal is host-wide and sticky, so
   // lock the direct arm off for this host for the session — later requests
@@ -2354,6 +2386,11 @@ async function searchDDGLite(query: string): Promise<{title: string; url: string
 // phone/website for NOTABLE businesses (chains, hotels, landmarks). Queries
 // are serialized (anonymous limit: 1 concurrent).
 let _wikidataQueue: Promise<void> = Promise.resolve();
+// v6.9.9: sticky scan-wide counter (same pattern as _braveFails/_waybackFails).
+// The 45s health cooldown can expire while the serialization queue drains,
+// re-admitting doomed requests one at a time — this makes Pass 4 silence
+// permanent once Wikidata has failed 3 times in the scan.
+let _wikidataFails = 0;
 async function wikidataContacts(b: Business): Promise<void> {
   if (!b.website || (b.email && b.phone)) return;
   let host = '';
@@ -2371,16 +2408,15 @@ async function wikidataContacts(b: Business): Promise<void> {
       // Engine health: after repeated failures (rate-limit / network), stop
       // hammering Wikidata for the rest of the scan — deterministic retries
       // just print more console errors and add latency.
-      if (!engineAvailable('wikidata')) return;
-      // v6.9.5: re-check the gate when the queued call actually RUNS — the
-      // 30s serialization can hold a call for minutes, and a cooldown that
-      // trips while it waits used to admit exactly one doomed request.
-      if (!engineAvailable('wikidata')) return;
+      // v6.9.9: sticky counter AND health gate (cooldown can expire mid-queue
+      // and re-admit a doomed request; the sticky counter never expires).
+      if (!engineAvailable('wikidata') || _wikidataFails >= 3) return;
       const r = await fetch('https://query.wikidata.org/sparql?query=' + encodeURIComponent(sparql), {
         headers: { Accept: 'application/sparql-results+json', 'User-Agent': 'BlueOcean/6.2 (market-gap research demo; contact@blueocean.app)' },
         signal: AbortSignal.timeout(12000),
       });
       if (!r.ok) {
+        _wikidataFails++;
         engineNoteFail('wikidata', 'Wikidata', classifyEngineError(r.status), 'HTTP ' + r.status);
         return;
       }
@@ -2402,6 +2438,7 @@ async function wikidataContacts(b: Business): Promise<void> {
       // health gate never tripped and every business re-fired a doomed
       // SPARQL query (the Pass 4 console-abort storm).
       if (e?.message === 'Cancelled') return;
+      _wikidataFails++;
       engineNoteFail('wikidata', 'Wikidata', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : e?.message || 'network error').slice(0, 60));
     }
   };
@@ -2900,12 +2937,13 @@ async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number
   // v6.9.6: engine-health gate — a rate-limited Brave returns 429 WITHOUT
   // CORS headers, so the fetch throws and prints a console error. After
   // 3 failures stop calling it entirely (Mojeek/DDG take over).
-  if (!engineAvailable('brave') || _braveFails >= 3) return;
+  // v6.9.9: use the surge guard (sticky counter + 4s post-failure pause).
+  if (!braveOkToCall()) return;
   const BATCH = 3;
   const max = Math.min(NEEDS.length, 50); // Brave free tier: 2000 req/mo
   let found = 0;
   for (let i = 0; i < max; i += BATCH) {
-    if (!engineAvailable('brave')) break;
+    if (!braveOkToCall()) break;
     const batch = NEEDS.slice(i, i + BATCH);
     await Promise.all(batch.map(async (b) => {
       try {
@@ -2914,7 +2952,10 @@ async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number
           headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
           signal: AbortSignal.timeout(8000),
         });
-        if (!r.ok) return;
+        // v6.9.9: non-OK responses count too (429 has no CORS headers on the
+        // error path only sometimes; a clean 429 response must also trip the
+        // gate, not slip through silently).
+        if (!r.ok) { braveNoteFail(classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`); return; }
         const data = await r.json();
         const results = data.web?.results || [];
         for (const res of results) {
@@ -2958,7 +2999,7 @@ async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number
       } catch (e: any) {
         // v6.9.6: count thrown errors (429 CORS-less / timeout) so the gate
         // trips quickly instead of re-firing per business.
-        if (e?.message !== 'Cancelled') { _braveFails++; _netFails++; engineNoteFail('brave', 'Brave', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : e?.message || 'network error').slice(0, 60)); }
+        if (e?.message !== 'Cancelled') braveNoteFail('net', String(e?.name === 'TimeoutError' ? 'timeout' : e?.message || 'network error').slice(0, 60));
       }
     }));
     if (i + BATCH < max) await wait(1500);
@@ -3260,15 +3301,13 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         await Promise.all([
           // Brave API (free tier) → fallback: Mojeek HTML (keyless)
           engineArm('brave', 'Brave', async () => {
-            if (_braveFails >= 3) return false; // v6.9.6: sticky scan-wide gate
+            if (!braveOkToCall()) return false; // v6.9.9: surge guard
             const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=5`, {
               headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
               signal: AbortSignal.timeout(3000),
             });
             if (!r.ok) {
-                const kind = classifyEngineError(r.status, await r.text().catch(() => ''));
-                _braveFails++; _netFails++;
-                engineNoteFail('brave', 'Brave', kind, `HTTP ${r.status}`);
+                braveNoteFail(classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
                 return false;
               }
             const data = await r.json();
@@ -3387,7 +3426,9 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             (async () => {
               // v6.9.6: gate on engine health — a cooled-down / dead Brave
               // must not re-fire here for every business.
-              if (!engineAvailable('brave') || _braveFails >= 3) return;
+              // v6.9.9: surge guard (sticky + 4s pause) caps wave-amplified
+              // 429 storms when a whole enrichment wave hits rate-limit.
+              if (!braveOkToCall()) return;
               try {
                 const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${emailQ}&count=5`, {
                   headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY },
@@ -3406,11 +3447,10 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                     }
                   }
                 } else {
-                  _braveFails++;
-                  engineNoteFail('brave', 'Brave', classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
+                  braveNoteFail(classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
                 }
               } catch (e: any) {
-                  if (e?.message !== 'Cancelled') { _braveFails++; _netFails++; engineNoteFail('brave', 'Brave', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : 'network error').slice(0, 60)); }
+                  if (e?.message !== 'Cancelled') braveNoteFail('net', String(e?.name === 'TimeoutError' ? 'timeout' : 'network error').slice(0, 60));
                 }
             })(),
             (async () => {
