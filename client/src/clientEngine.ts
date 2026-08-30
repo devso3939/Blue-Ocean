@@ -291,6 +291,7 @@ export const CATEGORY_QUERIES: Record<string, { label: string }> = {
   real_estate: { label: 'Real Estate' }, insurance: { label: 'Insurance' },
   travel_agency: { label: 'Travel Agency' }, printing: { label: 'Printing Shop' },
   nail_salon: { label: 'Nail Salon' }, tattoo: { label: 'Tattoo Parlor' },
+  massage: { label: 'Massage' }, // v6.9.19: new standalone category
   car_wash: { label: 'Car Wash' }, market: { label: 'Local Market' },
   dance: { label: 'Dance Studio' }, music_school: { label: 'Music School' },
   cleaning: { label: 'Cleaning Service' }, courier: { label: 'Courier Service' },
@@ -302,21 +303,57 @@ export function getCategoryLabel(id: string): string {
 
 // ─── Categorization ────────────────────────────────────────────────
 
-function categorizeBusiness(tags: Record<string, string>): string | null {
+// ── v6.9.19: multilingual name-keyword banks for sub-bucketing ──────
+// The categorizer used to split beauty/fitness buckets with English-only
+// name regexes, so a Dubai fitness centre named "ستوديو اليوغا" or a
+// beauty shop "صالون أظافر" silently landed in the generic gym/beauty
+// bucket — producing absurd counts like "1 dance studio in a 4M city".
+// These banks cover ~20 languages each and are shared by every
+// name-based branch below. Latin tokens are guarded with a non-letter
+// prefix so substrings like 'abundance' (contains 'danc') don't match.
+const RX_NAIL2 = /(маникюр|педикюр|манікюр|manik|manicure|pedicure|nail|أظافر|مناكير|باديكير|नेल|ネイル|네일|美甲|美睫|ניקור|ম্যানিকিউর|nail)/i;
+const RX_YOGA = /(yoga|pilates|йога|пилатес|пілатес|یوگا|يوغا|योग|ヨガ|요가|瑜伽|普拉提|ଯୋଗ)/i;
+const RX_DANCE = /((^|[^a-zà-öø-ÿ])(danc|danza|tanz(?!an))|ballet|choreo|танц|балет|хорео|バレエ|ダンス|発レ|발레|댄스|무용|舞蹈|芭蕾|舞踏|رقص|باليه|ריקוד|מחול|नृत्य|เต้น|รำ|ქორეოგრაფი|ცეკვ|պար|salsa|bachata|kizomba|zumba|tango|hip.?hop|breakdance|break.?danc|b\.?boy|flamenco|merengue|cha.?cha|foxtrot|waltz|jazz.?danc|lindy.?hop|street.?danc)/i;
+const RX_MASSAGE = /(massage|masaż|массаж|масаж|masaj|マッサージ|마사지|按摩|推拿|นวด|مساج|تدليك|מסאז|मालिश)/i;
+const RX_SPA = /(spa|спа|สปา|スパ)/i;
+
+export function categorizeBusiness(tags: Record<string, string>): string | null {
   const a = tags.amenity;
   const s = tags.shop;
   const t = tags.tourism;
   const l = tags.leisure;
   const o = tags.office;
-  // Name used for sub-bucketing (beauty→nail, fitness→yoga, …). Computed
-  // lazily below only where it matters.
-  const nameOf = () => (tags.name || tags['name:en'] || '').toLowerCase();
+  // v6.9.19: sub-bucketing name now includes the language-detected local
+  // names (name:xx) — in multilingual cities the primary `name` tag alone
+  // often misses the recognizable word (e.g. name:ru "Маникюр" with a
+  // transliterated `name`).
+  const nameOf = () => {
+    const extra = Object.keys(tags)
+      .filter(k => k.startsWith('name:') && k !== 'name:en')
+      .map(k => tags[k]).join(' ');
+    return ((tags.name || tags['name:en'] || '') + ' ' + extra).toLowerCase();
+  };
 
   // ─── Shops (always businesses) ───
   if (s === 'beauty' || s === 'cosmetics' || s === 'beauty_salon') {
-    // A "beauty" shop named like a nail salon is a nail salon, not a beauty salon
+    // v6.9.19: honor the beauty=* subtag first (OSM's own discrimination):
+    // beauty=nails|nail|manicure|pedicure → nail salon; beauty=massage →
+    // massage; beauty=tattoo → tattoo; beauty=hairdresser → hair salon.
+    const bt = tags['beauty'] || '';
+    if (/(nail|manicure|pedicure)/.test(bt)) return 'nail_salon';
+    if (bt === 'massage') return 'massage';
+    if (bt === 'tattoo' || bt === 'piercing') return 'tattoo';
+    if (bt === 'hairdresser' || bt === 'hair') return 'hair_salon';
+    if (bt === 'tanning') return 'spa';
+    if (bt === 'spa' || bt === 'wellness') return 'spa';
+    // Multilingual name split: a beauty shop named like a nail salon is a
+    // nail salon, not a beauty salon (was English/Russian-only).
     const nm = nameOf();
-    if (/(nail|маникюр|педикюр)/.test(nm)) return 'nail_salon';
+    if (RX_NAIL2.test(nm)) return 'nail_salon';
+    if (RX_MASSAGE.test(nm)) return 'massage';
+    if (RX_SPA.test(nm)) return 'spa';
+    if (/(tattoo|тат|纹身|刺青|タトゥー|타투|وشم)/i.test(nm)) return 'tattoo';
+    if (/(hair|friseur|coiff|kuaf|пари|lash|眉)/i.test(nm)) return 'hair_salon';
     return 'beauty_salon';
   }
   if (s === 'hairdresser' || s === 'wigs' || s === 'hairdresser_supply') return 'hair_salon';
@@ -381,7 +418,11 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   if (s === 'toys' || s === 'games' || s === 'model' || s === 'musical_instrument' ||
       s === 'gift' || s === 'party' || s === 'collectibles' || s === 'lottery' ||
       s === 'trophy' || s === 'novelty') return 'art';       // gift/specialty retail → art bucket
-  if (s === 'massage') return 'spa';
+  if (s === 'massage') {
+    const nm = nameOf();
+    if (RX_YOGA.test(nm)) return 'yoga';
+    return 'massage'; // v6.9.19: own category (was folded into spa)
+  }
   if (s === 'money_lender' || s === 'pawnbroker' || s === 'currency_exchange' || s === 'financial') return 'bank';
   if (s === 'ticket' || s === 'lottery_tickets') return 'travel_agency';
   if (s === 'travel_agency') return 'travel_agency';
@@ -412,10 +453,27 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   if (a === 'post_office' || a === 'post_partner') return 'post_office';
   if (a === 'car_rental' || a === 'boat_rental') return 'car_rental';
   if (a === 'nightclub' || a === 'casino') return 'night_club';
-  if (a === 'music_school' || a === 'dancing_school' || a === 'arts_centre' ||
-      a === 'studio') return 'music_school';
-  if (a === 'spa' || a === 'sauna' || a === 'public_bath' || a === 'tanning_salon' ||
-      a === 'massage') return 'spa';
+  if (a === 'dancing_school') return 'dance'; // v6.9.19: was misfiled as music_school
+  if (a === 'music_school' || a === 'arts_centre' || a === 'studio') {
+    // v6.9.19: amenity=studio is heavily reused for yoga/dance salons —
+    // split by (now multilingual) name before defaulting to music school.
+    const nm = nameOf();
+    if (RX_YOGA.test(nm)) return 'yoga';
+    if (RX_DANCE.test(nm)) return 'dance';
+    return 'music_school';
+  }
+  if (a === 'massage') {
+    // v6.9.19: separate massage category (was folded into spa, inflating
+    // spa and starving 'massage'). Yoga-styled parlors stay yoga.
+    const nm = nameOf();
+    if (RX_YOGA.test(nm)) return 'yoga';
+    return 'massage';
+  }
+  if (a === 'spa' || a === 'sauna' || a === 'public_bath' || a === 'tanning_salon') {
+    const nm = nameOf();
+    if (RX_YOGA.test(nm)) return 'yoga';
+    return 'spa';
+  }
   if (a === 'marketplace') return 'marketplace';
   if (a === 'fuel') return 'fuel';
   // ─── Amenity service buckets (v6.9) ───
@@ -496,15 +554,23 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
   // venues/null bucket below (they were inflating the gym count).
   if (l === 'fitness_centre' || l === 'sports_centre' || l === 'sports_hall' ||
       l === 'swimming_pool') {
-    // Name-based split: yoga/pilates/dance studios before the generic 'gym' bucket
+    // v6.9.19: multilingual name-based split (yoga/pilates/dance studios
+    // before the generic 'gym' bucket). Also honors sport=* subtags.
     const nm = nameOf();
-    if (/(yoga|pilates)/.test(nm)) return 'yoga';
-    if (/(danc|ballet|choreo)/.test(nm)) return 'dance';
+    const sp = tags.sport || '';
+    if (RX_YOGA.test(nm) || /yoga|pilates/.test(sp)) return 'yoga';
+    if (RX_DANCE.test(nm) || /dance|ballet/.test(sp)) return 'dance';
+    if (RX_MASSAGE.test(nm)) return 'massage';
     if (/(box|mma|karate|judo|taekwondo|wrestl|fencing|kick|aikido|jui.?jitsu)/.test(nm)) return 'gym';
     return 'gym';
   }
   if (l === 'yoga') return 'yoga';               // leisure=yoga exists in OSM
-  if (l === 'dance' || l === 'dance_hall') return 'dance';
+  if (l === 'dance' || l === 'dance_hall') {
+    // v6.9.19: leisure=dance_hall is often a music/night venue, not a
+    // studio — only treat as a dance studio when no concert/club signals.
+    if (l === 'dance_hall' && /nightclub|concert|live|клуб|бар|bar|club/i.test(nameOf())) return 'night_club';
+    return 'dance';
+  }
   if (l === 'bowling_alley' || l === 'escape_game' || l === 'amusement_arcade' ||
       l === 'miniature_golf' || l === 'trampoline_park' || l === 'water_park') return 'night_club';
   if (l === 'spa' || l === 'sauna') return 'spa';
@@ -545,10 +611,16 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
     if (/(real.?estate|property|immobili)/.test(nm)) return 'real_estate';
     if (/(insur|strakhov)/.test(nm) || /(insur)/.test(nm)) return 'insurance';
     if (/(travel|tur|tour)/.test(nm)) return 'travel_agency';
-    if (/(clean|ubor|cleaning)/.test(nm)) return 'cleaning';
+    if (/(clean|ubor|cleaning|清扫|청소|تنظيف|temizlik)/.test(nm)) return 'cleaning';
     if (/(car.?wash|moyk[ae]|автомойк)/.test(nm)) return 'car_wash';
-    if (/(nail|маникюр|педикюр)/.test(nm)) return 'nail_salon';
-    if (/(yoga|pilates)/.test(nm)) return 'yoga';
+    // v6.9.19: multilingual splits for lifestyle businesses registered as
+    // generic offices (very common in Gulf/South-Asia cities)
+    if (RX_NAIL2.test(nm)) return 'nail_salon';
+    if (RX_YOGA.test(nm)) return 'yoga';
+    if (RX_DANCE.test(nm)) return 'dance';
+    if (RX_MASSAGE.test(nm)) return 'massage';
+    if (RX_SPA.test(nm)) return 'spa';
+    if (/(hair|friseur|coiff|kuaf|пари)/i.test(nm)) return 'hair_salon';
     // v6.9.16: word-boundary 'it' — bare substring matched "Italian",
     // "Capital", "Suite" etc. and misfiled them as software.
     if (/(soft|\bit\b|tech|digital|web|dev|data|\bai\b|cloud|cyber|app)/.test(nm)) return 'software';
@@ -609,10 +681,12 @@ function categorizeBusiness(tags: Record<string, string>): string | null {
     if (/(real.?estate|property|immobili)/.test(nameLower)) return 'real_estate';
     if (/(insur|strakhov)/.test(nameLower)) return 'insurance';
     if (/(travel|tur|tour|travel)/.test(nameLower)) return 'travel_agency';
-    if (/(clean|ubor|cleaning)/.test(nameLower)) return 'cleaning';
+    if (/(clean|ubor|cleaning|清扫|청소|تنظيف|temizlik)/.test(nameLower)) return 'cleaning';
     if (/(car.?wash|moyk[ae]|автомойк)/.test(nameLower)) return 'car_wash';
-    if (/(nail|маникюр|педикюр)/.test(nameLower)) return 'nail_salon';
-    if (/(yoga|pilates)/.test(nameLower)) return 'yoga';
+    if (RX_NAIL2.test(nameLower)) return 'nail_salon';
+    if (RX_YOGA.test(nameLower)) return 'yoga';
+    if (RX_DANCE.test(nameLower)) return 'dance';
+    if (RX_MASSAGE.test(nameLower)) return 'massage';
   }
 
   return null;
@@ -1430,7 +1504,12 @@ const CAT_OSM_FILTER: Record<string, string> = {
   bicycle: '["shop"="bicycle"]',
   convenience: '["shop"~"convenience|kiosk|newsagent|variety_store|general|mini_market|outpost|cigarettes|e-cigarette|alcohol|wine|beer|spirits|beverages|tobacco|cannabis"]',
   spa: '["amenity"~"spa|sauna|public_bath|tanning_salon|massage"]|["leisure"~"spa|sauna|tanning_salon"]|["shop"="massage"]',
-  yoga: '["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool|yoga"]["name"~"yoga|pilates",i]|["leisure"="yoga"]|["office"="company"]["name"~"yoga|pilates",i]',
+  // v6.9.19: no English name gating — fetch the whole tag family and let
+  // the (now multilingual) categorizer sub-bucket. The old filter demanded
+  // an English "yoga|pilates" name, so Dubai (4.2M) reported 2 yoga
+  // studios; the second group still name-matches in 7 major languages.
+  yoga: '["leisure"~"fitness_centre|sports_centre|sports_hall|yoga"]|["amenity"~"spa|massage|studio"]["name"~"yoga|йога|يوغا|योग|ヨガ|요가|瑜伽",i]',
+  dance: '["leisure"~"dance|dance_hall|fitness_centre|sports_centre|sports_hall"]|["amenity"~"dancing_school|studio"]["name"~"danc|ballet|танц|رقص|नृत्य|舞蹈|ダンス|댄스|무용",i]',
   bookstore: '["shop"~"books|stationery|bookmaker"]',
   library: '["amenity"~"library|books_mobile"]',
   post_office: '["amenity"~"post_office|post_partner"]',
@@ -1446,11 +1525,15 @@ const CAT_OSM_FILTER: Record<string, string> = {
   travel_agency: '["office"~"travel_agent|tour_operator|tourism|guide|tour_guide"]|["shop"~"travel_agency|ticket|lottery_tickets"]',
   cleaning: '["shop"="cleaning"]|["office"~"cleaning|cleaning_company"]',
   car_wash: '["amenity"="car_wash"]',
-  nail_salon: '["shop"~"beauty|nail_salon|nails|cosmetics"]',
-  massage: '["amenity"~"spa|sauna|massage"]|["leisure"~"spa|sauna"]|["shop"="massage"]',
+  // v6.9.19: nail-specific tag values + beauty=* subtag + multilingual
+  // names — previously most beauty shops landed in beauty_salon, leaving
+  // nail_salon nearly empty.
+  nail_salon: '["shop"="nail_salon"]|["shop"="nails"]|["shop"~"beauty|cosmetics|beauty_salon"]["beauty"~"nail|manicure|pedicure",i]|["shop"~"beauty|beauty_salon"]["name"~"nail|manicure|pedicure|маникюр|أظافر|مناكير|ネイル|네일|美甲|नेल",i]',
+  massage: '["amenity"~"massage|spa"]|["leisure"~"spa"]|["shop"="massage"]|["shop"~"beauty|beauty_salon"]["beauty"="massage"]',
   // ── v6.9 new categories ──
-  dance: '["leisure"~"dance|dance_hall"]|["leisure"~"fitness_centre|sports_centre|sports_hall"]["name"~"danc|ballet|choreo",i]',
-  music_school: '["amenity"~"music_school|dancing_school|arts_centre|studio"]',
+  // v6.9.19: dance filter moved next to yoga above; music_school no longer
+  // queries dancing_school (it categorizes into 'dance' now).
+  music_school: '["amenity"~"music_school|arts_centre|studio"]["name"!~"yoga|danc|ballet|танц|رقص|舞蹈|ダンス|댄스|무용",i]',
   courier: '["amenity"~"courier|parcel_pickup|parcel_locker|delivery_company"]|["office"~"courier|logistics|shipping|forwarding|transport|delivery|moving_company"]',
   market: '["shop"~"market|second_hand|charity|antiques"]|["office"~"ngo|charity|association|foundation|nonprofit"]',
   tattoo: '["shop"~"tattoo|tattoo_piercing|piercing"]',
@@ -4855,6 +4938,7 @@ export function sanityCheckOpportunities(
     it_consulting: { min: 0.2, max: 60 }, digital_marketing: { min: 0.1, max: 30 },
     courier: { min: 0.05, max: 8 }, coworking: { min: 0.05, max: 5 },
     nail_salon: { min: 0.1, max: 15 }, spa: { min: 0.05, max: 10 },
+    massage: { min: 0.05, max: 12 }, // v6.9.19: standalone category band
     dance: { min: 0.05, max: 8 }, yoga: { min: 0.05, max: 8 },
     music_school: { min: 0.05, max: 8 }, art: { min: 0.1, max: 30 },
     wedding: { min: 0.02, max: 5 }, veterinary: { min: 0.1, max: 6 },
@@ -5156,12 +5240,23 @@ export async function rescanWideNet(
       const seenIds = new Set(existing.map(b => b.id));
       const seenLocs = new Set(existing.map(b => `${Math.round(b.lat * 1000)},${Math.round(b.lon * 1000)}`));
       let added = 0;
+      // v6.9.19: buckets that overlap heavily — if the categorizer is
+      // CONFIDENT the element belongs to a *different* one of these, don't
+      // double-count it into the target bucket.
+      const LIFESTYLE = new Set(['yoga', 'dance', 'massage', 'spa', 'nail_salon', 'beauty_salon', 'hair_salon', 'gym']);
       for (const el of d.elements) {
         const elLat = el.lat || el.center?.lat;
         const elLon = el.lon || el.center?.lon;
         if (!elLat || !elLon) continue;
         const tags = el.tags || {};
-        if (categorizeBusiness(tags) !== cat) continue; // must categorize into this bucket
+        // v6.9.19: the element was found BY the category's multilingual
+        // name-keyword filter — trust that signal. The old strict
+        // `categorizeBusiness(tags) !== cat` check re-ran the categorizer
+        // (English-only back then) and silently dropped most rescues.
+        // Skip only when the categorizer confidently files it into a
+        // DIFFERENT overlapping lifestyle bucket (avoids double counts).
+        const cat2 = categorizeBusiness(tags);
+        if (cat2 && cat2 !== cat && LIFESTYLE.has(cat2) && LIFESTYLE.has(cat)) continue;
         const name = tags.name || tags['name:en'] || tags['name:int'] || tags.brand || tags.operator || '';
         if (!name.trim()) continue;
         const locKey = `${Math.round(elLat * 1000)},${Math.round(elLon * 1000)}`;
@@ -5221,6 +5316,21 @@ const WIDE_NET_KEYWORDS: Record<string, string> = {
   courier: '["name"~"courier|delivery|express|kargo|курьер|курʼєр|მიწოდებ|არაქარი|快递|配送|物流|宅配|運送|택배|배달|توصيل|شحن|משלוח|พัสดุ|จัดส่ง|कूरियर|डिलीवरी|giao hàng|kurir",i]',
   dance: '["name"~"dance|danz|ballet|танц|պար|ცეკვ|舞蹈|ダンス|舞踊|댄스|무용|رقص|ריקוד|นาฏศิลป|เต้น|नृत्य",i]',
 };
+
+// ── v6.9.19: multilingual re-check banks (overrides + additions) ───────
+// The table above had NO entries for nail_salon/spa/beauty_salon/
+// hair_salon/massage — those categories were silently skipped by the
+// re-check (`if (!kw) continue`), which is exactly how Dubai ended up
+// reporting 3 nail salons. Name banks cover ~20 languages each. The
+// yoga/dance overrides add tag-based selectors so the re-check also
+// finds correctly-tagged-but-locally-named venues.
+WIDE_NET_KEYWORDS.nail_salon = '["name"~"nail|manicure|pedicure|маникюр|педикюр|манікюр|manikür|네일|ネイル|美甲|美睫|أظافر|مناكير|नेल|ম্যানিকিউর|ניקור",i]';
+WIDE_NET_KEYWORDS.spa = '["name"~"spa|sauna|wellness|спа|ساونا|স্পা|สปา|スパ|스파|水疗|溫泉|સ્પા",i]';
+WIDE_NET_KEYWORDS.beauty_salon = '["name"~"beauty|salon|cosmet|güzellik|красот|تجميل|ビューティ|뷰티|미용|美容|બ્યુટી",i]';
+WIDE_NET_KEYWORDS.hair_salon = '["name"~"hair|friseur|coiff|kuaf|пари|barber|حلاق|美发|理发|ヘア|미용실|이발소|کوافیر",i]';
+WIDE_NET_KEYWORDS.massage = '["name"~"massage|массаж|masaż|masaj|マッサージ|마사지|按摩|推拿|นวด|مساج|تدليك|मालिश",i]';
+WIDE_NET_KEYWORDS.yoga = '["name"~"yoga|pilates|йога|یوگا|يوغا|योग|ヨガ|요가|瑜伽|普拉提",i]|["leisure"="yoga"]|["sport"~"yoga|pilates",i]';
+WIDE_NET_KEYWORDS.dance = '["name"~"dance|ballet|танц|балет|舞蹈|ダンス|댄스|무용|رقص|नृत्य|เต้น",i]|["leisure"~"dance|dance_hall"]|["amenity"="dancing_school"]';
 
 export function getGoogleMapsUrl(b: Business): string {
   if (b.name) {

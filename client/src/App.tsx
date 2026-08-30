@@ -116,6 +116,7 @@ const POPULAR_CATEGORIES = [
   { id: 'cinema', label: '🎬 Cinema' }, { id: 'car_repair', label: '🔧 Car Repair' },
   { id: 'pet_groomer', label: '🐕 Pet Groomer' }, { id: 'coworking', label: '💻 Coworking Space' },
   { id: 'spa', label: '🧖 Spa' }, { id: 'yoga', label: '🧘 Yoga Studio' },
+  { id: 'massage', label: '💆 Massage' }, { id: 'dance', label: '🩰 Dance Studio' }, // v6.9.19
   { id: 'web_agency', label: '🌐 Web Agency' }, { id: 'software', label: '⚙️ Software Company' },
   { id: 'it_consulting', label: '🖥️ IT Consulting' }, { id: 'digital_marketing', label: '📣 Digital Marketing' },
   { id: 'lawyer', label: '⚖️ Law Firm' }, { id: 'accountant', label: '🧮 Accounting' },
@@ -133,7 +134,7 @@ const CAT_COLORS: Record<string, string> = {
   pharmacy: '#06b6d4', supermarket: '#22c55e', bank: '#6366f1', clothing: '#a855f7',
   electronics: '#64748b', bakery: '#fbbf24', fast_food: '#f97316', school: '#3b82f6',
   cinema: '#e879f9', car_repair: '#f97316', pet_groomer: '#fb923c', coworking: '#38bdf8',
-  spa: '#c084fc', yoga: '#34d399',
+  spa: '#c084fc', yoga: '#34d399', massage: '#f0abfc', dance: '#e879f9',
   bookstore: '#a78bfa', library: '#2dd4bf', post_office: '#fbbf24',
   web_agency: '#06b6d4', software: '#3b82f6', it_consulting: '#6366f1',
   digital_marketing: '#f43f5e', lawyer: '#78716c', accountant: '#a8a29e',
@@ -143,7 +144,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '6.9.18';
+const APP_VERSION = '6.9.19';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
