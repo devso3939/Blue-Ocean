@@ -1078,6 +1078,25 @@ function wait(ms: number): Promise<void> {
   });
 }
 
+// v6.9.22: non-throwing abort-aware wait. Resolves true when the delay
+// elapsed, false when the cancel signal fired first. Unlike wait(), it
+// never rejects — callers inside fetchOverpass treat cancellation as
+// "stop retrying" instead of an error path.
+function abortableWait(ms: number): Promise<boolean> {
+  if (isCancelled()) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      _cancelSignal?.removeEventListener('abort', onAbort);
+      resolve(true);
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    _cancelSignal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 // Global cancel signal — set by App.tsx, checked by all enrichment loops
 let _cancelSignal: AbortSignal | null = null;
 export function setCancelSignal(signal: AbortSignal | null) { _cancelSignal = signal; }
