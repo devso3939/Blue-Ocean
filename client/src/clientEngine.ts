@@ -1549,6 +1549,46 @@ let _overpassExhausted = false;
 
 // One attempt against one mirror. Resolves with parsed JSON on success,
 // null on any failure (rate-limit, non-JSON, timeout). Never throws.
+// v6.9.22: large responses are parsed OFF the main thread via a Blob-based
+// URL.createObjectURL + dynamic import trick — JSON.parse of a multi-MB
+// full-mode response (whole-city bbox → tens of MB) blocks the UI thread
+// for seconds and freezes the tab. We now hand the text to a Web Worker
+// when it exceeds 1 MB; smaller payloads parse inline (cheaper than
+// spawning a worker).
+const _parseWorkerUrl = (() => {
+  try {
+    const src = `self.onmessage=(e)=>{try{postMessage({ok:true,data:JSON.parse(e.data.text)})}catch(err){postMessage({ok:false})}};`;
+    const blob = new Blob([src], { type: 'application/javascript' });
+    return URL.createObjectURL(blob);
+  } catch { return null; }
+})();
+function parseLargeJson(text: string): Promise<any> {
+  if (text.length < 1_000_000 || !_parseWorkerUrl) {
+    return Promise.resolve(JSON.parse(text));
+  }
+  return new Promise((resolve) => {
+    try {
+      const worker = new Worker(_parseWorkerUrl);
+      const timer = setTimeout(() => { worker.terminate(); resolve(null); }, 30000);
+      worker.onmessage = (e: MessageEvent) => {
+        clearTimeout(timer);
+        worker.terminate();
+        resolve(e.data?.ok ? e.data.data : null);
+      };
+      worker.onerror = () => {
+        clearTimeout(timer);
+        worker.terminate();
+        // Fallback: parse inline rather than lose the data
+        try { resolve(JSON.parse(text)); } catch { resolve(null); }
+      };
+      worker.postMessage({ text });
+    } catch {
+      // Worker creation failed — parse inline
+      try { resolve(JSON.parse(text)); } catch { resolve(null); }
+    }
+  });
+}
+
 async function overpassAttempt(mirror: string, query: string, timeoutSec: number): Promise<any> {
   try {
     const controller = new AbortController();
@@ -1563,8 +1603,8 @@ async function overpassAttempt(mirror: string, query: string, timeoutSec: number
     if (!res.ok) return null;
     const text = await res.text();
     if (!text.trim().startsWith('{')) return null; // XML error page / rate-limit
-    const data = JSON.parse(text);
-    if (data.elements === undefined) return null;
+    const data = await parseLargeJson(text);
+    if (!data || data.elements === undefined) return null;
     return data;
   } catch {
     return null;
@@ -1607,19 +1647,46 @@ async function fetchOverpass(query: string, timeoutSec = 60, onWait?: (msg: stri
   let data = await overpassRace(query, timeoutSec);
   // …if everything failed, cool down and try again (typical cause: the IP is
   // rate-limited after a heavy scan; bans usually lift within a minute).
+  // v6.9.22: waits are now abort-aware — if the user hits Cancel during the
+  // 40s/120s cooldown, the wait resolves immediately instead of hanging.
   if (!data) {
+    if (isCancelled()) { _overpassExhausted = true; return null; }
     onWait?.('OpenStreetMap servers are busy — waiting 40s before retrying…');
-    await wait(40000);
+    if (!(await abortableWait(40000))) { _overpassExhausted = true; return null; }
     data = await overpassRace(query, timeoutSec);
   }
   // Still nothing? One last patient attempt — longer bans need a longer pause.
   if (!data) {
+    if (isCancelled()) { _overpassExhausted = true; return null; }
     onWait?.('Still busy — waiting 2 minutes for a final retry…');
-    await wait(120000);
+    if (!(await abortableWait(120000))) { _overpassExhausted = true; return null; }
     data = await overpassRace(query, timeoutSec);
   }
   if (data) {
-    cacheSet(ck, data);
+    // v6.9.22: skip caching very large payloads — JSON.stringify of a
+    // multi-MB full-mode response blocks the main thread for seconds and
+    // the localStorage quota-exceeded LRU loop parses every entry, making
+    // the freeze worse. Cache only payloads under 2 MB (roughly 500k chars).
+    try {
+      const serialized = JSON.stringify(data);
+      if (serialized.length <= 2_000_000) {
+        try {
+          localStorage.setItem(CACHE_PREFIX + ck, serialized);
+        } catch {
+          // Quota exceeded — drop our oldest entries (cheap LRU) and retry once
+          try {
+            const ours = Object.keys(localStorage).filter(k => k.startsWith(CACHE_PREFIX));
+            ours.sort((a, b) => {
+              const ta = JSON.parse(localStorage.getItem(a) || '{"t":0}').t;
+              const tb = JSON.parse(localStorage.getItem(b) || '{"t":0}').t;
+              return ta - tb;
+            });
+            for (const k of ours.slice(0, Math.ceil(ours.length / 2))) localStorage.removeItem(k);
+            localStorage.setItem(CACHE_PREFIX + ck, serialized);
+          } catch { /* give up silently — cache is best-effort */ }
+        }
+      }
+    } catch { /* stringify failed — skip caching */ }
     return data;
   }
 
@@ -1637,8 +1704,8 @@ async function fetchOverpass(query: string, timeoutSec = 60, onWait?: (msg: stri
     if (res.ok) {
       const text = await res.text();
       if (text.trim().startsWith('{')) {
-        const data = JSON.parse(text);
-        if (data.elements !== undefined) return data;
+        const data = await parseLargeJson(text);
+        if (data && data.elements !== undefined) return data;
       }
     }
   } catch {}
