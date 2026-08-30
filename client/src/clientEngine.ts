@@ -684,8 +684,10 @@ export function categorizeBusiness(tags: Record<string, string>): string | null 
     if (/(clean|ubor|cleaning|清扫|청소|تنظيف|temizlik)/.test(nameLower)) return 'cleaning';
     if (/(car.?wash|moyk[ae]|автомойк)/.test(nameLower)) return 'car_wash';
     if (RX_NAIL2.test(nameLower)) return 'nail_salon';
-    if (RX_YOGA.test(nameLower)) return 'yoga';
-    if (RX_DANCE.test(nameLower)) return 'dance';
+    if (!a && !l && !s && !t && tags.sport && /yoga|pilates/i.test(tags.sport)) return 'yoga'; // v6.9.21: bare sport=yoga
+    if (!a && !l && !s && !t && RX_YOGA.test(nameLower)) return 'yoga'; // v6.9.21: bare-name only (an amusement ride named Cuban Dance is not a dance school)
+    if (!a && !l && !s && !t && tags.sport && /dance|ballet/i.test(tags.sport)) return 'dance'; // v6.9.21: bare sport=dance
+    if (!a && !l && !s && !t && RX_DANCE.test(nameLower)) return 'dance'; // v6.9.21: bare-name only
     if (RX_MASSAGE.test(nameLower)) return 'massage';
   }
 
@@ -1508,8 +1510,8 @@ const CAT_OSM_FILTER: Record<string, string> = {
   // the (now multilingual) categorizer sub-bucket. The old filter demanded
   // an English "yoga|pilates" name, so Dubai (4.2M) reported 2 yoga
   // studios; the second group still name-matches in 7 major languages.
-  yoga: '["leisure"~"fitness_centre|sports_centre|sports_hall|yoga"]|["amenity"~"spa|massage|studio"]["name"~"yoga|йога|يوغا|योग|ヨガ|요가|瑜伽",i]',
-  dance: '["leisure"~"dance|dance_hall|fitness_centre|sports_centre|sports_hall"]|["amenity"~"dancing_school|studio"]["name"~"danc|ballet|танц|رقص|नृत्य|舞蹈|ダンス|댄스|무용",i]',
+  yoga: '["leisure"~"fitness_centre|sports_centre|sports_hall|yoga"]|["sport"~"yoga|pilates",i]|["amenity"~"spa|massage|arts_centre"]["name"~"yoga|pilates",i]', // v6.9.21: sport=yoga, name-gated in EN (categorizer does 7-lang split)
+  dance: '["leisure"~"dance|dance_hall"]|["amenity"="dancing_school"]|["dance:teaching"]|["club"~"sport",i]["sport"~"dance|ballet",i]|["leisure"~"fitness_centre|sports_centre|sports_hall"]["name"~"danc|ballet",i]|["amenity"~"studio|arts_centre"]["name"~"danc|ballet",i]', // v6.9.21: dancing_school is dance by definition, dance:teaching is the canonical tag, no ungated fitness sweep (categorizer does the multilingual split)
   bookstore: '["shop"~"books|stationery|bookmaker"]',
   library: '["amenity"~"library|books_mobile"]',
   post_office: '["amenity"~"post_office|post_partner"]',
