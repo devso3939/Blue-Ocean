@@ -24,6 +24,7 @@ import {
   type VerificationResult,
   type EnrichmentProgress,
   setScanContext, buildScanContext,
+  computeScanArea,
   addBackupKeys, keyPoolStatus,
 } from './clientEngine';
 import CompareView from './CompareView';
@@ -144,7 +145,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '6.9.19';
+const APP_VERSION = '6.9.20';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -496,6 +497,7 @@ export default function App() {
         undefined, true,
         undefined,
         (dp) => setDiscoverProgress(dp),
+        computeScanArea(selectedCity.lat, selectedCity.lon, selectedCity.bbox, selectedCity.population), // v6.9.20: scan the city's REAL area, not a fixed 10 km circle
       );
       setBusinesses(biz);
       setProgress(40);
@@ -535,6 +537,7 @@ export default function App() {
           const merged = await rescanWideNet(biz, absurdCats, selectedCity.lat, selectedCity.lon, 10000, {
             signal: ac.signal,
             onProgress: (msg) => setRescanNote(msg),
+            areaBbox: computeScanArea(selectedCity.lat, selectedCity.lon, selectedCity.bbox, selectedCity.population), // v6.9.20: match the main scan area
           });
           const addedTotal = Array.from(merged.entries()).reduce((s, [c, arr]) => {
             const before = biz.get(c)?.length ?? 0;
@@ -605,7 +608,9 @@ export default function App() {
         (pct, msg) => { setProgress(Math.max(pct, 5)); setLoadingStage(msg); },
         selectedCategory,
         false,
-        (ep) => setEnrichProgress(ep)
+        (ep) => setEnrichProgress(ep),
+        undefined,
+        computeScanArea(selectedCity.lat, selectedCity.lon, selectedCity.bbox, selectedCity.population), // v6.9.20: scan the city's REAL area, not a fixed 10 km circle
       );
       setBusinesses(biz);
       setProgress(45);
@@ -667,6 +672,7 @@ export default function App() {
           const merged = await rescanWideNet(biz, [selectedCategory], selectedCity.lat, selectedCity.lon, 10000, {
             signal: ac.signal,
             onProgress: (msg) => setRescanNote(msg),
+            areaBbox: computeScanArea(selectedCity.lat, selectedCity.lon, selectedCity.bbox, selectedCity.population), // v6.9.20: match the main scan area
           });
           const before = biz.get(selectedCategory)?.length ?? 0;
           const after = merged.get(selectedCategory)?.length ?? 0;
@@ -1966,7 +1972,9 @@ export default function App() {
                               selectedCity.lat, selectedCity.lon, 10000,
                               (pct, msg) => { setProgress(Math.max(pct, 5)); setLoadingStage(msg); },
                               selectedOppCategory, false,
-                              (ep) => setEnrichProgress(ep)
+                              (ep) => setEnrichProgress(ep),
+                              undefined,
+                              computeScanArea(selectedCity.lat, selectedCity.lon, selectedCity.bbox, selectedCity.population), // v6.9.20: scan the city's REAL area, not a fixed 10 km circle
                             ).then(biz => {
                               setBusinesses(biz);
                               setProgress(45);

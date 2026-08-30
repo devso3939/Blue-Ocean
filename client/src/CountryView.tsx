@@ -8,6 +8,7 @@ import {
   type Business,
   type OpportunityResult,
   setScanContext, buildScanContext,
+  computeScanArea,
 } from './clientEngine';
 import { analyzeCountry } from './aiAnalysis';
 
@@ -225,7 +226,8 @@ export default function CountryView() {
           const biz = await queryBusinesses(city.lat, city.lon, 8000, (pct, msg) => {
             setProgress(10 + Math.round(((i + pct / 100) / cities.length) * 80));
             setStage(`Scanning ${city.name} (${i + 1}/${cities.length}): ${msg}`);
-          });
+          }, undefined, false, undefined, undefined,
+            computeScanArea(city.lat, city.lon, city.bbox, city.population)); // v6.9.20: scan the city's REAL area
           const totalBiz = Array.from(biz.values()).reduce((s, a) => s + a.length, 0);
           const opps = computeOpportunities(biz, city.population || 0, new Map());
           results.push({ city, businesses: biz, opportunities: opps, totalBiz });

@@ -1645,22 +1645,89 @@ async function fetchOverpass(query: string, timeoutSec = 60, onWait?: (msg: stri
   return null;
 }
 
+// ─── v6.9.20: city-aware scan area ("right algorithm" fix) ─────────────────
+// The old scan drew a FIXED 10 km circle around the city center no matter how
+// big the city is. That's how a 4.2M-population city showed "1 dance studio":
+// Dubai's metro (JLT, Marina, Al Barsha) stretches 25+ km from the center, so
+// most real businesses were simply outside the scan circle. We now scan the
+// city's ACTUAL Nominatim bounding box when available, falling back to a
+// population-scaled radius otherwise.
+export const DEFAULT_SCAN_RADIUS_METERS = 10000;
+export const MAX_SCAN_RADIUS_METERS = 35000;
+
+// Population-scaled radius: R = 600 m × pop^0.25, clamped 6–35 km.
+// Dubai 3.3M → ~26 km · NYC 8.4M → ~32 km · 1M → ~19 km · 200k town → ~13 km ·
+// village → 6 km. Sub-linear (√·√) so megacities don't explode query size.
+export function radiusForPopulation(population: number | null | undefined): number {
+  const pop = Number(population) || 0;
+  if (pop <= 0) return DEFAULT_SCAN_RADIUS_METERS;
+  const r = 600 * Math.pow(pop, 0.25);
+  return Math.round(Math.min(MAX_SCAN_RADIUS_METERS, Math.max(6000, r)));
+}
+
+// Circle bbox around a point: [south, west, north, east].
+function circleBbox(lat: number, lon: number, radiusMeters: number): [number, number, number, number] {
+  const south = lat - radiusMeters / 111000;
+  const north = lat + radiusMeters / 111000;
+  const cosLat = Math.cos((lat * Math.PI) / 180);
+  return [south, lon - radiusMeters / (111000 * cosLat), north, lon + radiusMeters / (111000 * cosLat)];
+}
+
+// Combined scan area: the city's real bounding box (Nominatim) when usable,
+// padded 15% so boundary districts aren't clipped; each axis capped at ~55 km
+// (window stays centered on the city) so a megacity bbox can't explode query
+// size. Otherwise falls back to the population-scaled circle.
+// Returns [south, west, north, east].
+const MAX_AREA_SPAN_DEG = 0.5; // ≈ 55 km per axis
+
+export function computeScanArea(
+  lat: number,
+  lon: number,
+  cityBbox?: [number, number, number, number] | null,
+  population?: number | null
+): [number, number, number, number] {
+  if (cityBbox && cityBbox.length === 4 && cityBbox.every(v => Number.isFinite(v))) {
+    const [s, w, n, e] = cityBbox;
+    if (s < n && w < e && s >= -90 && s <= 90 && w >= -180 && w <= 180) {
+      const span = Math.max(n - s, e - w);
+      if (span > 0 && span < 0.9) {
+        const padLat = (n - s) * 0.15;
+        const padLon = (e - w) * 0.15;
+        let ps = s - padLat, pw = w - padLon, pn = n + padLat, pe = e + padLon;
+        if (pn - ps > MAX_AREA_SPAN_DEG) {
+          ps = Math.max(ps, lat - MAX_AREA_SPAN_DEG / 2);
+          pn = Math.min(pn, ps + MAX_AREA_SPAN_DEG);
+          if (lat < ps || lat > pn) { ps = lat - MAX_AREA_SPAN_DEG / 2; pn = lat + MAX_AREA_SPAN_DEG / 2; }
+        }
+        if (pe - pw > MAX_AREA_SPAN_DEG) {
+          pw = Math.max(pw, lon - MAX_AREA_SPAN_DEG / 2);
+          pe = Math.min(pe, pw + MAX_AREA_SPAN_DEG);
+          if (lon < pw || lon > pe) { pw = lon - MAX_AREA_SPAN_DEG / 2; pe = lon + MAX_AREA_SPAN_DEG / 2; }
+        }
+        return [ps, pw, pn, pe];
+      }
+    }
+  }
+  return circleBbox(lat, lon, radiusForPopulation(population));
+}
+
 export async function queryBusinesses(
   lat: number,
   lon: number,
-  radiusMeters: number = 10000,
+  radiusMeters: number = DEFAULT_SCAN_RADIUS_METERS,
   onProgress?: (pct: number, msg: string) => void,
   categoryFilter?: string,
   skipEnrichment?: boolean,
   onEnrichProgress?: (ep: EnrichmentProgress) => void,
-  onDiscoverProgress?: (dp: DiscoveryProgress) => void
+  onDiscoverProgress?: (dp: DiscoveryProgress) => void,
+  areaBbox?: [number, number, number, number] | null
 ): Promise<Map<string, Business[]>> {
   const results = new Map<string, Business[]>();
-  const south = lat - radiusMeters / 111000;
-  const north = lat + radiusMeters / 111000;
-  const cosLat = Math.cos((lat * Math.PI) / 180);
-  const west = lon - radiusMeters / (111000 * cosLat);
-  const east = lon + radiusMeters / (111000 * cosLat);
+  // v6.9.20: prefer the city's real bounding box over a center circle
+  const [south, west, north, east] =
+    areaBbox && areaBbox.length === 4 && areaBbox.every(v => Number.isFinite(v))
+      ? areaBbox
+      : circleBbox(lat, lon, radiusMeters);
   const bbox = `${south},${west},${north},${east}`;
 
   // ── Tier 1: SINGLE merged query (food/health/entertainment + shops +
@@ -5213,14 +5280,15 @@ export async function rescanWideNet(
   lat: number,
   lon: number,
   radiusMeters: number,
-  opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void },
+  opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void; areaBbox?: [number, number, number, number] | null },
 ): Promise<Map<string, Business[]>> {
   if (absurdCategories.length === 0) return businesses;
-  const south = lat - radiusMeters / 111000;
-  const north = lat + radiusMeters / 111000;
-  const cosLat = Math.cos((lat * Math.PI) / 180);
-  const west = lon - radiusMeters / (111000 * cosLat);
-  const east = lon + radiusMeters / (111000 * cosLat);
+  // v6.9.20: match the main scan's area so the re-check doesn't miss
+  // businesses that were simply outside the old fixed 10 km circle
+  const [south, west, north, east] =
+    opts?.areaBbox && opts.areaBbox.length === 4 && opts.areaBbox.every(v => Number.isFinite(v))
+      ? opts.areaBbox
+      : circleBbox(lat, lon, radiusMeters);
   const bbox = `${south},${west},${north},${east}`;
   const merged = new Map(businesses);
 

@@ -9,6 +9,7 @@ import {
   type DemandSignal,
   type OpportunityResult,
   setScanContext, buildScanContext,
+  computeScanArea,
 } from './clientEngine';
 import { analyzeComparison } from './aiAnalysis';
 
@@ -173,7 +174,8 @@ export default function CompareView() {
       const biz = await queryBusinesses(city.lat, city.lon, 10000, (pct, msg) => {
         setProgress(pct);
         setLoadingStage(msg);
-      });
+      }, undefined, false, undefined, undefined,
+        computeScanArea(city.lat, city.lon, city.bbox, city.population)); // v6.9.20: scan the city's REAL area
       setProgress(70);
 
       const totalBiz = Array.from(biz.values()).reduce((s, a) => s + a.length, 0);
