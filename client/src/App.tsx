@@ -83,6 +83,26 @@ const COUNTRIES = [
   { name: 'Canada', code: 'CA' }, { name: 'Australia', code: 'AU' },
   { name: 'New Zealand', code: 'NZ' }, { name: 'Chile', code: 'CL' },
   { name: 'Colombia', code: 'CO' }, { name: 'Peru', code: 'PE' },
+  // v6.9.17: previously missing big countries
+  { name: 'Belarus', code: 'BY' }, { name: 'Kazakhstan', code: 'KZ' },
+  { name: 'Uzbekistan', code: 'UZ' }, { name: 'Moldova', code: 'MD' },
+  { name: 'Lithuania', code: 'LT' }, { name: 'Latvia', code: 'LV' },
+  { name: 'Estonia', code: 'EE' }, { name: 'Israel', code: 'IL' },
+  { name: 'Saudi Arabia', code: 'SA' }, { name: 'United Arab Emirates', code: 'AE' },
+  { name: 'Qatar', code: 'QA' }, { name: 'Kuwait', code: 'KW' },
+  { name: 'Iran', code: 'IR' }, { name: 'Iraq', code: 'IQ' },
+  { name: 'Pakistan', code: 'PK' }, { name: 'Bangladesh', code: 'BD' },
+  { name: 'Sri Lanka', code: 'LK' }, { name: 'Malaysia', code: 'MY' },
+  { name: 'Singapore', code: 'SG' }, { name: 'Morocco', code: 'MA' },
+  { name: 'Algeria', code: 'DZ' }, { name: 'Tunisia', code: 'TN' },
+  { name: 'Ghana', code: 'GH' }, { name: 'Kenya', code: 'KE' },
+  { name: 'Ethiopia', code: 'ET' }, { name: 'Taiwan', code: 'TW' },
+  { name: 'Hong Kong', code: 'HK' }, { name: 'Slovakia', code: 'SK' },
+  { name: 'Slovenia', code: 'SI' }, { name: 'North Macedonia', code: 'MK' },
+  { name: 'Albania', code: 'AL' }, { name: 'Bosnia and Herzegovina', code: 'BA' },
+  { name: 'Montenegro', code: 'ME' }, { name: 'Malta', code: 'MT' },
+  { name: 'Cyprus', code: 'CY' }, { name: 'Luxembourg', code: 'LU' },
+  { name: 'Iceland', code: 'IS' },
 ];
 
 const POPULAR_CATEGORIES = [
@@ -123,7 +143,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '6.9.16';
+const APP_VERSION = '6.9.17';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');

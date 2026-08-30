@@ -48,6 +48,26 @@ const COUNTRIES = [
   { name: 'Canada', code: 'CA' }, { name: 'Australia', code: 'AU' },
   { name: 'New Zealand', code: 'NZ' }, { name: 'Chile', code: 'CL' },
   { name: 'Colombia', code: 'CO' }, { name: 'Peru', code: 'PE' },
+  // v6.9.17: previously missing big countries
+  { name: 'Belarus', code: 'BY' }, { name: 'Kazakhstan', code: 'KZ' },
+  { name: 'Uzbekistan', code: 'UZ' }, { name: 'Moldova', code: 'MD' },
+  { name: 'Lithuania', code: 'LT' }, { name: 'Latvia', code: 'LV' },
+  { name: 'Estonia', code: 'EE' }, { name: 'Israel', code: 'IL' },
+  { name: 'Saudi Arabia', code: 'SA' }, { name: 'United Arab Emirates', code: 'AE' },
+  { name: 'Qatar', code: 'QA' }, { name: 'Kuwait', code: 'KW' },
+  { name: 'Iran', code: 'IR' }, { name: 'Iraq', code: 'IQ' },
+  { name: 'Pakistan', code: 'PK' }, { name: 'Bangladesh', code: 'BD' },
+  { name: 'Sri Lanka', code: 'LK' }, { name: 'Malaysia', code: 'MY' },
+  { name: 'Singapore', code: 'SG' }, { name: 'Morocco', code: 'MA' },
+  { name: 'Algeria', code: 'DZ' }, { name: 'Tunisia', code: 'TN' },
+  { name: 'Ghana', code: 'GH' }, { name: 'Kenya', code: 'KE' },
+  { name: 'Ethiopia', code: 'ET' }, { name: 'Taiwan', code: 'TW' },
+  { name: 'Hong Kong', code: 'HK' }, { name: 'Slovakia', code: 'SK' },
+  { name: 'Slovenia', code: 'SI' }, { name: 'North Macedonia', code: 'MK' },
+  { name: 'Albania', code: 'AL' }, { name: 'Bosnia and Herzegovina', code: 'BA' },
+  { name: 'Montenegro', code: 'ME' }, { name: 'Malta', code: 'MT' },
+  { name: 'Cyprus', code: 'CY' }, { name: 'Luxembourg', code: 'LU' },
+  { name: 'Iceland', code: 'IS' },
 ];
 
 const COUNTRY_CODES: Record<string, string> = {
@@ -65,6 +85,17 @@ const COUNTRY_CODES: Record<string, string> = {
   Portugal: 'PT', Ireland: 'IE', Denmark: 'DK', Finland: 'FI',
   Canada: 'CA', Australia: 'AU', 'New Zealand': 'NZ',
   Chile: 'CL', Colombia: 'CO', Peru: 'PE',
+  // v6.9.17: previously missing big countries
+  Belarus: 'BY', Kazakhstan: 'KZ', Uzbekistan: 'UZ', Moldova: 'MD',
+  Lithuania: 'LT', Latvia: 'LV', Estonia: 'EE', Israel: 'IL',
+  'Saudi Arabia': 'SA', 'United Arab Emirates': 'AE', Qatar: 'QA',
+  Kuwait: 'KW', Iran: 'IR', Iraq: 'IQ', Pakistan: 'PK',
+  Bangladesh: 'BD', 'Sri Lanka': 'LK', Malaysia: 'MY', Singapore: 'SG',
+  Morocco: 'MA', Algeria: 'DZ', Tunisia: 'TN', Ghana: 'GH', Kenya: 'KE',
+  Ethiopia: 'ET', Taiwan: 'TW', 'Hong Kong': 'HK', Slovakia: 'SK',
+  Slovenia: 'SI', 'North Macedonia': 'MK', Albania: 'AL',
+  'Bosnia and Herzegovina': 'BA', Montenegro: 'ME', Malta: 'MT',
+  Cyprus: 'CY', Luxembourg: 'LU', Iceland: 'IS',
 };
 
 // ─── Find Top Cities in Country ────────────────────────────────────

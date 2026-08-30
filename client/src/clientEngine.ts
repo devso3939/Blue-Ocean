@@ -795,6 +795,45 @@ const CITY_EN_MAP: Record<string, string> = {
   '서울': 'Seoul', '도쿄': 'Tokyo',
   // Ukrainian
   'Київ': 'Kyiv', 'Харків': 'Kharkiv', 'Одеса': 'Odesa', 'Дніпро': 'Dnipro',
+  'Львів': 'Lviv',
+  // v6.9.17: native->English cities for newly added countries
+  // Belarus / Kazakhstan / Uzbekistan / Moldova / Baltics
+  'Мінск': 'Minsk', 'Минск': 'Minsk', 'Гомель': 'Gomel', 'Брэст': 'Brest', 'Віцебск': 'Vitebsk',
+  'Алматы': 'Almaty', 'Астана': 'Astana', 'Шымкент': 'Shymkent', 'Караганда': 'Karaganda',
+  'Toshkent': 'Tashkent', 'Samarqand': 'Samarkand',
+  'Chișinău': 'Chisinau', 'București': 'Bucharest',
+  // Israel (Hebrew)
+  'ירושלים': 'Jerusalem', 'תל אביב': 'Tel Aviv', 'חיפה': 'Haifa',
+  // Gulf / Iraq / Iran (Arabic script)
+  'الدوحة': 'Doha', 'مدينة الكويت': 'Kuwait City', 'المنامة': 'Manama', 'مسقط': 'Muscat',
+  'أبوظبي': 'Abu Dhabi', 'الشارقة': 'Sharjah',
+  'مكة المكرمة': 'Mecca', 'المدينة المنورة': 'Medina', 'الدمام': 'Dammam',
+  'بغداد': 'Baghdad', 'البصرة': 'Basra', 'أربيل': 'Erbil',
+  'تهران': 'Tehran', 'مشهد': 'Mashhad', 'اصفهان': 'Isfahan', 'تبریز': 'Tabriz',
+  // Maghreb (Arabic script)
+  'الدار البيضاء': 'Casablanca', 'الرباط': 'Rabat', 'مراكش': 'Marrakesh', 'فاس': 'Fez',
+  'الجزائر': 'Algiers', 'وهران': 'Oran', 'تونس': 'Tunis',
+  // South Asia
+  'کراچی': 'Karachi', 'لاہور': 'Lahore', 'اسلام آباد': 'Islamabad',
+  'ঢাকা': 'Dhaka', 'চট্টগ্রাম': 'Chittagong', 'කොළඹ': 'Colombo', 'काठमाडौं': 'Kathmandu',
+  'कोलकाता': 'Kolkata', 'चेन्नई': 'Chennai', 'हैदराबाद': 'Hyderabad',
+  // East Asia (CJK)
+  '東京': 'Tokyo', '大阪': 'Osaka', '京都': 'Kyoto', '横浜': 'Yokohama', '名古屋': 'Nagoya',
+  '北京': 'Beijing', '上海': 'Shanghai', '深圳': 'Shenzhen', '广州': 'Guangzhou',
+  '杭州': 'Hangzhou', '成都': 'Chengdu',
+  '臺北': 'Taipei', '高雄': 'Kaohsiung', '臺中': 'Taichung', '香港': 'Hong Kong',
+  '부산': 'Busan',
+  // Europe (local spellings)
+  'Αθήνα': 'Athens', 'Λευκωσία': 'Nicosia', 'София': 'Sofia', 'Београд': 'Belgrade',
+  'Скопје': 'Skopje', 'Tiranë': 'Tirana',
+  'Warszawa': 'Warsaw', 'Kraków': 'Krakow', 'Praha': 'Prague',
+  'Roma': 'Rome', 'Milano': 'Milan', 'Napoli': 'Naples', 'Torino': 'Turin',
+  'München': 'Munich', 'Wien': 'Vienna', 'Zürich': 'Zurich', 'Genève': 'Geneva',
+  'København': 'Copenhagen', 'Bruxelles': 'Brussels', 'Lisboa': 'Lisbon',
+  'Ciudad de México': 'Mexico City',
+  // Southeast Asia
+  'กรุงเทพมหานคร': 'Bangkok',
+  'Thành phố Hồ Chí Minh': 'Ho Chi Minh City', 'Hà Nội': 'Hanoi',
 };
 
 // Transliterate any non-Latin script to Latin
@@ -2784,20 +2823,23 @@ const EXCLUDE_DOMAINS = /example\.com|wixpress|sentry\.io|webpack|googleapis|goo
 
 // Build a smart search query for any language
 function buildSearchQuery(b: { name: string; address?: string; categoryLabel?: string; category?: string }): string {
+  const ctxQ = getScanContext();
   const nameEn = getEnglishCityName(b.name);
   const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+  // v6.9.17: prefer native city spelling (مراكش/高雄/Алматы) for local dirs
+  const cityQ = ctxQ?.cityNative || cityEn;
   const category = b.categoryLabel || '';
-  const isLatin = /^[a-zA-Z\s\-'&.]+$/.test(b.name);
+  const isLatin = /^[a-zA-Z\u00c0-\u024f\u1e00-\u1eff\s\-'&.0-9]+$/.test(b.name);
   const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
   const streetEn = getEnglishCityName(street);
   const parts: string[] = [];
   if (isLatin) {
     parts.push(`"${b.name}"`);
-    if (cityEn) parts.push(cityEn);
+    if (cityQ) parts.push(cityQ);
   } else {
     // Non-Latin: search by street + category + city + transliterated name
     if (streetEn && streetEn !== street) parts.push(`"${streetEn}"`);
-    if (cityEn) parts.push(cityEn);
+    if (cityQ) parts.push(cityQ);
     if (category) parts.push(category);
     if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
     parts.push(`"${b.name}"`);
@@ -2815,12 +2857,14 @@ function buildSearchQuery(b: { name: string; address?: string; categoryLabel?: s
 // Generate multiple query variations for a business (native + English)
 function buildSearchQueries(b: Business): string[] {
   const queries: string[] = [];
+  const ctx = getScanContext();
   const nameEn = getEnglishCityName(b.name);
   const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+  const cityQ = ctx?.cityNative || cityEn;
+  const contactQ = contactTermsNative();
   const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
   const streetEn = getEnglishCityName(street);
-  const isLatin = /^[a-zA-Z\s\-'&.]+$/.test(b.name);
-  const ctx = getScanContext();
+  const isLatin = /^[a-zA-Z\u00c0-\u024f\u1e00-\u1eff\s\-'&.0-9]+$/.test(b.name);
   const nativeCat = categoryInNative(b.category || '', b.categoryLabel || '');
   const tld = countryTld();
 
@@ -2835,27 +2879,29 @@ function buildSearchQueries(b: Business): string[] {
   }
 
   // Query 1: Exact name + city (best for well-known businesses)
+  // v6.9.17: native city + native contact terms (お問い合わせ/联系/تماس)
   if (isLatin) {
-    queries.push(encodeURIComponent(`"${b.name}" ${cityEn || ''} phone email contact`));
+    queries.push(encodeURIComponent(`"${b.name}" ${cityQ || ''} ${contactQ}`));
   } else {
     if (nameEn && nameEn !== b.name) {
-      queries.push(encodeURIComponent(`"${nameEn}" ${cityEn || ''} phone email contact`));
+      queries.push(encodeURIComponent(`"${nameEn}" ${cityQ || ''} ${contactQ}`));
     }
   }
 
   // Query 2: Name + street + city (for local businesses)
   if (streetEn && streetEn !== street) {
-    queries.push(encodeURIComponent(`"${b.name}" "${streetEn}" ${cityEn || ''} phone email`));
+    queries.push(encodeURIComponent(`"${b.name}" "${streetEn}" ${cityQ || ''} phone email`));
   }
 
   // Query 3: Transliterated name + category + city (for non-Latin businesses)
   if (!isLatin && nameEn && nameEn !== b.name) {
-    queries.push(encodeURIComponent(`"${nameEn}" ${b.categoryLabel || ''} ${cityEn || ''} phone email website`));
+    queries.push(encodeURIComponent(`"${nameEn}" ${b.categoryLabel || ''} ${cityQ || ''} phone email website`));
   }
 
   // Query 4: Original name + city (for businesses that appear in local language)
+  // v6.9.17: native city spelling pairs with the native business name
   if (!isLatin) {
-    queries.push(encodeURIComponent(`"${b.name}" ${cityEn || ''} phone email website contact`));
+    queries.push(encodeURIComponent(`"${b.name}" ${cityQ || ''} phone email website contact`));
   }
 
   return queries.filter(q => q.length > 5);
@@ -2863,11 +2909,12 @@ function buildSearchQueries(b: Business): string[] {
 
 // Build a targeted query specifically for finding contact pages
 function buildContactQuery(b: Business): string {
+  const cityQ = getScanContext()?.cityNative || '';
   const nameEn = getEnglishCityName(b.name);
   const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
   const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
   const streetEn = getEnglishCityName(street);
-  const isLatin = /^[a-zA-Z\s\-'&.]+$/.test(b.name);
+  const isLatin = /^[a-zA-Z\u00c0-\u024f\u1e00-\u1eff\s\-'&.0-9]+$/.test(b.name);
   const parts: string[] = [];
   if (isLatin) {
     parts.push(`"${b.name}"`);
@@ -2875,7 +2922,7 @@ function buildContactQuery(b: Business): string {
     if (streetEn && streetEn !== street) parts.push(`"${streetEn}"`);
     if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
   }
-  if (cityEn) parts.push(cityEn);
+  if (cityQ) parts.push(cityQ); else if (cityEn) parts.push(cityEn);
   // Use site: to search for contact pages specifically
   // v6.9.16: native contact word replaces English-only "contact us"
   parts.push('site:facebook.com OR site:instagram.com');
@@ -2886,12 +2933,13 @@ function buildContactQuery(b: Business): string {
 
 // Build targeted email-only query
 function buildEmailQuery(b: Business): string {
+  const cityQ = getScanContext()?.cityNative || '';
   const nameEn = getEnglishCityName(b.name);
   const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
   const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
   const streetEn = getEnglishCityName(street);
   const category = b.categoryLabel || '';
-  const isLatin = /^[a-zA-Z\s\-'&.]+$/.test(b.name);
+  const isLatin = /^[a-zA-Z\u00c0-\u024f\u1e00-\u1eff\s\-'&.0-9]+$/.test(b.name);
   const parts: string[] = [];
   if (isLatin) {
     parts.push(`"${b.name}"`);
@@ -2900,7 +2948,7 @@ function buildEmailQuery(b: Business): string {
     if (category) parts.push(category);
     if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
   }
-  if (cityEn) parts.push(cityEn);
+  if (cityQ) parts.push(cityQ); else if (cityEn) parts.push(cityEn);
   // v6.9.16: native email-contact terms
   parts.push(contactTermsNative());
   return encodeURIComponent(parts.join(' '));
@@ -2908,12 +2956,13 @@ function buildEmailQuery(b: Business): string {
 
 // Build targeted phone-only query
 function buildPhoneQuery(b: Business): string {
+  const cityQ = getScanContext()?.cityNative || '';
   const nameEn = getEnglishCityName(b.name);
   const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
   const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
   const streetEn = getEnglishCityName(street);
   const category = b.categoryLabel || '';
-  const isLatin = /^[a-zA-Z\s\-'&.]+$/.test(b.name);
+  const isLatin = /^[a-zA-Z\u00c0-\u024f\u1e00-\u1eff\s\-'&.0-9]+$/.test(b.name);
   const parts: string[] = [];
   if (isLatin) {
     parts.push(`"${b.name}"`);
@@ -2922,7 +2971,7 @@ function buildPhoneQuery(b: Business): string {
     if (category) parts.push(category);
     if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
   }
-  if (cityEn) parts.push(cityEn);
+  if (cityQ) parts.push(cityQ); else if (cityEn) parts.push(cityEn);
   // v6.9.16: native phone-contact terms
   parts.push(contactTermsNative());
   return encodeURIComponent(parts.join(' '));
@@ -5159,18 +5208,18 @@ export async function rescanWideNet(
 // variants that the focused query missed still surface). English keywords
 // catch international chains; the app's query engine handles i18n via tags.
 const WIDE_NET_KEYWORDS: Record<string, string> = {
-  printing: '["name"~"print|druck|typograf|печать|друк|ბეჭდვ",i]',
-  cleaning: '["name"~"clean|cleaning|hygiene service|уборк|чистк|temizlik|წმენდ",i]',
-  yoga: '["name"~"yoga|йога|յոգա|იოგა",i]',
-  books: '["name"~"book|bücher|книг|գրք|წიგн",i]',
-  bookstore: '["name"~"book|bibli|книг|գրախանութ|წიგн",i]',
-  coworking: '["name"~"cowork|work Lab|hub|коворк",i]',
-  tattoo: '["name"~"tattoo|тат|տատու|ტატუ",i]',
-  music_school: '["name"~"music school|musik|piano|guitar|музык|երաժշտ|მუსიკ",i]',
-  art: '["name"~"art|gallery|atelier|галер|արվեստ|ხელოვნ",i]',
-  wedding: '["name"~"wedding|bridal|braut|свадеб|հարսան|ქორწი",i]',
-  courier: '["name"~"courier|delivery|express|курьер|курʼєр|მიწოდებ|առաքում",i]',
-  dance: '["name"~"dance|danz|ballet|танц|պար|ცეკვ",i]',
+  printing: '["name"~"print|druck|typograf|печать|друк|ბეჭდვ|印刷|인쇄|طباعة|דפוס|สิ่งพิมพ์|प्रिंट|cetak",i]',
+  cleaning: '["name"~"clean|hygiene service|уборк|чистк|temizlik|წმენდ|清洁|清掃|청소|تنظيف|ניקיון|ทำความสะอาด|सफाई|pembersihan",i]',
+  yoga: '["name"~"yoga|йога|յոգա|იოგა|瑜伽|ヨガ|요가|يوغا|יוגה|โยคะ|योग",i]',
+  books: '["name"~"book|bücher|книг|գրք|წიგნ|書店|书店|ブックス|서점|책방|مكتبة|ספרים|หนังสือ|पुस्तक|buku|sách",i]',
+  bookstore: '["name"~"book|bibli|книг|գրախանութ|წიგნ|書店|书店|ブックス|서점|책방|مكتبة|ספרים|หนังสือ|पुस्तक|buku",i]',
+  coworking: '["name"~"cowork|work Lab|hub|коворк|コワーキング|共享办公|聯合辦公|코워킹|공유 오피스|مساحة عمل|משרד משותף|โคเวิร์กกิง|कोवर्किंग",i]',
+  tattoo: '["name"~"tattoo|тат|տատու|ტატუ|纹身|紋身|刺青|タトゥー|타투|وشم|קעקוע|สักยันต์|टैटू",i]',
+  music_school: '["name"~"music school|musik|piano|guitar|музык|երաժշտ|მუსიკ|音楽教室|音楽学校|音乐学校|音乐教室|음악학원|음악 교실|مدرسة موسيقى|בית ספר למוסיקה|โรงเรียนดนตรี|संगीत विद्यालय",i]',
+  art: '["name"~"art|gallery|atelier|галер|արվեստ|ხელოვნ|艺术|藝術|画廊|畫廊|ギャラリー|アート|미술|갤러리|فن|אמנות|גלריה|ศิลปะ|แกลเลอรี|कला",i]',
+  wedding: '["name"~"wedding|bridal|braut|свадеб|հարսան|ქორწი|婚|結婚|ウェディング|웨딩|결혼|زفاف|أعراس|חתונה|งานแต่ง|शादी|विवाह",i]',
+  courier: '["name"~"courier|delivery|express|kargo|курьер|курʼєр|მიწოდებ|არაქარი|快递|配送|物流|宅配|運送|택배|배달|توصيل|شحن|משלוח|พัสดุ|จัดส่ง|कूरियर|डिलीवरी|giao hàng|kurir",i]',
+  dance: '["name"~"dance|danz|ballet|танц|պար|ცეკვ|舞蹈|ダンス|舞踊|댄스|무용|رقص|ריקוד|นาฏศิลป|เต้น|नृत्य",i]',
 };
 
 export function getGoogleMapsUrl(b: Business): string {
