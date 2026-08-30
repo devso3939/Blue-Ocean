@@ -143,7 +143,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '6.9.17';
+const APP_VERSION = '6.9.18';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -1016,7 +1016,14 @@ export default function App() {
                     {cityResults.map((c, i) => (
                       <button
                         key={i}
-                        onClick={() => { setSelectedCity(c); setCityResults([]); }}
+                        onClick={() => {
+                          // v6.9.18: clear stale scan results when a new city is picked
+                          abortRef.current?.abort();
+                          setOpportunities([]); setBusinesses(new Map()); setAiInsights('');
+                          setAiAnalysis(null); setAiVerification(null); setDemandSignals(new Map());
+                          setSelectedOppCategory(null); setShowAllOpps(false);
+                          setSelectedCity(c); setCityResults([]);
+                        }}
                         className="w-full px-3 py-2 text-left text-sm hover:bg-muted/50 border-b border-border/50 last:border-0"
                       >
                         <span className="font-medium">{c.name}</span>
@@ -1499,6 +1506,11 @@ export default function App() {
                 try {
                   const results = await resolveCity(ex.city);
                   if (results.length > 0) {
+                    // v6.9.18: clear stale scan results when a new city is picked
+                    abortRef.current?.abort();
+                    setOpportunities([]); setBusinesses(new Map()); setAiInsights('');
+                    setAiAnalysis(null); setAiVerification(null); setDemandSignals(new Map());
+                    setSelectedOppCategory(null); setShowAllOpps(false);
                     setSelectedCity(results[0]);
                     setCityResults([]);
                   }
