@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import {
   resolveCity,
+  ensureCityPopulation,
   queryBusinesses,
   getDemandSignals,
   computeOpportunities,
