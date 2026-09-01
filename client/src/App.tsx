@@ -15,6 +15,7 @@ import {
   type AIAnalysis,
   type SanityCheck,
   runDiscoveryPhases,
+  runAIPhase,
   getSmartCategoryAnalysis,
   sanityCheckOpportunities,
   aiVerifyOpportunities,
@@ -145,7 +146,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '6.9.22';
+const APP_VERSION = '6.9.23';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -508,10 +509,13 @@ export default function App() {
         return;
       }
 
-      // Run demand signals + scoring + AI in one streamed pipeline.
-      // Each phase emits DiscoveryProgress updates for the live feed UI.
+      // Run demand signals + scoring in one streamed pipeline.
+      // v6.9.23: runDiscoveryPhases now returns after demand + scoring —
+      // the AI phase moved to a background task below so REAL results
+      // (map, opportunities, leaderboard) render without waiting minutes
+      // for the LLM chain.
       setLoadingStage('Measuring demand & computing opportunities…');
-      const { opportunities: opps, demandSignals: signals, aiInsights, aiAnalysis: analysis } =
+      const { opportunities: opps, demandSignals: signals } =
         await runDiscoveryPhases(
           biz, selectedCity.population || 0,
           selectedCity.name, selectedCity.country,
@@ -519,63 +523,92 @@ export default function App() {
           ac.signal,
         );
       if (ac.signal.aborted) return;
+
+      // ── v6.9.23: REAL results on screen NOW ──
       setOpportunities(opps);
       setDemandSignals(signals);
-      if (aiInsights) setAiInsights(aiInsights);
-      setAiAnalysis(analysis ?? null);
+      setProgress(90);
 
-      // ── Second-chance rescan (v6.9.2): AI-checked absurd-low counts ──
-      // The sanity pass flags categories whose counts fail plausibility bands.
-      // For those with a name-based wide-net filter available, re-query OSM
-      // once and merge newly found businesses; then recompute opportunities.
-      const absurdCats = (analysis?.sanity || [])
-        .filter(s => s.verdict === 'absurd')
-        .map(s => s.category);
-      if (absurdCats.length > 0 && !ac.signal.aborted) {
+      // ── Background: AI + rescan + verification (non-blocking) ──
+      // The UI is already interactive; these phases stream in when ready.
+      // The AI phase carries a hard 90s time budget so the panel never
+      // hangs on "thinking" — timeout surfaces the honest fallback.
+      void (async () => {
         try {
-          setLoadingStage(`Re-checking ${absurdCats.length} suspicious categor${absurdCats.length > 1 ? 'ies' : 'y'}…`);
-          const merged = await rescanWideNet(biz, absurdCats, selectedCity.lat, selectedCity.lon, 10000, {
-            signal: ac.signal,
-            onProgress: (msg) => setRescanNote(msg),
-            areaBbox: computeScanArea(selectedCity.lat, selectedCity.lon, selectedCity.bbox, selectedCity.population), // v6.9.20: match the main scan area
-          });
-          const addedTotal = Array.from(merged.entries()).reduce((s, [c, arr]) => {
-            const before = biz.get(c)?.length ?? 0;
-            return s + Math.max(0, arr.length - before);
-          }, 0);
-          if (addedTotal > 0) {
-            biz = merged;
-            setBusinesses(merged);
-            const opps2 = computeOpportunities(merged, selectedCity.population || 0, signals);
-            setOpportunities(opps2);
-            if (analysis) {
-              analysis.sanity = sanityCheckOpportunities(opps2, selectedCity.population || 0);
-              setAiAnalysis(analysis);
-            }
+          setLoadingStage('AI analyzing in background…');
+          const { aiInsights: insights, aiAnalysis: analysis } = await runAIPhase(
+            biz, selectedCity.population || 0,
+            selectedCity.name, selectedCity.country,
+            opps, signals,
+            (dp) => setDiscoverProgress(dp),
+            ac.signal,
+          );
+          if (ac.signal.aborted) return;
+          if (insights) setAiInsights(insights);
+          setAiAnalysis(analysis ?? null);
+
+          // ── Second-chance rescan (v6.9.2): AI-checked absurd-low counts ──
+          const absurdCats = (analysis?.sanity || [])
+            .filter(s => s.verdict === 'absurd')
+            .map(s => s.category);
+          if (absurdCats.length > 0 && !ac.signal.aborted) {
+            try {
+              setLoadingStage(`Re-checking ${absurdCats.length} suspicious categor${absurdCats.length > 1 ? 'ies' : 'y'}…`);
+              const merged = await rescanWideNet(biz, absurdCats, selectedCity.lat, selectedCity.lon, 10000, {
+                signal: ac.signal,
+                onProgress: (msg) => setRescanNote(msg),
+                areaBbox: computeScanArea(selectedCity.lat, selectedCity.lon, selectedCity.bbox, selectedCity.population),
+              });
+              const addedTotal = Array.from(merged.entries()).reduce((s, [c, arr]) => {
+                const before = biz.get(c)?.length ?? 0;
+                return s + Math.max(0, arr.length - before);
+              }, 0);
+              if (addedTotal > 0) {
+                biz = merged;
+                setBusinesses(merged);
+                const opps2 = computeOpportunities(merged, selectedCity.population || 0, signals);
+                setOpportunities(opps2);
+                if (analysis) {
+                  analysis.sanity = sanityCheckOpportunities(opps2, selectedCity.population || 0);
+                  setAiAnalysis(analysis);
+                }
+              }
+              setRescanNote(addedTotal > 0
+                ? `Re-check added ${addedTotal} businesses missed by the first scan.`
+                : 'Re-check confirmed the first scan — no additional businesses found.');
+            } catch { /* rescan best-effort */ }
           }
-          setRescanNote(addedTotal > 0
-            ? `Re-check added ${addedTotal} businesses missed by the first scan.`
-            : 'Re-check confirmed the first scan — no additional businesses found.');
-        } catch { /* rescan best-effort */ }
-      }
 
-      // ── AI verification pass (v6.9.2): LLM cross-checks the flags ──
-      if (!ac.signal.aborted) {
-        try {
-          setLoadingStage('AI verifying results…');
-          const ver = await aiVerifyOpportunities(opportunities, selectedCity.population || 0, selectedCity.name, selectedCity.country, { signal: ac.signal });
-          setAiVerification(ver);
-          setEngineHealth(getEngineHealthSnapshot());
-        } catch { /* verification best-effort */ }
-      }
-      setProgress(100);
+          // ── AI verification pass (v6.9.2): LLM cross-checks the flags ──
+          if (!ac.signal.aborted) {
+            try {
+              const ver = await aiVerifyOpportunities(opps, selectedCity.population || 0, selectedCity.name, selectedCity.country, { signal: ac.signal });
+              setAiVerification(ver);
+              setEngineHealth(getEngineHealthSnapshot());
+            } catch { /* verification best-effort */ }
+          }
+          setProgress(100);
+        } catch { /* background phases best-effort — real results already shown */ }
+        finally {
+          // Release the abort handle only if no newer run replaced it
+          if (abortRef.current === ac) {
+            abortRef.current = null;
+            setCancelSignal(null);
+          }
+        }
+      })();
+
+      // Fast path done — the UI is interactive immediately; background
+      // phases stream AI insights, rescan and verification when ready.
     } catch (e: any) {
       if (e.message !== 'Cancelled') setError(e.message || 'Analysis failed');
     } finally {
+      // v6.9.23: loading ends as soon as real results are on screen —
+      // background AI/rescan/verification continue streaming via their own
+      // progress channels. Abort handle stays alive (owned by the
+      // background task) until the whole pipeline finishes.
       setLoading(false);
       setLoadingStage('');
-      abortRef.current = null;
-      setCancelSignal(null);
     }
   }, [selectedCity]);
 

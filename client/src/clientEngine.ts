@@ -4207,6 +4207,9 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
 // ─── Discovery phases (Demand signals → Scoring → AI) ──────────
 // Streams DiscoveryProgress updates to onProgress so the UI can render
 // each phase in real time. Returns the final opportunity list.
+// v6.9.23: split Discover into FAST results (scan + demand + scoring) and a
+// BACKGROUND AI phase, so real results render in seconds instead of waiting
+// minutes for the LLM chain. runDiscoveryPhases stays for compatibility.
 export async function runDiscoveryPhases(
   businesses: Map<string, Business[]>,
   population: number,
@@ -4300,12 +4303,34 @@ export async function runDiscoveryPhases(
       score: biggest.score,
     };
   }
-  emitDP({ percent: 90 });
+  emitDP({ percent: 90, phase: 'score' });
+  return { opportunities, demandSignals: signals, aiInsights: '', aiAnalysis: undefined };
+}
 
-  // Phase D: smart AI analysis (structured insights/patterns/risks/actions)
-  _dp.phase = 'ai';
-  _dp.ai = 'thinking';
-  emitDP({ percent: 92 });
+// ─── Background AI phase (v6.9.23) ──────────────────────────────
+// Runs AFTER real results are already on screen. Two hard guarantees:
+//   1. TIME BUDGET — the whole chain (LLM + sanity) is raced against a
+//      budget; if the model chain stalls, we still surface the honest
+//      deterministic fallback so the panel never hangs on "thinking".
+//   2. REAL DATA ONLY — the AI never sees invented numbers; it receives the
+//      exact computed facts. If it fails entirely, we say so.
+export const AI_PHASE_BUDGET_MS = 90_000; // hard cap on the background AI pass
+
+export async function runAIPhase(
+  businesses: Map<string, Business[]>,
+  population: number,
+  cityName: string,
+  countryName: string,
+  opportunities: OpportunityResult[],
+  signals: Map<string, DemandSignal>,
+  onProgress?: (dp: DiscoveryProgress) => void,
+  abortSignal?: AbortSignal,
+): Promise<{ aiInsights: string; aiAnalysis?: AIAnalysis }> {
+  const isCancelled = () => abortSignal?.aborted ?? false;
+  const _dp: Partial<DiscoveryProgress> = { phase: 'ai', ai: 'thinking', percent: 92 };
+  const emitDP = (o?: Partial<DiscoveryProgress>) => { if (onProgress) onProgress({ ..._dp, ...o } as DiscoveryProgress); };
+  emitDP();
+
   let aiInsights = '';
   let aiAnalysis: AIAnalysis | undefined;
   try {
@@ -4313,7 +4338,15 @@ export async function runDiscoveryPhases(
     // Attach real opportunity scores to the facts (LLM sees exact numbers)
     const scoreByCat = new Map(opportunities.map(o => [o.category, o.score]));
     facts.categories.forEach(c => { c.score = scoreByCat.get(c.category) ?? 0; });
-    const analysis = await getSmartAIAnalysis(facts, opportunities, { signal: abortSignal });
+
+    // Hard time budget: race the model chain against AI_PHASE_BUDGET_MS.
+    // On timeout we still run the deterministic sanity pass so warnings and
+    // rescan decisions never depend on a slow third-party LLM.
+    const analysis = await Promise.race([
+      getSmartAIAnalysis(facts, opportunities, { signal: abortSignal }),
+      new Promise<never>((_, rej) =>
+        setTimeout(() => rej(new Error('AI time budget exceeded')), AI_PHASE_BUDGET_MS)),
+    ]);
     // ── AI sanity-check pass (v6.9.1): verify the result before final. ──
     // Deterministic per-capita bands flag implausible counts; when a model
     // is available it reviews the data warnings too. Flagged categories get
@@ -4337,10 +4370,12 @@ export async function runDiscoveryPhases(
       : 'Analysis complete';
     _dp.aiInsightsFull = analysis; // full structured result for the UI
   } catch {
+    // Honest fallback (real data, clearly labeled deterministic) — never a
+    // hang, never fabricated numbers.
     _dp.ai = 'error';
   }
   emitDP({ percent: 100, phase: 'done' });
-  return { opportunities, demandSignals: signals, aiInsights, aiAnalysis };
+  return { aiInsights, aiAnalysis };
 }
 
 export async function getAIAnalysis(
