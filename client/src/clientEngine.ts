@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Blue Ocean Client Engine — v2
  * 
  * Core functionality:
@@ -83,6 +83,8 @@ const _serperKey = () => _poolKey('serper');
 const _tavilyKey = () => _poolKey('tavily');
 const _braveKey = () => _poolKey('brave');
 
+export type PopulationSource = 'osm' | 'open-meteo' | 'wikidata';
+
 export interface CityResult {
   name: string;
   country: string;
@@ -90,6 +92,7 @@ export interface CityResult {
   lat: number;
   lon: number;
   population: number | null;
+  populationSource?: PopulationSource;  // v6.9.24: which fallback service resolved it
   bbox: [number, number, number, number];
 }
 
@@ -105,7 +108,7 @@ export async function resolveCity(query: string): Promise<CityResult[]> {
     if (!res.ok) throw new Error(`Nominatim returned ${res.status}`);
     const data = await res.json();
     if (!data.length) throw new Error(`No results found for "${query}"`);
-    return data.map((r: any) => {
+    const results: CityResult[] = data.map((r: any) => {
       const bbox = r.boundingbox.map(Number);
       const pop = r.extratags?.population ? parseInt(r.extratags.population) : null;
       return {
@@ -115,11 +118,167 @@ export async function resolveCity(query: string): Promise<CityResult[]> {
         lat: parseFloat(r.lat),
         lon: parseFloat(r.lon),
         population: pop,
+        populationSource: pop != null ? ('osm' as PopulationSource) : undefined,
         bbox: [bbox[0], bbox[2], bbox[1], bbox[3]],
       };
     });
+    // v6.9.24: population fallback chain — Nominatim's extratags.population
+    // is missing for many cities (Tbilisi included), which silently disabled
+    // every per-capita metric. Backfill from the next service in the chain
+    // (Open-Meteo; stage 3 / Wikidata completes on city selection).
+    await backfillCityPopulations(results);
+    return results;
   }
   throw new Error('Nominatim rate limit — try again in a few seconds');
+}
+
+// ─── v6.9.24: Population fallback chain ────────────────────────────
+// Population used to come from ONE service (Nominatim extratags) with no
+// fallback — a single point of failure. The chain is now:
+//   1. OSM Nominatim extratags (primary, resolved by the caller above)
+//   2. Open-Meteo Geocoding API — keyless, CORS-open, returns population
+//   3. Wikidata SPARQL (P1082) — coordinate proximity, then exact name
+// Results are cached for 30 days (population changes on a yearly scale).
+const POP_TIMEOUT_MS = 7000;
+
+async function fetchJsonWithTimeout(url: string, timeoutMs: number, init?: RequestInit): Promise<any | null> {
+  try {
+    const res = await fetch(url, {
+      ...init,
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { 'Accept': 'application/json', ...init?.headers },
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch { return null; }
+}
+
+// Reject junk values (missing units, per-square-km densities, typos)
+function plausiblePopulation(v: any): number | null {
+  const n = typeof v === 'string' ? parseInt(v.replace(/[^\d]/g, ''), 10) : Number(v);
+  if (!Number.isFinite(n) || n < 500 || n > 50_000_000) return null;
+  return n;
+}
+
+// Stage 2: Open-Meteo geocoding — free, keyless, CORS-open
+async function populationFromOpenMeteo(name: string, countryCode: string, lat: number, lon: number): Promise<number | null> {
+  const d = await fetchJsonWithTimeout(
+    `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=10&language=en&format=json`,
+    POP_TIMEOUT_MS,
+  );
+  const all: any[] = d?.results || [];
+  if (!all.length) return null;
+  let pool = all.filter(r => r.population != null);
+  if (countryCode) {
+    const inCountry = pool.filter(r => (r.country_code || '').toUpperCase() === countryCode);
+    if (inCountry.length) pool = inCountry;  // never let a same-named foreign city win
+  }
+  if (!pool.length) return null;
+  // Several candidates may share the name — take the one nearest to the
+  // coordinates Nominatim already resolved for this city.
+  pool.sort((a, b) => {
+    const da = (a.latitude - lat) ** 2 + (a.longitude - lon) ** 2;
+    const db = (b.latitude - lat) ** 2 + (b.longitude - lon) ** 2;
+    return da - db;
+  });
+  return plausiblePopulation(pool[0].population);
+}
+
+async function wdSparql(sparql: string): Promise<number | null> {
+  const d = await fetchJsonWithTimeout(
+    'https://query.wikidata.org/sparql?format=json&query=' + encodeURIComponent(sparql),
+    POP_TIMEOUT_MS,
+    { headers: { 'Accept': 'application/sparql-results+json' } },
+  );
+  for (const row of d?.results?.bindings || []) {
+    const v = plausiblePopulation(row?.pop?.value);
+    if (v) return v;
+  }
+  return null;
+}
+
+// Stage 3: Wikidata P1082 (population). First nearest populated settlement
+// around the exact point Nominatim returned, then an exact-name fallback.
+async function populationFromWikidata(name: string, lat: number, lon: number): Promise<number | null> {
+  const point = `Point(${lon.toFixed(4)} ${lat.toFixed(4)})`;
+  const around = `SELECT ?pop WHERE {
+  ?place wdt:P31/wdt:P279* wd:Q486972 ;
+         wdt:P1082 ?pop ;
+         wdt:P625 ?loc .
+  SERVICE wikibase:around {
+    ?place wdt:P625 ?loc2 .
+    bd:serviceParam wikibase:center "${point}"^^geo:wktLiteral .
+    bd:serviceParam wikibase:radius "15" .
+  }
+} ORDER BY DESC(?pop) LIMIT 3`;
+  const a = await wdSparql(around);
+  if (a) return a;
+  const esc = name.replace(/["\\]/g, ' ').trim();
+  if (!esc) return null;
+  const byName = `SELECT ?pop WHERE {
+  ?place wdt:P31/wdt:P279* wd:Q515 ;
+         wdt:P1082 ?pop ;
+         rdfs:label ?l .
+  FILTER (LCASE(STR(?l)) = LCASE("${esc}"))
+} ORDER BY DESC(?pop) LIMIT 3`;
+  return wdSparql(byName);
+}
+
+// Runs the chain (stage 2 → optional stage 3) for one city.
+export async function resolvePopulation(
+  name: string,
+  country: string,
+  countryCode: string,
+  lat: number,
+  lon: number,
+  opts?: { wikidata?: boolean },
+): Promise<{ population: number; source: PopulationSource } | null> {
+  const ck = 'pop_' + cacheKey(name, country);
+  const cached = cacheGet<{ population: number; source: PopulationSource }>(ck, 30 * DAY_MS);
+  if (cached) return cached;
+  const om = await populationFromOpenMeteo(name, countryCode, lat, lon);
+  if (om) {
+    const r = { population: om, source: 'open-meteo' as PopulationSource };
+    cacheSet(ck, r);
+    return r;
+  }
+  if (opts?.wikidata !== false) {
+    const wd = await populationFromWikidata(name, lat, lon);
+    if (wd) {
+      const r = { population: wd, source: 'wikidata' as PopulationSource };
+      cacheSet(ck, r);
+      return r;
+    }
+  }
+  return null;
+}
+
+// Backfills population for every city still missing one (parallel, each
+// capped at 3.5 s so city typeahead never stalls). Mutates in place.
+export async function backfillCityPopulations(cities: CityResult[]): Promise<void> {
+  await Promise.all(cities.map(async (c) => {
+    if (c.population != null) return;
+    try {
+      const fb = await Promise.race([
+        resolvePopulation(c.name, c.country, c.countryCode, c.lat, c.lon, { wikidata: false }),
+        new Promise<null>(r => setTimeout(() => r(null), 3500)),
+      ]);
+      if (fb) {
+        c.population = fb.population;
+        c.populationSource = fb.source;
+      }
+    } catch { /* population is best-effort */ }
+  }));
+}
+
+// Completes the FULL chain for a single selected city (stage 3 included).
+// Called right before any flow that depends on population for scoring.
+export async function ensureCityPopulation(city: CityResult): Promise<CityResult> {
+  if (city.population != null && city.population > 0) {
+    return city.populationSource ? city : { ...city, populationSource: 'osm' };
+  }
+  const fb = await resolvePopulation(city.name, city.country, city.countryCode, city.lat, city.lon);
+  return fb ? { ...city, population: fb.population, populationSource: fb.source } : city;
 }
 
 // ─── Business Data ─────────────────────────────────────────────────
@@ -316,6 +475,12 @@ const RX_YOGA = /(yoga|pilates|йога|пилатес|пілатес|یوگا|�
 const RX_DANCE = /((^|[^a-zà-öø-ÿ])(danc|danza|tanz(?!an))|ballet|choreo|танц|балет|хорео|バレエ|ダンス|発レ|발레|댄스|무용|舞蹈|芭蕾|舞踏|رقص|باليه|ריקוד|מחול|नृत्य|เต้น|รำ|ქორეოგრაფი|ცეკვ|պար|salsa|bachata|kizomba|zumba|tango|hip.?hop|breakdance|break.?danc|b\.?boy|flamenco|merengue|cha.?cha|foxtrot|waltz|jazz.?danc|lindy.?hop|street.?danc)/i;
 const RX_MASSAGE = /(massage|masaż|массаж|масаж|masaj|マッサージ|마사지|按摩|推拿|นวด|مساج|تدليك|מסאז|मालिश)/i;
 const RX_SPA = /(spa|спа|สปา|スパ)/i;
+// v6.9.24: hostels are misfiled as hotels whenever they carry a generic
+// office/company tag or a hotel-ish tourism tag. Word-boundary guarded so
+// e.g. "Ghostel" doesn't match; covers the languages hostels actually
+// advertise in (hostels serve international backpackers — English word
+// 'hostel' appears in local names worldwide, alongside local variants).
+const RX_HOSTEL = /(^|[^a-zà-öø-ÿ])(hostel|hostal|ostello|hostel|хостел|хостел|ჰოსტელი|ホステル|호스텔|青年旅舍|青旅|найт|pousada juvenil|albergue juvenil)([^a-zà-öø-ÿ]|$)/i;
 
 export function categorizeBusiness(tags: Record<string, string>): string | null {
   const a = tags.amenity;
@@ -540,7 +705,12 @@ export function categorizeBusiness(tags: Record<string, string>): string | null 
 
   // ─── Tourism ───
   if (t === 'hotel' || t === 'motel' || t === 'apartment' || t === 'bed_and_breakfast' ||
-      t === 'resort' || t === 'chalet' || t === 'aparthotel') return 'hotel';
+      t === 'resort' || t === 'chalet' || t === 'aparthotel') {
+    // v6.9.24: a hotel-tagged property named "… Hostel" is a hostel in
+    // practice (mis-tagged in OSM) — trust the name, not just the tag.
+    if (RX_HOSTEL.test(nameOf())) return 'hostel';
+    return 'hotel';
+  }
   if (t === 'hostel') return 'hostel';
   if (t === 'guest_house') return 'hotel';
   if (t === 'museum' || t === 'gallery' || t === 'aquarium' || t === 'zoo' ||
@@ -633,7 +803,11 @@ export function categorizeBusiness(tags: Record<string, string>): string | null 
     if (/(med|clinic|doctor|health|dent|pharm)/.test(nm)) return 'clinic';
     if (/(bank|financ|invest|credit|fund|capital)/.test(nm)) return 'bank';
     if (/(energ|oil|gas|mining)/.test(nm)) return 'fuel';
-    if (/(hotel|hostel|motel)/.test(nm)) return 'hotel';
+    // v6.9.24: hostel MUST be tested before the generic hotel mapping —
+    // a generic office named "Envoy Hostel Tbilisi" used to be counted as a
+    // hotel, making the hostel bucket look empty (false "gap").
+    if (RX_HOSTEL.test(nm)) return 'hostel';
+    if (/(hotel|motel)/.test(nm)) return 'hotel';
     if (/(import|export|trade|wholesale|supply|distribut)/.test(nm)) return 'market';
     return null; // v6.9.16: unmatched company names must NOT be filed as
                  // software — that poisoned category counts. Drop instead;
@@ -1489,6 +1663,7 @@ const CAT_OSM_FILTER: Record<string, string> = {
   fast_food: '["amenity"~"fast_food|food_court"]',
   ice_cream: '["amenity"="ice_cream"]',
   hotel: '["tourism"~"hotel|hostel|motel|apartment|guest_house|bed_and_breakfast|resort|chalet|aparthotel"]',
+  hostel: '["tourism"="hostel"]|["tourism"~"hotel|apartment|guest_house|bed_and_breakfast"]["name"~"hostel|hostal|ostello|хостел|ჰოსტელი|ホステル|호스텔|青年旅舍|青旅",i]',
   gym: '["leisure"~"fitness_centre|sports_centre|sports_hall|swimming_pool"]',
   beauty_salon: '["shop"~"beauty|cosmetics|beauty_salon"]',
   hair_salon: '["shop"~"hairdresser|wigs|hairdresser_supply"]',
@@ -5102,20 +5277,16 @@ function deterministicAIAnalysis(
 //   category — e.g. a 1.1M city cannot plausibly have 1 printing shop.
 //   Layer 2 (AI, when a key is configured): an LLM double-checks the flagged
 //   categories and can also flag ones the bands missed.
-export function sanityCheckOpportunities(
-  opportunities: OpportunityResult[],
-  population: number,
-): SanityCheck[] {
-  const out: SanityCheck[] = [];
-  // Per-capita sanity bands (per 10k residents) per category.
-  // min: below this, the count is suspicious for a real market.
-  // max: above this, the count is suspiciously high (likely mis-categorized).
-  const BANDS: Record<string, { min: number; max: number }> = {
-    cafe: { min: 0.5, max: 40 }, restaurant: { min: 0.5, max: 40 },
+// Per-capita plausibility bands (per 10k residents) — module-level since
+// v6.9.24 so BOTH the sanity checker and the opportunity scorer share the
+// same thresholds (the scorer lowers confidence for out-of-band categories).
+export const SANITY_BANDS: Record<string, { min: number; max: number }> = {
+  cafe: { min: 0.5, max: 40 }, restaurant: { min: 0.5, max: 40 },
     fast_food: { min: 0.2, max: 25 }, bar: { min: 0.1, max: 20 },
     convenience: { min: 1, max: 50 }, supermarket: { min: 0.5, max: 12 },
     bakery: { min: 0.3, max: 15 }, pharmacy: { min: 0.4, max: 12 },
     bank: { min: 0.4, max: 12 }, hotel: { min: 0.3, max: 25 },
+    hostel: { min: 0.15, max: 25 }, // v6.9.24: hostel had no band — undercounted hostels were never flagged, so the category could win the leaderboard on an empty scan (Tbilisi case)
     beauty_salon: { min: 0.5, max: 30 }, clothing: { min: 0.5, max: 35 },
     electronics: { min: 0.2, max: 15 }, furniture: { min: 0.1, max: 10 },
     hardware: { min: 0.1, max: 10 }, car_repair: { min: 0.3, max: 15 },
@@ -5144,7 +5315,14 @@ export function sanityCheckOpportunities(
     ice_cream: { min: 0.02, max: 10 }, bookstore: { min: 0.02, max: 6 },
     web_agency: { min: 0.05, max: 20 }, market: { min: 0.1, max: 30 },
     pet_groomer: { min: 0.1, max: 20 }, hospital: { min: 0.01, max: 2 },
-  };
+};
+
+export function sanityCheckOpportunities(
+  opportunities: OpportunityResult[],
+  population: number,
+): SanityCheck[] {
+  const out: SanityCheck[] = [];
+  const BANDS = SANITY_BANDS;
   if (population <= 0) return out; // no population → nothing to check against
   for (const opp of opportunities) {
     const per10k = (opp.existing / population) * 10000;
@@ -5522,6 +5700,13 @@ WIDE_NET_KEYWORDS.hair_salon = '["name"~"hair|friseur|coiff|kuaf|пари|barber
 WIDE_NET_KEYWORDS.massage = '["name"~"massage|массаж|masaż|masaj|マッサージ|마사지|按摩|推拿|นวด|مساج|تدليك|मालिश",i]';
 WIDE_NET_KEYWORDS.yoga = '["name"~"yoga|pilates|йога|یوگا|يوغا|योग|ヨガ|요가|瑜伽|普拉提",i]|["leisure"="yoga"]|["sport"~"yoga|pilates",i]';
 WIDE_NET_KEYWORDS.dance = '["name"~"dance|ballet|танц|балет|舞蹈|ダンス|댄스|무용|رقص|नृत्य|เต้น",i]|["leisure"~"dance|dance_hall"]|["amenity"="dancing_school"]';
+// v6.9.24: hostel had NO wide-net entry — when the first scan missed most
+// hostels (common: tagged only with a name, or tagged as a generic office),
+// the second-chance rescan silently skipped the category, cementing the
+// false "hostels are a gap" story. Name-based multilingual selector now
+// rescues them; overlap with the hotel bucket is impossible because the
+// categorizer's hostel branch runs before the hotel branch.
+WIDE_NET_KEYWORDS.hostel = '["name"~"hostel|hostal|ostello|хостел|ჰოსტელი|ホステル|호스텔|青年旅舍|青旅|ユースホステル|유스호스텔|青年旅社",i]|["tourism"="hostel"]';
 
 export function getGoogleMapsUrl(b: Business): string {
   if (b.name) {
@@ -5683,6 +5868,17 @@ export function computeOpportunities(
   // results carry populationKnown=false so the UI can warn the user.
   const pop = population && population > 0 ? population : null;
 
+  // ── v6.9.24: coverage detection (general principle, not location data) ──
+  // If EVERY category comes back suspiciously empty, the problem is the
+  // data source (OSM coverage / scan area), not the market. In that case
+  // "few found = little competition" is a lie, so low-competition bonuses
+  // and gap scores must be damped, not crowned.
+  let totalBiz = 0;
+  for (const [, bizs] of businesses) totalBiz += bizs.length;
+  const checkedCats = businesses.size;
+  const coveredRatio = checkedCats > 0 ? totalBiz / checkedCats : 0;   // avg businesses/category
+  const osmCoverage = Math.min(1, coveredRatio / 15);                  // ≥15 avg/category → full coverage
+
   // Calculate per-10k density for all categories
   const per10kValues: number[] = [];
   for (const [, bizs] of businesses) {
@@ -5713,10 +5909,35 @@ export function computeOpportunities(
     // population
     const sizeScore = pop ? Math.min(100, Math.round(Math.log10(Math.max(pop, 1)) * 18)) : 50;
 
-    // Competition score: fewer existing = less competition (0-100)
-    const compScore = existing === 0 ? 90 : Math.max(0, Math.round(100 - existing * 3));
+    // ── v6.9.24: competition score — the old formula (100 − existing×3,
+    // 90 for zero) crowned any category the scanner failed to cover as a
+    // "blue ocean". Now "zero found" is treated as UNVERIFIED, not empty:
+    // the scan floor subtracts what the scan plausibly missed before the
+    // competition score is computed, and "zero" never scores higher than
+    // "a few confirmed exist".
+    const scanFloor = Math.ceil(
+      (bl * (pop || 0) / 10000) * 0.25 * (pop ? 1 : 0.5) * (1 - osmCoverage)
+    );
+    const unverified = Math.max(0, scanFloor - existing);
+    const compRaw = existing === 0 ? 90 : Math.max(0, Math.round(100 - existing * 3));
+    const compScore = Math.round(Math.max(0, compRaw - unverified * 2));
 
     let score = Math.round(0.45 * gapScore + 0.25 * sizeScore + 0.30 * compScore);
+
+    // ── v6.9.24: data-confidence damping (the principle fix) ──
+    // A category the scanner undercounted (below the same plausibility
+    // bands the sanity checker uses) or an area with thin OSM coverage
+    // must NOT be able to win the leaderboard on "low competition".
+    // Confidence multiplies the score instead of banning it: still visible,
+    // honestly ranked, and flagged by the sanity checker as before.
+    const band = SANITY_BANDS[cat];
+    const undercounted = !!(pop && band && per10k < band.min);
+    let confidence = 1;
+    if (undercounted) confidence -= 0.4;         // count below plausibility floor
+    if (!pop) confidence -= 0.15;                 // no population → gap/size are guesses
+    confidence -= 0.25 * (1 - osmCoverage);       // thin OSM coverage overall
+    confidence = Math.max(0.2, confidence);
+    score = Math.round(score * confidence);
 
     // Demand bonus only from REAL measured signals (confidence > 0) —
     // a dead-network zero must not drag scores down (M7).

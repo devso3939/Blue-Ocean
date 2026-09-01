@@ -146,7 +146,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '6.9.23';
+const APP_VERSION = '6.9.24';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -1062,7 +1062,16 @@ export default function App() {
                           setOpportunities([]); setBusinesses(new Map()); setAiInsights('');
                           setAiAnalysis(null); setAiVerification(null); setDemandSignals(new Map());
                           setSelectedOppCategory(null); setShowAllOpps(false);
+                          // v6.9.24: select immediately (no UI delay), then enrich
+                          // population in the background via the full fallback
+                          // chain (OSM → Open-Meteo → Wikidata). Only applied
+                          // if this exact city is still selected (race guard).
                           setSelectedCity(c); setCityResults([]);
+                          ensureCityPopulation(c).then(enriched => {
+                            setSelectedCity(prev =>
+                              prev && prev.name === c.name && prev.lat === c.lat ? enriched : prev
+                            );
+                          }).catch(() => {});
                         }}
                         className="w-full px-3 py-2 text-left text-sm hover:bg-muted/50 border-b border-border/50 last:border-0"
                       >
