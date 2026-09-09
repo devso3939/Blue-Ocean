@@ -2,17 +2,14 @@
   "name": "blue-ocean",
   "version": "6.9.25",
   "private": true,
+  "description": "Blue Ocean — market gap intelligence (Vite client app live on GitHub Pages; Next.js frontend app backed by Supabase).",
   "scripts": {
-    "build": "npm run build --workspace=frontend",
-    "build:client": "npm run build --workspace=client",
-    "build:all": "npm run build --workspace=frontend && npm run build --workspace=client",
-    "dev": "npm run dev --workspace=frontend",
-    "lint": "npm run lint --workspace=frontend"
+    "build": "cd frontend && npm run build",
+    "build:client": "cd client && npm run build",
+    "build:all": "npm run build:client && npm run build",
+    "dev": "cd frontend && npm run dev",
+    "lint": "cd frontend && npm run lint"
   },
-  "workspaces": [
-    "client",
-    "frontend"
-  ],
   "engines": {
     "node": ">=18"
   }
