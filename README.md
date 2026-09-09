@@ -1,10 +1,10 @@
-# 🌊 Blue Ocean v6.5.0
+# 🌊 Blue Ocean v6.9.24
 
 **Find What Your City Is Missing.**
 
 Discover underserved industries, compare business supply across similar cities, and uncover Blue Ocean opportunities using global open location data — all from your browser with zero backend.
 
-![Version](https://img.shields.io/badge/version-6.5.0-blue)
+![Version](https://img.shields.io/badge/version-6.9.24-blue)
 ![React](https://img.shields.io/badge/React-18-61DAFB)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.4-3178C6)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -12,6 +12,19 @@ Discover underserved industries, compare business supply across similar cities, 
 ## 🚀 Live Demo
 
 **https://devso3939.github.io/Blue-Ocean/**
+
+## 🆕 What's new in v6.9.24 (reliability & speed update)
+
+**Reliability layer (v6.9.1–v6.9.24):**
+- Engine-health system with classified cooldowns (network 45s / captcha 90s / quota 30 min) and a live engine-status panel in the UI
+- API-key pools with automatic quota rotation for Brave, Serper, Tavily and OpenRouter, plus a Settings backup-key manager
+- Brave surge guard + staggered request waves, scan-wide network-failure budget, sticky per-host failure memory, CORS-open host allowlist
+
+**Discovery quality & speed:**
+- Multilingual categorization rewrite (40/40 tests passing) + 37 new countries added
+- City-aware scan area: Nominatim bbox + population-scaled radius (replaces the fixed 10 km circle)
+- Population fallback chain: OSM → Open-Meteo → Wikidata; coverage-aware, confidence-damped opportunity scoring
+- Discover finishes in seconds — AI analysis, wide-net rescan and verification now run in the background with a 90-second budget
 
 ## 🆕 What's new in v6.5.0 (global contact & language update)
 
