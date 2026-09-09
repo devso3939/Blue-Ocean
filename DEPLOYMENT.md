@@ -255,6 +255,17 @@ The `dist/` folder contains all static files ready for any web server.
 
 ---
 
+## Third-party hosting: do NOT connect Render/Vercel/Netlify auto-deploys
+
+Render was connected to this repo previously and emailed a build failure on
+every push (repo root has no package.json, so third-party root builds exit 1).
+It has been disconnected on purpose. The only deployment paths are:
+
+- **client/** app → GitHub Pages (`.github/workflows/deploy-client.yml`)
+- **backend** → Supabase Postgres (migrations in `backend/supabase/`, no servers)
+
+---
+
 ## Supabase Backend
 
 The backend API now runs **entirely inside Supabase Postgres** (no Fly.io, no
