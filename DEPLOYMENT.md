@@ -5,7 +5,7 @@
 ✅ **Code pushed to GitHub**: https://github.com/devso3939/Blue-Ocean  
 ✅ **GitHub Actions workflow**: `.github/workflows/deploy.yml`  
 ✅ **GitHub Pages**: Auto-deploys on push to main  
-✅ **Architecture**: 100% client-side (no backend needed)
+✅ **Architecture**: client-side app + **Supabase Postgres backend** (API lives in the database — see `backend/supabase/README.md`)
 
 ---
 
@@ -252,3 +252,36 @@ The `dist/` folder contains all static files ready for any web server.
 ---
 
 > **Blue Ocean is 100% client-side — no backend, no database, no server costs.** 🌊
+
+---
+
+## Supabase Backend
+
+The backend API now runs **entirely inside Supabase Postgres** (no Fly.io, no
+application servers). Full details: [`backend/supabase/README.md`](backend/supabase/README.md).
+
+### What runs where
+
+| Component | Where |
+|---|---|
+| Client app (client/ — React+Vite) | GitHub Pages |
+| Next.js frontend (frontend/) | static build / Vercel-ready |
+| REST API | Supabase PostgREST (`public.api_*` RPCs) |
+| Job queue + workers | `bo.jobs` + pg_cron (5 s ticks) + pg_net |
+| Overpass / Wikidata / World Bank fetches | from Postgres via `extensions.http` + `pg_net` |
+
+### Applying migrations
+
+```bash
+# from repo root (uses backend/.env service key)
+backend/.venv/Scripts/python.exe backend/db_tool.py "$(cat backend/supabase/migrations/001_schema.sql)"
+# …repeat for each migration file in order (001 → 011)
+```
+
+Seed taxonomy + countries with `backend/supabase/seed.py`, peer cities with
+`backend/supabase/seed_peers.py`.
+
+### Environment variables (gitignored)
+
+- `backend/.env`: `SUPABASE_URL`, `SECRET_KEY` (service role)
+- `frontend/.env.local`: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`

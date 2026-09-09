@@ -667,21 +667,15 @@ export default function AnalysisPage({ id }: { id: string }) {
           Export this analysis — city, population, category, business list, peers, benchmark, gap, scores and source metadata.
         </div>
         <div className="flex gap-2">
-          <a href={api.analysisExport(id, "xlsx")} download>
-            <Button variant="default" size="sm">
-              <FileSpreadsheet className="h-3.5 w-3.5" /> Excel
-            </Button>
-          </a>
-          <a href={api.analysisExport(id, "csv")} download>
-            <Button variant="outline" size="sm">
-              <FileJson className="h-3.5 w-3.5" /> CSV
-            </Button>
-          </a>
-          <a href={api.analysisExport(id, "json")} download>
-            <Button variant="outline" size="sm">
-              <FileJson className="h-3.5 w-3.5" /> JSON
-            </Button>
-          </a>
+          <Button variant="default" size="sm" onClick={() => api.analysisExport(id, "xlsx")}>
+            <FileSpreadsheet className="h-3.5 w-3.5" /> Excel
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => api.analysisExport(id, "csv")}>
+            <FileJson className="h-3.5 w-3.5" /> CSV
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => api.analysisExport(id, "json")}>
+            <FileJson className="h-3.5 w-3.5" /> JSON
+          </Button>
         </div>
       </div>
     </div>

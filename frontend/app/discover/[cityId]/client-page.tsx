@@ -285,16 +285,12 @@ export default function DiscoverPage({ cityId }: { cityId: string }) {
                 ))}
               </select>
             </label>
-            <a href={api.opportunitiesExport(realCityId, "xlsx")} download>
-              <Button variant="default" size="sm">
-                <FileSpreadsheet className="h-3.5 w-3.5" /> Excel
-              </Button>
-            </a>
-            <a href={api.opportunitiesExport(realCityId, "csv")} download>
-              <Button variant="outline" size="sm">
-                <Download className="h-3.5 w-3.5" /> CSV
-              </Button>
-            </a>
+            <Button variant="default" size="sm" onClick={() => api.opportunitiesExport(realCityId, "xlsx")}>
+              <FileSpreadsheet className="h-3.5 w-3.5" /> Excel
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => api.opportunitiesExport(realCityId, "csv")}>
+              <Download className="h-3.5 w-3.5" /> CSV
+            </Button>
           </div>
         </CardContent>
       </Card>

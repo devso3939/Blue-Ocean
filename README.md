@@ -1,8 +1,8 @@
-# 🌊 Blue Ocean v6.9.24
+# 🌊 Blue Ocean v6.9.25
 
 **Find What Your City Is Missing.**
 
-Discover underserved industries, compare business supply across similar cities, and uncover Blue Ocean opportunities using global open location data — all from your browser with zero backend.
+Discover underserved industries, compare business supply across similar cities, and uncover Blue Ocean opportunities using global open location data — with a **Postgres-native backend on Supabase** (jobs, scoring and market data live entirely in the database).
 
 ![Version](https://img.shields.io/badge/version-6.9.24-blue)
 ![React](https://img.shields.io/badge/React-18-61DAFB)
