@@ -1217,7 +1217,9 @@ const OVERPASS_MIRRORS = [
   // it shares infrastructure and bans with overpass-api.de, adding a mirror
   // that is already banned just wastes the retry window.)
   'https://overpass.osm.jp/api/interpreter',
-  'https://overpass.private.coffee/api/interpreter',
+  // mail.ru: independent infra, verified CORS-open ('Access-Control-Allow-Origin: *')
+  // and reachable when overpass-api.de returns 504 (2026-09 probe).
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
   'https://overpass.openstreetmap.ru/api/interpreter',
 ];
 
@@ -1358,7 +1360,10 @@ let _alloLastPayload = '';
 // CORS rejection, which the browser prints as an uncatchable console
 // error even when caught in JS.
 const _CORS_OPEN_HOSTS = new Set([
-  'api.search.brave.com', 'google.serper.dev', 'api.tavily.com',
+  'api.search.brave.com', 'google.serper.dev',
+  // api.tavily.com REMOVED 2026-09: Tavily sends no CORS headers to browsers,
+  // so direct fetch always throws an uncatchable console error. It now goes
+  // through corsFetch (cors.sh proxy) with engine-health tracking.
   'openrouter.ai', 'text.pollinations.ai', 'query.wikidata.org',
   'archive.org', 'nominatim.openstreetmap.org', 'photon.komoot.io',
   'api.allorigins.win', 'r.jina.ai', 'cors.sh', 'api.open-meteo.com',
@@ -3195,12 +3200,13 @@ async function enrichFromTavily(businesses: Business[], onProgress?: (pct: numbe
         const q = `"${b.name}" ${ctx?.cityNative || ''} ${b.categoryLabel || ''} contact phone email`.trim();
         const key = _tavilyKey();
         if (!key) { engineNoteFail('tavily', 'Tavily', 'quota', 'backups exceeded'); return; }
-        const r = await fetch('https://api.tavily.com/search', {
+        const r = await corsFetch('https://api.tavily.com/search', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ api_key: key, query: q, max_results: 5, search_depth: 'basic' }),
           signal: AbortSignal.timeout(12000),
         });
+        if (r.status === 0) { engineNoteFail('tavily', 'Tavily', 'net', 'CORS/proxy unavailable'); return; }
         if (r.status === 402 || r.status === 429 || r.status === 401) {
           // v6.9.13: rotate to the next backup key before giving up
           const next = _poolRotate('tavily');
@@ -3901,7 +3907,9 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       })] : []),
       // Tavily — POST probe
       ...(_tavilyKey() ? [probe('tavily', 'Tavily', async () => {
-        const r = await fetch('https://api.tavily.com/search', {
+        // v6.9.25: via corsFetch — Tavily sends no CORS headers, raw fetch
+        // always throws and floods the console (found in live testing)
+        const r = await corsFetch('https://api.tavily.com/search', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ api_key: _tavilyKey(), query: 'test', max_results: 1 }),
