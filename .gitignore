@@ -70,3 +70,4 @@ client/parsertest.cjs
 
 # Taxonomy sample (regenerated)
 backend/taxonomy_sample.json
+build.sh

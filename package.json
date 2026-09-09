@@ -1,0 +1,19 @@
+{
+  "name": "blue-ocean",
+  "version": "6.9.25",
+  "private": true,
+  "scripts": {
+    "build": "npm run build --workspace=frontend",
+    "build:client": "npm run build --workspace=client",
+    "build:all": "npm run build --workspace=frontend && npm run build --workspace=client",
+    "dev": "npm run dev --workspace=frontend",
+    "lint": "npm run lint --workspace=frontend"
+  },
+  "workspaces": [
+    "client",
+    "frontend"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

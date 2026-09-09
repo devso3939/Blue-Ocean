@@ -4,7 +4,9 @@
 
 Discover underserved industries, compare business supply across similar cities, and uncover Blue Ocean opportunities using global open location data — with a **Postgres-native backend on Supabase** (jobs, scoring and market data live entirely in the database).
 
-![Version](https://img.shields.io/badge/version-6.9.24-blue)
+> Two frontends ship in this repo: the live GitHub Pages site is the **client/** app; the Next.js **frontend/** app is Supabase-backed and builds to static files but is not yet deployed. See `DEPLOYMENT.md`.
+
+![Version](https://img.shields.io/badge/version-6.9.25-blue)
 ![React](https://img.shields.io/badge/React-18-61DAFB)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.4-3178C6)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -233,7 +235,7 @@ All dependencies are installed with a single `npm install` command inside the `c
 
 ### External APIs (No Setup Needed)
 
-The app fetches data from free public APIs automatically:
+The app fetches data from free public APIs automatically. The live site on GitHub Pages uses the **client** app; the **frontend** app uses the Supabase backend.
 
 | API | What It Provides | Rate Limit |
 |-----|-----------------|------------|
@@ -243,6 +245,8 @@ The app fetches data from free public APIs automatically:
 | **DuckDuckGo** | Web search | Unlimited |
 | **Bing** | Web search | Unlimited |
 | **CORS Proxies** | Enable cross-origin requests | Multiple free sources |
+
+**Frontend app (Next.js):** talks to a Supabase Postgres backend (PostgREST RPCs) for jobs, city resolution, opportunities, market context and AI analysis. Backend keys live in `frontend/.env.local` (gitignored) — see `DEPLOYMENT.md`.
 
 ---
 
@@ -455,14 +459,26 @@ Every push to the `main` branch automatically builds and deploys to GitHub Pages
 
 ### Manual Build for Production
 
+The repo ships two separate frontends:
+
+| Frontend | Dir | Build command | Output |
+|----------|-----|---------------|--------|
+| **Client** (public Vite app, currently live on GitHub Pages) | `client/` | `cd client && npm run build` | `client/dist/` |
+| **Frontend** (Next.js app, Supabase-backed) | `frontend/` | `cd frontend && npm run build` | `frontend/out/` |
+
+To build everything from the repo root:
+
 ```bash
-cd client
-npm run build
+git clone https://github.com/devso3939/Blue-Ocean.git
+cd Blue-Ocean
+npm install            # installs client + frontend in one pass
+npm run build:client   # Vite -> client/dist
+npm run build          # Next.js -> frontend/out
 ```
 
-This creates optimized static files in `client/dist/`.
+Repo root `package.json` is a pnpm/npm workspace that points at both `client/` and `frontend/`.
 
-### Deploy to GitHub Pages Manually
+### Deploy to GitHub Pages (client only)
 
 ```bash
 cd client

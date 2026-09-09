@@ -3,17 +3,22 @@
 ## Current Status
 
 ✅ **Code pushed to GitHub**: https://github.com/devso3939/Blue-Ocean  
-✅ **GitHub Actions workflow**: `.github/workflows/deploy.yml`  
-✅ **GitHub Pages**: Auto-deploys on push to main  
-✅ **Architecture**: client-side app + **Supabase Postgres backend** (API lives in the database — see `backend/supabase/README.md`)
+✅ **GitHub Actions workflows**: `.github/workflows/ci.yml`, `.github/workflows/deploy-client.yml`, `.github/workflows/codeql.yml`  
+✅ **GitHub Pages**: Auto-deploys the **client** app on push to main  
+✅ **Supabase backend**: API lives in Postgres — no app servers, no Fly.io (see `backend/supabase/README.md`)
+
+**Two frontends ship in this repo:**
+
+- **`client/`** — public Vite app, currently live at https://devso3939.github.io/Blue-Ocean/ via GitHub Pages
+- **`frontend/`** — Next.js app backed by Supabase; builds to static `frontend/out/` but is **not** deployed anywhere yet
 
 ---
 
 ## How Deployment Works
 
-Blue Ocean is a **static site** — no server, no database, no backend. Everything runs in the browser.
+The app is static JavaScript — no server needed to serve it. The **client** app runs 100% in the browser using public APIs. The **frontend** (Next.js) app also builds to static files but calls a Supabase Postgres backend for heavy work (jobs, city resolution, opportunities, analysis).
 
-### Automatic Deployment (Recommended)
+### Automatic Deployment (Recommended) — client app
 
 Every push to the `main` branch triggers GitHub Actions:
 
@@ -296,3 +301,14 @@ Seed taxonomy + countries with `backend/supabase/seed.py`, peer cities with
 
 - `backend/.env`: `SUPABASE_URL`, `SECRET_KEY` (service role)
 - `frontend/.env.local`: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+
+### Render build-failure emails (external service, not this repo)
+
+Render is a third-party host that can be connected to a GitHub repo. When connected, it tries to build the repo on every push and emails you if it fails. The emails you are seeing are from Render services (`blue-ocean-frontend`, `Blue-Ocean`) that were connected to this repo in the past — they are **not** part of the app and nothing in the repo depends on them.
+
+To stop the emails permanently:
+
+1. **Delete the Render services**: https://dashboard.render.com → open each service (`blue-ocean-frontend`, `Blue-Ocean`) → **Settings** → **Delete Service**.
+2. **Remove the GitHub App**: https://github.com/settings/installations → **Render** → **Uninstall**.
+
+This repo builds cleanly from `client/` and `frontend/` as documented above; Render is only failing because it was pointed at the repo root, which has no buildable package.json. If you actually want to keep Render hosting something, set its build/start commands explicitly (for example `cd frontend && npm ci && npm run build` for the Next.js app, or `cd client && npm ci && npm run build` for the Vite app) and set the correct root directory.
