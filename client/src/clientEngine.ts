@@ -1210,17 +1210,19 @@ function formatAddress(tags: Record<string, string>): string {
 // ─── Overpass Query ────────────────────────────────────────────────
 
 const OVERPASS_MIRRORS = [
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-  // Independent infrastructure: different operators = different rate-limit
-  // pools, so heavy scans on one don't poison the others. (lz4 was removed:
-  // it shares infrastructure and bans with overpass-api.de, adding a mirror
-  // that is already banned just wastes the retry window.)
-  'https://overpass.osm.jp/api/interpreter',
-  // mail.ru: independent infra, verified CORS-open ('Access-Control-Allow-Origin: *')
-  // and reachable when overpass-api.de returns 504 (2026-09 probe).
+  // CORS-enabled mirrors FIRST — the app runs from the browser, so mirrors
+  // without Access-Control-Allow-Origin will fail silently and burn the
+  // full timeout before we fall through to a working mirror.
+  // Verified CORS-open (Access-Control-Allow-Origin: *):
+  //   - maps.mail.ru/osm/tools/overpass
+  //   - overpass.openstreetmap.ru
+  // No CORS (browser requests fail): overpass-api.de, kumi.systems, osm.jp.
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
   'https://overpass.openstreetmap.ru/api/interpreter',
+  // Non-CORS mirrors kept as fallbacks for server-side / non-browser callers.
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.osm.jp/api/interpreter',
 ];
 
 // Visibility-aware wait: when tab is hidden, browsers throttle setTimeout to 1s+.
@@ -1834,7 +1836,7 @@ async function overpassRace(query: string, timeoutSec: number): Promise<any> {
   return null;
 }
 
-async function fetchOverpass(query: string, timeoutSec = 60, onWait?: (msg: string) => void): Promise<any> {
+async function fetchOverpass(query: string, timeoutSec = 30, onWait?: (msg: string) => void): Promise<any> {
   _overpassExhausted = false;
   // Cache: identical Overpass query → identical element set. 24h TTL is far
   // below the rate at which POI data materially changes, so results are the
@@ -2003,7 +2005,7 @@ export async function queryBusinesses(
   // 1.5s sleeps between them (~2 extra round-trips + 3s wasted); Overpass
   // unions are server-side, so the result set is IDENTICAL — same tags, same
   // bbox, same output. One request ≈ the slowest of the old three, not their sum.
-  const qFood = `[out:json][timeout:90][maxsize:536870912];
+  const qFood = `[out:json][timeout:60][maxsize:536870912];
 (
   node(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream"];
   way(${bbox})["amenity"~"cafe|restaurant|bar|pub|fast_food|ice_cream"];
@@ -2067,13 +2069,13 @@ out center body;`;
     const groups = CAT_OSM_FILTER[categoryFilter]
       .split('|[')
       .map((g, i) => (i === 0 ? g : '[' + g));
-    const qFocused = `[out:json][timeout:90][maxsize:536870912];
+    const qFocused = `[out:json][timeout:45][maxsize:536870912];
 (
 ${groups.map(g => `  node(${bbox})${g};\n  way(${bbox})${g};`).join('\n')}
 );
 out center body;`;
     onProgress?.(10, `Scanning for ${getCategoryLabel(categoryFilter)}…`);
-    const d = await fetchOverpass(qFocused, 90, (msg) => onProgress?.(15, msg));
+    const d = await fetchOverpass(qFocused, 45, (msg) => onProgress?.(15, msg));
     if (d?.elements) allElements.push(...d.elements);
 
     // Fallback: the focused tag can exist yet categorize into a different
@@ -2085,7 +2087,7 @@ out center body;`;
     );
     if (!hasRequestedCategory) {
       onProgress?.(50, 'Retrying with broader query…');
-      const qBroad = `[out:json][timeout:60][maxsize:268435456];
+      const qBroad = `[out:json][timeout:30][maxsize:268435456];
 (
   node(${bbox})["amenity"];
   way(${bbox})["amenity"];
@@ -2093,7 +2095,7 @@ out center body;`;
   way(${bbox})["shop"];
 );
 out center body;`;
-      const d2 = await fetchOverpass(qBroad, 60, (msg) => onProgress?.(55, msg));
+      const d2 = await fetchOverpass(qBroad, 30, (msg) => onProgress?.(55, msg));
       if (d2?.elements) allElements.push(...d2.elements);
     }
   } else {
@@ -2104,7 +2106,7 @@ out center body;`;
     _dp.osmBatches.foodHealth.status = 'running';
     emitDP({ percent: 8 });
     onProgress?.(10, 'Scanning food, healthcare & entertainment…');
-    const d1 = await fetchOverpass(qFood, 120, (msg) => onProgress?.(15, msg));
+    const d1 = await fetchOverpass(qFood, 60, (msg) => onProgress?.(15, msg));
     if (d1?.elements) allElements.push(...d1.elements);
     // Categorize locally to fill the three batch tiles (same data the old
     // 3-batch flow displayed, just computed client-side from one response).
@@ -2131,7 +2133,7 @@ out center body;`;
       _dp.osmBatches.fallback = { status: 'running', found: 0 };
       emitDP({ percent: 60 });
       onProgress?.(60, 'Retrying with minimal query…');
-      const qMin = `[out:json][timeout:60];
+      const qMin = `[out:json][timeout:30];
 (
   node(${bbox})["amenity"];
   way(${bbox})["amenity"];
@@ -2139,7 +2141,7 @@ out center body;`;
   way(${bbox})["shop"];
 );
 out center body;`;
-      const d4 = await fetchOverpass(qMin, 60, (msg) => onProgress?.(65, msg));
+      const d4 = await fetchOverpass(qMin, 30, (msg) => onProgress?.(65, msg));
       if (d4?.elements) allElements.push(...d4.elements);
       _dp.osmBatches.fallback = { status: d4 ? 'done' : 'error', found: allElements.length };
       _dp.totalFound = allElements.length;
@@ -4575,9 +4577,11 @@ export async function getAIAnalysis(
 
     const prompt = `You are a market analyst. Analyze business opportunities in ${cityName}, ${countryName} (population ${population.toLocaleString()}). Market data (businesses found, estimated supply gap, opportunity score):\n${oppText}\n\nProvide 3-5 concise, specific insights about the best opportunities, underserved segments, and risks. Use only the numbers given. Format as bullet points.`;
 
-    // Pollinations text API: GET https://text.pollinations.ai/<prompt>
+    // Pollinations legacy text API: anonymous requests are rate-limited
+    // (429 Queue full per IP) and deprecated — keep the timeout short so
+    // we fail fast and fall back to the deterministic local analysis.
     const r = await fetch('https://text.pollinations.ai/' + encodeURIComponent(prompt), {
-      signal: AbortSignal.timeout(30000),
+      signal: AbortSignal.timeout(8000),
     });
     if (!r.ok) throw new Error('pollinations ' + r.status);
     const text = (await r.text()).trim();
@@ -5605,13 +5609,13 @@ export async function rescanWideNet(
     if (opts?.signal?.aborted) break;
     const kw = WIDE_NET_KEYWORDS[cat];
     if (!kw) continue;
-    const q = `[out:json][timeout:60];(
+    const q = `[out:json][timeout:30];(
   node(${bbox})${kw};
   way(${bbox})${kw};
 );out center body;`;
     try {
       opts?.onProgress?.(`Re-checking ${getCategoryLabel(cat)} with a wider search…`);
-      const d = await fetchOverpass(q, 60);
+      const d = await fetchOverpass(q, 30);
       if (!d?.elements) continue;
       const existing = merged.get(cat) || [];
       const seenIds = new Set(existing.map(b => b.id));
