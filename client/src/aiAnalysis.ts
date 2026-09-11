@@ -11,18 +11,22 @@ import { getCategoryLabel } from './clientEngine';
 
 // base64 in .env — keeps plain-text secrets out of the built JS bundle
 // (GitHub push protection rejects bundles containing raw API keys).
-// Embedded base64 fallback lets the CI-built site (no .env) use AI too.
+// v6.9.26: the embedded sk-ortv1- fallback key was REMOVED — OpenRouter now
+// 401s that whole key format, so every Compare/Country AI call burned a
+// dead-key round trip first. Live keys via VITE_OPENROUTER_API_KEY still
+// work; with no key, callLLM goes straight to the keyless Pollinations POST.
 const _b64dec = (v: string) => { try { return atob(v); } catch { return ''; } };
-const OPENROUTER_API_KEY = _b64dec((import.meta as any).env?.VITE_OPENROUTER_API_KEY || 'c2stb3ItdjEtMTU5MjliZDcwNGFjM2VlMTA1YjU3ODVkM2U4NDQzNDc3NmFhNWIyMmI3N2ZjZTk0OGJiOTBiYTU5ZjFmMmE0ZA==');
+const OPENROUTER_API_KEY = _b64dec((import.meta as any).env?.VITE_OPENROUTER_API_KEY || '');
 const OPENROUTER_MODEL = (import.meta as any).env?.VITE_OPENROUTER_MODEL || 'nvidia/nemotron-3-super-120b-a12b:free';
 
 // Same chain as clientEngine.ts — a dead/rate-limited model falls through
-// to the next one automatically. minimax leads: fastest clean JSON.
+// to the next one automatically. Verified live on OpenRouter 2026-09-11
+// (minimax-m2.7 and glm-5.2 no longer exist).
 const AI_MODEL_CHAIN: string[] = [
-  'minimax/minimax-m2.7:free',
   'google/gemma-4-31b-it:free',
+  'google/gemma-4-26b-a4b-it:free',
   OPENROUTER_MODEL,
-  'z-ai/glm-5.2:free',
+  'inclusionai/ling-3.0-flash-vl:free',
 ];
 
 async function callLLM(prompt: string, timeoutMs = 60000): Promise<string | null> {
@@ -63,13 +67,24 @@ async function callLLM(prompt: string, timeoutMs = 60000): Promise<string | null
       }
     }
   }
-  // Final fallback: Pollinations (free, keyless) for short prompts
+  // Final fallback (v6.9.26): Pollinations OpenAI-compatible POST — the
+  // legacy GET path (text.pollinations.ai/<prompt>) now 402s on any real  // prompt. The POST endpoint is keyless and CORS-open; requests WITHOUT  // max_tokens stay on the anonymous (free) tier.
   try {
-    const r = await fetch('https://text.pollinations.ai/' + encodeURIComponent(prompt), {
+    const r = await fetch('https://text.pollinations.ai/openai', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'openai',
+        messages: [
+          { role: 'system', content: 'You are a market analyst. Reply concisely (under 350 words), plain text.' },
+          { role: 'user', content: prompt },
+        ],
+      }),
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!r.ok) return null;
-    const text = (await r.text()).trim();
+    const data = await r.json().catch(() => null);
+    const text = (data?.choices?.[0]?.message?.content || '').trim();
     if (text && text.length > 40 && !/^\s*<!doctype|<html/i.test(text)) return text;
     return null;
   } catch {
