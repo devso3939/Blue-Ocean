@@ -54,6 +54,15 @@ function _poolRotate(name: string): string {
   while (p.active < p.keys.length - 1 && p.exhausted.has(p.active)) p.active++;
   return p.exhausted.has(p.active) ? '' : p.keys[p.active];
 }
+/** v6.9.26: remove the active key entirely (revoked/expired/malformed).
+ * Unlike _poolRotate (quota — may reset), a rejected key never comes back,
+ * and dropping it keeps _poolKey() from ever returning it again. */
+function _poolDropCurrent(name: string): void {
+  const p = _poolGet(name);
+  if (p.keys.length === 0) return;
+  p.keys.splice(p.active, 1);
+  p.active = Math.max(0, Math.min(p.active, p.keys.length - 1));
+}
 /** How many keys in the pool still have quota. */
 function _poolAlive(name: string): number {
   const p = _poolGet(name);
@@ -4610,11 +4619,20 @@ export async function getAIAnalysis(
 
     const prompt = `You are a market analyst. Analyze business opportunities in ${cityName}, ${countryName} (population ${population.toLocaleString()}). Market data (businesses found, estimated supply gap, opportunity score):\n${oppText}\n\nProvide 3-5 concise, specific insights about the best opportunities, underserved segments, and risks. Use only the numbers given. Format as bullet points.`;
 
-    // Pollinations legacy text API: anonymous requests are rate-limited
-    // (429 Queue full per IP) and deprecated — keep the timeout short so
-    // we fail fast and fall back to the deterministic local analysis.
-    const r = await fetch('https://text.pollinations.ai/' + encodeURIComponent(prompt), {
-      signal: AbortSignal.timeout(8000),
+    // v6.9.26: legacy GET path (text.pollinations.ai/<prompt>) is deprecated
+    // and 402s on any real prompt. Use the OpenAI-compatible POST endpoint
+    // (anonymous, keyless, CORS-open) — no max_tokens (billed requests 402).
+    const r = await fetch('https://text.pollinations.ai/openai', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'openai',
+        messages: [
+          { role: 'system', content: 'You are a market analyst. Reply concisely (under 350 words), plain text bullets.' },
+          { role: 'user', content: prompt },
+        ],
+      }),
+      signal: AbortSignal.timeout(20000),
     });
     if (!r.ok) throw new Error('pollinations ' + r.status);
     const text = (await r.text()).trim();
@@ -4688,9 +4706,8 @@ function generateLocalAnalysis(
 //   5. Deterministic fallback when ALL models are down
 // ═════════════════════════════════════════════════════════════════
 
-// Module-scope base64 decoder (declared here too — the copy near
-// SERPER_API_KEY may be shadowed by an enclosing block in some builds).
-function _b64decTop(v: string): string { try { return atob(v); } catch { return ''; } }
+// Module-scope base64 decoder — removed v6.9.26 with the dead sk-ortv1- keys.
+// (base64-in-source env keys via VITE_* remain supported through _b64dec.)
 // base64 in .env — see the _b64dec note near SERPER_API_KEY above.
 // Embedded base64 fallback lets the CI-built site use AI out of the box.
 // v6.9.13: OpenRouter joins the key-pool system (see pools near SERPER).
@@ -4698,9 +4715,13 @@ function _b64decTop(v: string): string { try { return atob(v); } catch { return 
 // addBackupKeys('openrouter', ...) from the Settings panel.
 _poolRegister('openrouter', [
   (import.meta as any).env?.VITE_OPENROUTER_API_KEY,
-  _b64decTop('c2stb3ItdjEtMTU5MjliZDcwNGFjM2VlMTA1YjU3ODVkM2U4NDQzNDc3NmFhNWIyMmI3N2ZjZTk0OGJiOTBiYTU5ZjFmMmE0ZA=='),
-  // v6.9.13b: "Default key" auto-created on openrouter.ai (gensweaty@gmail.com).
-  _b64decTop('c2stb3ItdjEtMjQwMDQ5YjM0OGZhNDgxNDg0ODg0NDQ1NzNkYzUyMjI0YTkxM2JjNTUxNDVhODdiOWE5Njc2MzA5MWM3ZWE5Yg=='),
+  // v6.9.26: the two embedded sk-ortv1- keys were REMOVED — OpenRouter now
+  // rejects that key format outright (401 on ANY sk-ortv1- value, verified
+  // 2026-09-11), so they burned two 401s per AI call before the fallback
+  // chain even started. Users add live keys via the Settings panel
+  // (addBackupKeys) or VITE_OPENROUTER_API_KEY. With no key the pool is
+  // empty and llmCallModel goes straight to the keyless Pollinations
+  // fallback — AI analysis works out of the box again.
 ]);
 const _orKey = () => _poolKey('openrouter');
 const OPENROUTER_MODEL = (import.meta as any).env?.VITE_OPENROUTER_MODEL || 'nvidia/nemotron-3-super-120b-a12b:free';
@@ -4708,14 +4729,17 @@ const OPENROUTER_MODEL = (import.meta as any).env?.VITE_OPENROUTER_MODEL || 'nvi
 // Ordered chain: try the configured model first, then the known-good
 // free-tier models as fallbacks. This keeps the app usable when one
 // provider is upstream-rate-limited (common on free tiers).
+// v6.9.26: verified against GET /api/v1/models on 2026-09-11 —
+// minimax/minimax-m2.7:free and z-ai/glm-5.2:free NO LONGER EXIST (404 on
+// every call, silently burning 2 chain slots before any model answered).
 const AI_MODEL_CHAIN: string[] = [
-  // minimax first: cleanest/fastest structured JSON of the free pool (no
-  // reasoning-token overhead, fewest 429s in testing). nemotron second — it
-  // spends tokens thinking before answering, so it costs ~2× wall time.
-  'minimax/minimax-m2.7:free',
+  // gemma first: cleanest/fastest structured JSON of the verified-live free
+  // pool (no reasoning-token overhead). nemotron spends tokens thinking
+  // before answering, so it costs ~2× wall time — kept as second.
   'google/gemma-4-31b-it:free',
+  'google/gemma-4-26b-a4b-it:free',
   OPENROUTER_MODEL,
-  'z-ai/glm-5.2:free',
+  'inclusionai/ling-3.0-flash-vl:free',
 ];
 
 // One shared call site: sends a chat completion, walks the model chain on
@@ -4754,19 +4778,21 @@ async function llmCallModel(
     validate?: (text: string) => boolean;
   },
 ): Promise<{ text: string; model: string }> {
-  if (!_orKey()) throw new Error('no-key');
+  // v6.9.26: no OpenRouter key does NOT abort the call — the keyless
+  // Pollinations fallback below still runs (this was the 'backups exceeded'
+  // dead-end that made every analysis fall back to deterministic mode).
   const maxTokens = opts?.maxTokens ?? 900;
   const temperature = opts?.temperature ?? 0.3;
   const validate = opts?.validate;
 
-  for (let mi = 0; mi < AI_MODEL_CHAIN.length; mi++) {
+  for (let mi = 0; mi < AI_MODEL_CHAIN.length && _orKey(); mi++) {
     const model = AI_MODEL_CHAIN[mi];
     for (let attempt = 0; attempt < 2; attempt++) {
       if (opts?.signal?.aborted) throw new Error('Cancelled');
       // v6.9.13: pick the current pool key fresh each attempt so a rotation
       // mid-chain is picked up on the next model/attempt.
       const orKey = _orKey();
-      if (!orKey) { engineNoteFail('openrouter', 'AI (OpenRouter)', 'quota', 'backups exceeded'); throw new Error('no-key'); }
+      if (!orKey) break; // pool empty → exit model loop, try keyless fallback below
       try {
         const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
@@ -4812,6 +4838,20 @@ async function llmCallModel(
           await new Promise(res => setTimeout(res, 1500 * (attempt + 1)));
           continue;
         }
+        // v6.9.26: 401/403 = the KEY is dead (revoked/expired/malformed), not
+        // the model. Retiring it via _poolRotate was pointless — rotation
+        // only marks indexes exhausted per-model loop, and with BOTH embedded
+        // keys dead the old code retried the same 401s on every call. Drop
+        // the key from the pool entirely so the next attempt (and every
+        // future call) skips it immediately.
+        if (r.status === 401 || r.status === 403) {
+          await r.text().catch(() => '');
+          _poolDropCurrent('openrouter');
+          const after = _poolAlive('openrouter');
+          engineNoteFail('openrouter', 'AI (OpenRouter)', 'quota', after > 0 ? `key rejected (HTTP ${r.status}) — dropped, ${after} backup key(s) left` : `key rejected (HTTP ${r.status}) — no valid keys`);
+          // Retry loop picks up the next (live) key on the same model.
+          continue;
+        }
         // 4xx (except 429) or 5xx — try next model in chain
         if (r.status >= 400) {
           const body = await r.text().catch(() => '');
@@ -4824,6 +4864,44 @@ async function llmCallModel(
         // network error — try next model
         break;
       }
+    }
+  }
+  // ── v6.9.26: Keyless last resort — Pollinations text API ──
+  // The legacy GET path died (402/429), but the OpenAI-compatible POST
+  // endpoint (text.pollinations.ai/openai) still serves anonymous requests
+  // (CORS-open, no key, no referrer needed). It has NO explicit max_tokens —
+  // requests carrying max_tokens are billed (402). So we send a compact
+  // system+user pair and cap length by asking for short output in the prompt.
+  // Also honors the caller's validator, so garbage replies fall through to
+  // the deterministic local analysis instead of surfacing junk.
+  if (!opts?.signal?.aborted) {
+    try {
+      const r = await fetch('https://text.pollinations.ai/openai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'openai',
+          messages: [
+            { role: 'system', content: systemPrompt + ' Reply concisely (under 400 words).' },
+            { role: 'user', content: userPrompt },
+          ],
+        }),
+        signal: opts?.signal ?? AbortSignal.timeout(45000),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        const text = d?.choices?.[0]?.message?.content;
+        if (typeof text === 'string' && text.trim().length > 0 && (!validate || validate(stripThinkBlocks(text)))) {
+          engineNoteSuccess('pollinations', 'AI (Pollinations — keyless)');
+          _lastLlmModel = 'pollinations:openai';
+          return { text: stripThinkBlocks(text), model: 'pollinations:openai' };
+        }
+      } else {
+        engineNoteFail('pollinations', 'AI (Pollinations — keyless)', classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
+      }
+    } catch (e: any) {
+      if (e?.name === 'AbortError' || e?.message === 'Cancelled') throw new Error('Cancelled');
+      engineNoteFail('pollinations', 'AI (Pollinations — keyless)', 'net', String(e?.message || 'network error').slice(0, 80));
     }
   }
   throw new Error('all-models-failed');
