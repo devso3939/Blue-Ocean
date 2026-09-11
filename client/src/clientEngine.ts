@@ -1209,17 +1209,14 @@ function formatAddress(tags: Record<string, string>): string {
 
 // ─── Overpass Query ────────────────────────────────────────────────
 
+// v6.9.26: verified live 2026-09-11 (POST + browser CORS preflight):
+//   WORKING: maps.mail.ru, overpass-api.de (both Access-Control-Allow-Origin: *)
+//   DEAD:    overpass.openstreetmap.ru (connection refused) — removed; as race
+//            slot #2 it stalled every scan for its full timeout
+//   NO-CORS: kumi.systems, osm.jp — last-resort sequential fallbacks only
+//            (harmless walked one-by-one, fatal when raced).
 const OVERPASS_MIRRORS = [
-  // CORS-enabled mirrors FIRST — the app runs from the browser, so mirrors
-  // without Access-Control-Allow-Origin will fail silently and burn the
-  // full timeout before we fall through to a working mirror.
-  // Verified CORS-open (Access-Control-Allow-Origin: *):
-  //   - maps.mail.ru/osm/tools/overpass
-  //   - overpass.openstreetmap.ru
-  // No CORS (browser requests fail): overpass-api.de, kumi.systems, osm.jp.
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
-  'https://overpass.openstreetmap.ru/api/interpreter',
-  // Non-CORS mirrors kept as fallbacks for server-side / non-browser callers.
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
   'https://overpass.osm.jp/api/interpreter',
@@ -1287,6 +1284,20 @@ export function setCancelSignal(signal: AbortSignal | null) { _cancelSignal = si
 // enrichment, revisiting a city, hot-reload during dev).
 const CACHE_PREFIX = 'bo_cache_';
 const DAY_MS = 24 * 60 * 60 * 1000;
+// v6.9.26 cache purge: scans made during the dead-mirror window cached
+// broken results ("1 restaurant in Tbilisi") for 24h. Bump CACHE_VERSION to
+// invalidate EVERY cached payload once; then empty responses are never cached
+// again (see fetchOverpass).
+const CACHE_VERSION = 2;
+(function purgeStaleCache() {
+  try {
+    if (localStorage.getItem('bo_cache_version') !== String(CACHE_VERSION)) {
+      const stale = Object.keys(localStorage).filter(k => k.startsWith(CACHE_PREFIX));
+      for (const k of stale) localStorage.removeItem(k);
+      localStorage.setItem('bo_cache_version', String(CACHE_VERSION));
+    }
+  } catch { /* best-effort */ }
+})();
 function cacheGet<T>(key: string, maxAgeMs: number): T | null {
   try {
     const raw = localStorage.getItem(CACHE_PREFIX + key);
@@ -1812,20 +1823,39 @@ async function overpassAttempt(mirror: string, query: string, timeoutSec: number
   }
 }
 
-// HEDGE: race the two primary mirrors (Overpass allows ~2 concurrent slots
-// per IP — kumi.systems runs independent hardware, so a 2-request race is
-// within policy and NOT quality-changing: identical query, first valid JSON
-// wins, the loser is simply discarded). Cuts tail latency from
-// best-of-1 to min(t1, t2). Remaining mirrors stay as sequential fallbacks.
+// FIRST-SUCCESS race (v6.9.26): Promise.all was a bug — it waited for BOTH
+// attempts to settle before picking a winner, so one dead mirror stalled every
+// scan for its full timeout even when the other answered in seconds. Now the
+// first mirror to return valid data wins immediately; the loser is abandoned.
+// Overpass allows ~2 concurrent slots per IP and these primaries run separate
+// hardware, so a 2-request hedge is within policy and quality-identical.
+function firstSuccess<T>(promises: Promise<T | null>[]): Promise<T | null> {
+  return new Promise((resolve) => {
+    let settled = 0;
+    let last: T | null = null;
+    let done = false;
+    for (const p of promises) {
+      p.then(v => {
+        settled++;
+        if (v && !done) { done = true; resolve(v); return; }
+        if (v) last = v;
+        if (settled === promises.length && !done) { done = true; resolve(last); }
+      }).catch(() => {
+        settled++;
+        if (settled === promises.length && !done) { done = true; resolve(last); }
+      });
+    }
+  });
+}
+
 async function overpassRace(query: string, timeoutSec: number): Promise<any> {
+  // Both primaries fire concurrently (secondary ~400ms later — ~2 slots, not a herd).
   const [primary, secondary] = OVERPASS_MIRRORS;
-  // Secondary starts ~400ms later — keeps us at ~2 slots total, not a herd.
-  const hedge = await Promise.all([
+  const fast = await firstSuccess([
     overpassAttempt(primary, query, timeoutSec),
     new Promise<null>(res => setTimeout(() => res(null), 400))
       .then(() => overpassAttempt(secondary, query, timeoutSec)),
   ]);
-  const fast = hedge.find(Boolean);
   if (fast) return fast;
   // Both primaries failed → walk remaining mirrors sequentially
   for (let mi = 2; mi < OVERPASS_MIRRORS.length; mi++) {
@@ -1870,7 +1900,10 @@ async function fetchOverpass(query: string, timeoutSec = 30, onWait?: (msg: stri
     // the freeze worse. Cache only payloads under 2 MB (roughly 500k chars).
     try {
       const serialized = JSON.stringify(data);
-      if (serialized.length <= 2_000_000) {
+      // v6.9.26: never cache empty/1-element responses — that is exactly how
+      // the dead-mirror window poisoned scans for 24h. An empty area re-scans
+      // next time (cheap); a poisoned city poisons every metric for a day.
+      if (data.elements?.length > 1 && serialized.length <= 2_000_000) {
         try {
           localStorage.setItem(CACHE_PREFIX + ck, serialized);
         } catch {
