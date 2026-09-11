@@ -290,6 +290,106 @@ export async function ensureCityPopulation(city: CityResult): Promise<CityResult
   return fb ? { ...city, population: fb.population, populationSource: fb.source } : city;
 }
 
+// ─── v6.9.28: Country-wide city discovery ──────────────────────────
+// Nominatim's free-text `q=city&countrycodes=XX` search has DEGRADED badly
+// (verified 2026-09-11: returns 2–3 rows for all of Georgia, mostly Tbilisi
+// duplicates) — the Country view suddenly found "1 city" per country.
+// Overpass place=city returns 10 cities WITH English names + populations for
+// the same country. Strategy: Overpass primary → Nominatim structured
+// fallback → Open-Meteo last resort. All results get the population
+// backfill chain so per-capita metrics work everywhere.
+export async function findCountryCities(countryName: string, countryCode: string): Promise<CityResult[]> {
+  const cc = (countryCode || '').toUpperCase();
+  if (!/^[A-Z]{2}$/.test(cc)) return [];
+  const ck = 'cities_' + cc;
+  const cached = cacheGet<CityResult[]>(ck, 7 * DAY_MS);
+  if (cached?.length) return cached;
+
+  const results: CityResult[] = [];
+
+  // ── Primary: Overpass place=city (+town for small countries) inside the
+  // country's admin area. name:en preferred so non-Latin countries get
+  // readable names; native name kept for enrichment.
+  try {
+    const q = `[out:json][timeout:25];
+area["ISO3166-1"="${cc}"][admin_level=2]->.a;
+(
+  node(area.a)["place"="city"];
+  way(area.a)["place"="city"];
+  node(area.a)["place"="town"]["population"];
+  way(area.a)["place"="town"]["population"];
+);
+out center tags;`;
+    const d = await fetchOverpass(q, 25);
+    const seen = new Set<string>();
+    for (const e of (d?.elements || []) as any[]) {
+      const t = e.tags || {};
+      const lat = e.lat ?? e.center?.lat;
+      const lon = e.lon ?? e.center?.lon;
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      const native = t.name || '';
+      const en = t['name:en'] || t['name:latin'] || native;
+      if (!en) continue;
+      const key = (t['name:en'] || native).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const pop = plausiblePopulation(t.population);
+      results.push({
+        name: en,
+        country: countryName,
+        countryCode: cc,
+        lat, lon,
+        population: pop,
+        populationSource: pop != null ? 'osm' : undefined,
+        bbox: circleBbox(lat, lon, 12000), // Overpass gives no bbox here; computeScanArea pads/fits
+      });
+    }
+  } catch { /* Overpass down → fallbacks below */ }
+
+  // ── Fallback 1: Nominatim STRUCTURED search (q=city free-text is the
+  // degraded path; structured city= + countrycodes= is more reliable).
+  if (results.length < 3) {
+    try {
+      const url = `https://nominatim.openstreetmap.org/search?city=&countrycodes=${cc.toLowerCase()}&format=json&addressdetails=1&limit=30&extratags=1`;
+      const res = await directFetch(url, { headers: { 'Accept': 'en-US,en;q=0.9' }, signal: AbortSignal.timeout(8000) });
+      if (res.ok) {
+        const data = await res.json();
+        const seen = new Set(results.map(r => r.name.toLowerCase()));
+        for (const r of data) {
+          const addr = r.address || {};
+          const raw = addr.city || addr.town || addr.village || addr.municipality;
+          if (!raw) continue;
+          const key = raw.toLowerCase();
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const pop = plausiblePopulation(r.extratags?.population);
+          const bb = (r.boundingbox || []).map(Number);
+          results.push({
+            name: raw,
+            country: addr.country || countryName,
+            countryCode: cc,
+            lat: parseFloat(r.lat),
+            lon: parseFloat(r.lon),
+            population: pop,
+            populationSource: pop != null ? 'osm' : undefined,
+            bbox: bb.length === 4 ? [bb[0], bb[2], bb[1], bb[3]] : circleBbox(parseFloat(r.lat), parseFloat(r.lon), 12000),
+          });
+        }
+      }
+    } catch { /* still best-effort */ }
+  }
+
+  // Sort by population (largest first — the Country view takes the top 5)
+  results.sort((a, b) => (b.population || 0) - (a.population || 0));
+  const top = results.slice(0, 12);
+
+  // Population backfill (3.5s-capped, parallel) so per-capita metrics work
+  await backfillCityPopulations(top);
+
+  if (top.length) cacheSet(ck, top);
+  return top;
+}
+
 // ─── Business Data ─────────────────────────────────────────────────
 
 export interface Business {

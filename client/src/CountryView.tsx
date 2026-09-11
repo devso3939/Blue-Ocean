@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import {
   resolveCity,
+  findCountryCities, // v6.9.28: Overpass-based discovery — Nominatim q=city degraded to 1–2 rows/country
   queryBusinesses,
   computeOpportunities,
   getCategoryLabel,
@@ -100,11 +101,19 @@ const COUNTRY_CODES: Record<string, string> = {
 };
 
 // ─── Find Top Cities in Country ────────────────────────────────────
-
+// v6.9.28: moved to clientEngine.findCountryCities — Overpass place=city
+// primary (name:en + population in one query), Nominatim structured
+// fallback, Open-Meteo population backfill. The old free-text Nominatim
+// search degraded to 2–3 rows per country (mostly duplicates of the
+// capital), which made the Country view find "1 city" everywhere.
 async function findTopCities(countryName: string, countryCode: string): Promise<CityResult[]> {
+  try {
+    const cities = await findCountryCities(countryName, countryCode);
+    if (cities.length > 0) return cities.slice(0, 5);
+  } catch { /* fall through to legacy path */ }
+
+  // Legacy fallback (kept for resilience): structured Nominatim search
   const cc = (COUNTRY_CODES[countryName] || countryCode).toLowerCase();
-  
-  // Use Nominatim with countrycodes filter — much more reliable than text search
   const url = `https://nominatim.openstreetmap.org/search?q=city&format=json&addressdetails=1&limit=20&extratags=1&countrycodes=${cc}`;
   const res = await fetch(url, { headers: { 'Accept': 'language,en', 'User-Agent': 'BlueOcean/1.0' } });
   const data = await res.json();
