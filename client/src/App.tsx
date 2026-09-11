@@ -147,7 +147,7 @@ const CAT_COLORS: Record<string, string> = {
   veterinary: '#10b981', florist: '#f472b6', marketplace: '#fbbf24',
 };
 
-const APP_VERSION = '6.9.28';
+import { APP_VERSION } from './version'; // v6.9.29: shared stamp — visible on every view
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
@@ -865,7 +865,7 @@ export default function App() {
               <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 text-white">
                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
               </div>
-              <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Compare Cities</span></span>
+              <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Compare Cities</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v{APP_VERSION}</span></span>
             </div>
             <div className="flex items-center gap-3">
               <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>
@@ -892,7 +892,7 @@ export default function App() {
               <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 text-white">
                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
               </div>
-              <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Country Finder</span></span>
+              <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Country Finder</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v{APP_VERSION}</span></span>
             </div>
             <div className="flex items-center gap-3">
               <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>
