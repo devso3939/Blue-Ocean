@@ -271,9 +271,20 @@ export default function App() {
   useEffect(() => {
     if (!selectedCity || !mapRef.current) return;
     (window as any).__mapFitted = false;
-    if (mapInstanceRef.current) {
-      mapInstanceRef.current.flyTo({ center: [selectedCity.lon, selectedCity.lat], zoom: 12, duration: 1500 });
+    // v6.9.30: an old map instance may still reference a DOM container that
+    // React unmounted (the loading screen tears the results block down and
+    // remounts a fresh div). Trusting the orphan left a PERMANENTLY BLANK map
+    // after every re-run — flyTo() painted into a detached canvas. Detect a
+    // detached container, dispose the dead map, and build a fresh one.
+    const prev = mapInstanceRef.current;
+    if (prev && prev.getContainer?.() === mapRef.current) {
+      prev.flyTo({ center: [selectedCity.lon, selectedCity.lat], zoom: 12, duration: 1500 });
       return;
+    }
+    if (prev) {
+      try { prev.remove(); } catch { /* already dead */ }
+      mapInstanceRef.current = null;
+      mapReadyRef.current = false;
     }
     import('maplibre-gl').then((maplibregl) => {
       if (!mapRef.current || mapInstanceRef.current) return;
@@ -403,8 +414,12 @@ export default function App() {
 
   // Update map data whenever businesses change
   useEffect(() => {
-    if (!mapInstanceRef.current || !mapReadyRef.current) return;
-    updateMapData(mapInstanceRef.current, businesses);
+    const map = mapInstanceRef.current;
+    // v6.9.30: also re-init when the container was swapped out by React
+    // (loading screen unmount) — the instance exists but is orphaned.
+    if (!map || !mapReadyRef.current) return;
+    if (map.getContainer?.() !== mapRef.current) return;
+    updateMapData(map, businesses);
   }, [businesses]);
 
   function updateMapData(map: any, biz: Map<string, Business[]>) {

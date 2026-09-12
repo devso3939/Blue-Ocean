@@ -1397,7 +1397,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // broken results ("1 restaurant in Tbilisi") for 24h. Bump CACHE_VERSION to
 // invalidate EVERY cached payload once; then empty responses are never cached
 // again (see fetchOverpass).
-const CACHE_VERSION = 2;
+// v6.9.30: bump 2→3 — partial Overpass responses carrying a `remark` (query
+// timed out mid-run, near-empty element set) could be cached and served for
+// 24h, producing the "Discover finishes in 5 s with 1 sphere" bug. Purge all.
+const CACHE_VERSION = 3;
 (function purgeStaleCache() {
   try {
     if (localStorage.getItem('bo_cache_version') !== String(CACHE_VERSION)) {
@@ -1519,9 +1522,31 @@ function hostRecordFail(u: string): void {
   e.n++;
   if (e.n >= HOST_FAIL_LIMIT) e.until = Date.now() + HOST_OPEN_MS;
   _hostFails.set(h, e);
+  persistHostHealth();
 }
 function hostRecordSuccess(u: string): void {
-  _hostFails.delete(hostKey(u));
+  if (_hostFails.delete(hostKey(u))) persistHostHealth();
+}
+
+// v6.9.30: persist breaker state across reloads — a mirror that hung (kumi/
+// osm.jp outages) stays skipped after a page refresh instead of re-hanging
+// once per session. Entries carry their own expiry; stale ones are inert.
+const HOST_HEALTH_KEY = 'bo_host_health';
+(function loadHostHealth() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(HOST_HEALTH_KEY) || '{}') as Record<string, { n: number; until: number }>;
+    for (const h of Object.keys(saved)) {
+      const e = saved[h];
+      if (e && typeof e.n === 'number' && typeof e.until === 'number' && e.until > Date.now()) _hostFails.set(h, e);
+    }
+  } catch { /* best-effort */ }
+})();
+function persistHostHealth(): void {
+  try {
+    const out: Record<string, { n: number; until: number }> = {};
+    _hostFails.forEach((e, h) => { if (e.until > Date.now()) out[h] = e; });
+    localStorage.setItem(HOST_HEALTH_KEY, JSON.stringify(out));
+  } catch { /* best-effort */ }
 }
 
 // ─── Direct-fetch dead-host memory (console noise reduction, v6.9.3) ───
@@ -1910,10 +1935,18 @@ function parseLargeJson(text: string): Promise<any> {
   });
 }
 
-async function overpassAttempt(mirror: string, query: string, timeoutSec: number): Promise<any> {
+async function overpassAttempt(mirror: string, query: string, timeoutSec: number, hardCapSec?: number): Promise<any> {
+  // v6.9.30: honor the per-host circuit breaker — a mirror that failed at the
+  // network level repeatedly (e.g. kumi.systems hanging 40s+ per request) is
+  // skipped INSTANTLY instead of burning its full timeout on every query.
+  if (hostIsOpen(mirror)) return null;
   try {
+    // v6.9.30: optional hard cap for fallback mirrors (30s) — a hanging
+    // mirror used to cost timeoutSec+15 (60s+) EACH before the cooldown/retry
+    // logic even started, which surfaced as "first run errors, second works".
+    const capSec = Math.min(timeoutSec + 15, hardCapSec ?? timeoutSec + 15);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), (timeoutSec + 15) * 1000);
+    const timer = setTimeout(() => controller.abort(), capSec * 1000);
     const res = await fetch(mirror, {
       method: 'POST',
       body: `data=${encodeURIComponent(query)}`,
@@ -1921,13 +1954,24 @@ async function overpassAttempt(mirror: string, query: string, timeoutSec: number
       signal: controller.signal,
     });
     clearTimeout(timer);
-    if (!res.ok) return null;
+    // HTTP 429/504 from a mirror means "cannot serve this now" — counted so a
+    // rate-limited/hung mirror opens the breaker and stops wasting slots.
+    if (!res.ok) { hostRecordFail(mirror); return null; }
     const text = await res.text();
-    if (!text.trim().startsWith('{')) return null; // XML error page / rate-limit
+    if (!text.trim().startsWith('{')) { hostRecordFail(mirror); return null; } // XML error page / rate-limit
     const data = await parseLargeJson(text);
-    if (!data || data.elements === undefined) return null;
+    if (!data || data.elements === undefined) { hostRecordFail(mirror); return null; }
+    // v6.9.30: Overpass sets `remark` when the query FAILED mid-run —
+    // "runtime error: Query timed out", "out of memory", etc. Such a response
+    // is a PARTIAL (often near-empty) result that used to WIN the race and
+    // even get cached — exactly the "Discover finishes in 5 s with 1 sphere"
+    // bug. Treat remark responses as failures so the race falls through to a
+    // healthy mirror with a real result.
+    if (data.remark) { hostRecordFail(mirror); return null; }
+    hostRecordSuccess(mirror);
     return data;
   } catch {
+    hostRecordFail(mirror);
     return null;
   }
 }
@@ -1966,9 +2010,11 @@ async function overpassRace(query: string, timeoutSec: number): Promise<any> {
       .then(() => overpassAttempt(secondary, query, timeoutSec)),
   ]);
   if (fast) return fast;
-  // Both primaries failed → walk remaining mirrors sequentially
+  // Both primaries failed → walk remaining mirrors sequentially.
+  // v6.9.30: each fallback is hard-capped at 30s — a hanging mirror used to
+  // cost 60s+ twice here before the cooldown/retry logic even began.
   for (let mi = 2; mi < OVERPASS_MIRRORS.length; mi++) {
-    const r = await overpassAttempt(OVERPASS_MIRRORS[mi], query, timeoutSec);
+    const r = await overpassAttempt(OVERPASS_MIRRORS[mi], query, timeoutSec, 30);
     if (r) return r;
     await wait(2000);
   }
@@ -1982,7 +2028,10 @@ async function fetchOverpass(query: string, timeoutSec = 30, onWait?: (msg: stri
   // same numbers the live query would return.
   const ck = 'ovp_' + cacheKey(query.length, hashStr(query));
   const cached = cacheGet<any>(ck, DAY_MS);
-  if (cached) return cached;
+  // v6.9.30: never serve a cached payload that carries a `remark` (partial
+  // result from a query that timed out server-side) — belt & suspenders with
+  // the CACHE_VERSION purge above.
+  if (cached && !cached.remark) return cached;
   // First pass: hedged race across the two primary mirrors + walk the rest
   let data = await overpassRace(query, timeoutSec);
   // …if everything failed, cool down and try again (typical cause: the IP is
@@ -1991,15 +2040,19 @@ async function fetchOverpass(query: string, timeoutSec = 30, onWait?: (msg: stri
   // 40s/120s cooldown, the wait resolves immediately instead of hanging.
   if (!data) {
     if (isCancelled()) { _overpassExhausted = true; return null; }
-    onWait?.('OpenStreetMap servers are busy — waiting 40s before retrying…');
-    if (!(await abortableWait(40000))) { _overpassExhausted = true; return null; }
+    // v6.9.30: short 15s first retry — cold-start 504s (server just woke up)
+    // usually clear within seconds; the old flat 40s made a recoverable
+    // first-run hiccup feel like a failure. Rate-limit bans need longer, so
+    // the SECOND retry keeps a long 60s pause.
+    onWait?.('OpenStreetMap servers are busy — retrying in 15s…');
+    if (!(await abortableWait(15000))) { _overpassExhausted = true; return null; }
     data = await overpassRace(query, timeoutSec);
   }
   // Still nothing? One last patient attempt — longer bans need a longer pause.
   if (!data) {
     if (isCancelled()) { _overpassExhausted = true; return null; }
-    onWait?.('Still busy — waiting 2 minutes for a final retry…');
-    if (!(await abortableWait(120000))) { _overpassExhausted = true; return null; }
+    onWait?.('Still busy — waiting 60s for a final retry…');
+    if (!(await abortableWait(60000))) { _overpassExhausted = true; return null; }
     data = await overpassRace(query, timeoutSec);
   }
   if (data) {
@@ -2048,7 +2101,9 @@ async function fetchOverpass(query: string, timeoutSec = 30, onWait?: (msg: stri
       const text = await res.text();
       if (text.trim().startsWith('{')) {
         const data = await parseLargeJson(text);
-        if (data && data.elements !== undefined) return data;
+        // v6.9.30: same remark guard as overpassAttempt — a partial (query
+        // timed out) response must not be returned as success here either.
+        if (data && data.elements !== undefined && !data.remark) return data;
       }
     }
   } catch {}
