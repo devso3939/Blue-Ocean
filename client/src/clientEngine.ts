@@ -106,6 +106,28 @@ export interface CityResult {
 }
 
 export async function resolveCity(query: string): Promise<CityResult[]> {
+  const params = { q: query, format: 'json', addressdetails: '1', limit: '5', extratags: '1' };
+  // v6.9.32: server proxy first (Nominatim rate-limits aggressive browser
+  // IPs — the recurring "can't find city" bug); direct fetch as fallback.
+  const proxied = await nominatimViaProxy('search', params);
+  if (proxied && Array.isArray(proxied) && proxied.length) {
+    const results: CityResult[] = proxied.map((r: any) => ({
+      name: r.address?.city || r.address?.town || r.address?.village || r.address?.municipality || r.display_name.split(',')[0],
+      country: r.address?.country || '',
+      countryCode: r.address?.country_code?.toUpperCase() || '',
+      lat: parseFloat(r.lat),
+      lon: parseFloat(r.lon),
+      population: r.extratags?.population ? parseInt(r.extratags.population) : null,
+      populationSource: r.extratags?.population ? ('osm' as PopulationSource) : undefined,
+      bbox: r.boundingbox.map(Number).reduce((acc: number[], v: number, i: number) => {
+        // Nominatim bbox order: [south, north, west, east] → [s, w, n, e]
+        if (i === 0) acc[0] = v; else if (i === 1) acc[2] = v; else if (i === 2) acc[1] = v; else acc[3] = v;
+        return acc;
+      }, [0, 0, 0, 0] as number[]) as [number, number, number, number],
+    }));
+    await backfillCityPopulations(results);
+    return results;
+  }
   const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&addressdetails=1&limit=5&extratags=1`;
   // Retry up to 3 times on rate limit (429) with backoff
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -2079,6 +2101,36 @@ async function overpassViaProxy(query: string, onWait?: (msg: string) => void): 
   } catch {
     // Proxy unreachable — disable for 2 min and fall back to direct mirrors
     _proxyDisabledUntil = Date.now() + PROXY_COOLDOWN_MS;
+    return null;
+  }
+}
+
+// ─── v6.9.32: Generic whitelisted proxy (Nominatim & geo APIs) ─────
+// Same pattern as the Overpass proxy: server-side fetch via pg_net with a
+// strict server-side URL whitelist (open-relay impossible). Used first for
+// city search — Nominatim rate-limits aggressive browser IPs, the server's
+// requests are separate.
+let _geoProxyDisabledUntil = 0;
+
+async function nominatimViaProxy(path: string, params: Record<string, string>, timeoutMs = 20000): Promise<any | null> {
+  if (Date.now() < _geoProxyDisabledUntil) return null;
+  const url = `https://nominatim.openstreetmap.org/${path}`;
+  try {
+    const start = await supabaseRpc<{ rid?: number; error?: string }>('rpc_proxy_start', { p_url: url, p_params: params }, 15000);
+    if (!start?.rid) return null;
+    const rid = start.rid;
+    for (let i = 0; i < 12; i++) {
+      if (isCancelled()) return null;
+      if (i > 0) await abortableWait(1500);
+      const poll = await supabaseRpc<{ state: string; data?: any }>('rpc_proxy_poll', { p_rid: rid }, 15000);
+      if (!poll) break;
+      if (poll.state === 'done') return poll.data ?? null;
+      if (poll.state === 'failed') return null;
+      if (i === 11) break;
+    }
+    return null;
+  } catch {
+    _geoProxyDisabledUntil = Date.now() + PROXY_COOLDOWN_MS;
     return null;
   }
 }
