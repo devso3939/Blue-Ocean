@@ -28,6 +28,8 @@ import {
   setScanContext, buildScanContext,
   computeScanArea,
   addBackupKeys, keyPoolStatus,
+  getOverpassRouteLog, resetOverpassRouteLog,
+  type OverpassRouteEvent,
 } from './clientEngine';
 import CompareView from './CompareView';
 import CountryView from './CountryView';
@@ -161,6 +163,13 @@ export default function App() {
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState('');
   const [citySearching, setCitySearching] = useState(false);
+  // v6.9.31: live Overpass route health (server proxy vs direct mirrors)
+  const [overpassRoute, setOverpassRoute] = useState<OverpassRouteEvent[]>([]);
+  useEffect(() => {
+    if (!loading) return;
+    const iv = setInterval(() => setOverpassRoute(getOverpassRouteLog()), 900);
+    return () => clearInterval(iv);
+  }, [loading]);
 
   const [businesses, setBusinesses] = useState<Map<string, Business[]>>(new Map());
   const [opportunities, setOpportunities] = useState<OpportunityResult[]>([]);
@@ -503,6 +512,7 @@ export default function App() {
     setAiAnalysis(null);
     setAiVerification(null);
     setRescanNote('');
+    setOverpassRoute([]); resetOverpassRouteLog();
     setEngineHealth(getEngineHealthSnapshot());
 
     try {
@@ -644,6 +654,7 @@ export default function App() {
     setAiAnalysis(null);
     setAiVerification(null);
     setRescanNote('');
+    setOverpassRoute([]); resetOverpassRouteLog();
     setEngineHealth(getEngineHealthSnapshot());
 
     try {
@@ -1153,6 +1164,24 @@ export default function App() {
               <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
                 <div className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 transition-all duration-500" style={{width: `${progress}%`}} />
               </div>
+
+              {/* ── v6.9.31: Overpass route health chips ── */}
+              {overpassRoute.length > 0 && (
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+                  <span className="mr-0.5 opacity-80">🛰</span>
+                  {overpassRoute.slice(-5).map((r, i) => (
+                    <span key={`${r.route}-${i}`}
+                      title={`${r.route} · ${r.ms}ms · ${r.ok ? 'ok' : 'failed'}`}
+                      className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 border font-medium ${
+                        r.ok ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                             : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                      }`}>
+                      {r.ok ? '✓' : '✗'} {r.route.replace('supabase:', '🛰 ')}
+                      <span className="opacity-60">{r.ok ? `${Math.round(r.ms)}ms` : 'fail'}</span>
+                    </span>
+                  ))}
+                </div>
+              )}
 
               {/* ── Real-time Live Discovery Feed ── */}
               {enrichProgress && enrichProgress.percent > 0 && (

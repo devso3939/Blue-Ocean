@@ -1939,7 +1939,8 @@ async function overpassAttempt(mirror: string, query: string, timeoutSec: number
   // v6.9.30: honor the per-host circuit breaker — a mirror that failed at the
   // network level repeatedly (e.g. kumi.systems hanging 40s+ per request) is
   // skipped INSTANTLY instead of burning its full timeout on every query.
-  if (hostIsOpen(mirror)) return null;
+  if (hostIsOpen(mirror)) { logRoute(hostKey(mirror), false, 0); return null; }
+  const t0 = Date.now();
   try {
     // v6.9.30: optional hard cap for fallback mirrors (30s) — a hanging
     // mirror used to cost timeoutSec+15 (60s+) EACH before the cooldown/retry
@@ -1956,22 +1957,24 @@ async function overpassAttempt(mirror: string, query: string, timeoutSec: number
     clearTimeout(timer);
     // HTTP 429/504 from a mirror means "cannot serve this now" — counted so a
     // rate-limited/hung mirror opens the breaker and stops wasting slots.
-    if (!res.ok) { hostRecordFail(mirror); return null; }
+    if (!res.ok) { hostRecordFail(mirror); logRoute(hostKey(mirror), false, Date.now() - t0); return null; }
     const text = await res.text();
-    if (!text.trim().startsWith('{')) { hostRecordFail(mirror); return null; } // XML error page / rate-limit
+    if (!text.trim().startsWith('{')) { hostRecordFail(mirror); logRoute(hostKey(mirror), false, Date.now() - t0); return null; } // XML error page / rate-limit
     const data = await parseLargeJson(text);
-    if (!data || data.elements === undefined) { hostRecordFail(mirror); return null; }
+    if (!data || data.elements === undefined) { hostRecordFail(mirror); logRoute(hostKey(mirror), false, Date.now() - t0); return null; }
     // v6.9.30: Overpass sets `remark` when the query FAILED mid-run —
     // "runtime error: Query timed out", "out of memory", etc. Such a response
     // is a PARTIAL (often near-empty) result that used to WIN the race and
     // even get cached — exactly the "Discover finishes in 5 s with 1 sphere"
     // bug. Treat remark responses as failures so the race falls through to a
     // healthy mirror with a real result.
-    if (data.remark) { hostRecordFail(mirror); return null; }
+    if (data.remark) { hostRecordFail(mirror); logRoute(hostKey(mirror), false, Date.now() - t0); return null; }
     hostRecordSuccess(mirror);
+    logRoute(hostKey(mirror), true, Date.now() - t0);
     return data;
   } catch {
     hostRecordFail(mirror);
+    logRoute(hostKey(mirror), false, Date.now() - t0);
     return null;
   }
 }
@@ -1999,6 +2002,85 @@ function firstSuccess<T>(promises: Promise<T | null>[]): Promise<T | null> {
       });
     }
   });
+}
+
+// ─── v6.9.31: Overpass route health (for the loading-screen chip) ──
+export interface OverpassRouteEvent {
+  route: string;  // 'supabase:overpass-api.de' | 'mail.ru' | 'kumi' | ...
+  ok: boolean;
+  ms: number;
+  at: number;
+}
+const overpassRouteLog: OverpassRouteEvent[] = [];
+function logRoute(route: string, ok: boolean, ms: number): void {
+  overpassRouteLog.push({ route, ok, ms, at: Date.now() });
+  if (overpassRouteLog.length > 10) overpassRouteLog.shift();
+}
+export function getOverpassRouteLog(): OverpassRouteEvent[] {
+  return overpassRouteLog.slice();
+}
+export function resetOverpassRouteLog(): void {
+  overpassRouteLog.length = 0;
+}
+
+// ─── v6.9.31: Supabase Overpass proxy (server-side fetch) ──────────
+// The browser calls public.rpc_overpass_start (submits pg_net job, returns
+// request id) and then public.rpc_overpass_poll until done/failed. The
+// SERVER talks to Overpass — user-side 504 cold starts, hanging mirrors and
+// per-IP rate limits stop affecting scans. Direct-mirror racing remains as
+// an automatic fallback if the proxy is unreachable.
+const SUPABASE_URL = 'https://bfoagnqjkoqhogxvkvkw.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_UtCOExOHddCZ0UbTxbruWg_3m1U7a-0';
+let _proxyDisabledUntil = 0; // circuit breaker when Supabase is unreachable
+const PROXY_COOLDOWN_MS = 120000;
+
+async function supabaseRpc<T>(fn: string, body: Record<string, unknown>, timeoutMs: number): Promise<T | null> {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+    method: 'POST',
+    headers: {
+      'apikey': SUPABASE_ANON_KEY,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) throw new Error(`rpc ${fn} HTTP ${res.status}`);
+  return res.json() as Promise<T>;
+}
+
+async function overpassViaProxy(query: string, onWait?: (msg: string) => void): Promise<any> {
+  if (Date.now() < _proxyDisabledUntil) return null;
+  try {
+    const t0 = Date.now();
+    // Try up to 2 mirrors server-side (0 = overpass-api.de, 1 = mail.ru)
+    for (const mirror of [0, 1]) {
+      const start = await supabaseRpc<{ rid?: number; error?: string }>('rpc_overpass_start', { p_q: query, p_mirror: mirror }, 15000);
+      if (!start?.rid) continue;
+      const rid = start.rid;
+      // Poll every 2s for up to ~50s (server-side query timeout is 60–120s)
+      for (let i = 0; i < 25; i++) {
+        if (isCancelled()) return null;
+        if (i > 0) await abortableWait(2000);
+        const poll = await supabaseRpc<{ state: string; data?: any; error?: string }>('rpc_overpass_poll', { p_rid: rid }, 15000);
+        if (!poll) break;
+        if (poll.state === 'done' && poll.data?.elements !== undefined) {
+          if (!poll.data.remark) {
+            logRoute('supabase:' + (mirror === 0 ? 'overpass-api.de' : 'mail.ru'), true, Date.now() - t0);
+            return poll.data; // real result
+          }
+          break; // remark = server-side partial → try next mirror
+        }
+        if (poll.state === 'failed') { logRoute('supabase:' + (mirror === 0 ? 'overpass-api.de' : 'mail.ru'), false, Date.now() - t0); break; }
+        // state === 'pending' → keep polling
+        if (i === 24) break;
+      }
+    }
+    return null;
+  } catch {
+    // Proxy unreachable — disable for 2 min and fall back to direct mirrors
+    _proxyDisabledUntil = Date.now() + PROXY_COOLDOWN_MS;
+    return null;
+  }
 }
 
 async function overpassRace(query: string, timeoutSec: number): Promise<any> {
@@ -2032,8 +2114,14 @@ async function fetchOverpass(query: string, timeoutSec = 30, onWait?: (msg: stri
   // result from a query that timed out server-side) — belt & suspenders with
   // the CACHE_VERSION purge above.
   if (cached && !cached.remark) return cached;
-  // First pass: hedged race across the two primary mirrors + walk the rest
-  let data = await overpassRace(query, timeoutSec);
+  // v6.9.31: server-side proxy FIRST (no browser-side 504s / mirror hangs),
+  // then the direct hedged race as fallback if Supabase is unreachable.
+  onWait?.('Fetching via secure server proxy…');
+  let data = await overpassViaProxy(query, onWait);
+  if (!data) {
+    // First pass: hedged race across the two primary mirrors + walk the rest
+    data = await overpassRace(query, timeoutSec);
+  }
   // …if everything failed, cool down and try again (typical cause: the IP is
   // rate-limited after a heavy scan; bans usually lift within a minute).
   // v6.9.22: waits are now abort-aware — if the user hits Cancel during the
