@@ -4936,6 +4936,7 @@ export async function runAIPhase(
   signals: Map<string, DemandSignal>,
   onProgress?: (dp: DiscoveryProgress) => void,
   abortSignal?: AbortSignal,
+  scanMeta?: MarketFacts['scanMeta'],
 ): Promise<{ aiInsights: string; aiAnalysis?: AIAnalysis }> {
   const isCancelled = () => abortSignal?.aborted ?? false;
   const _dp: Partial<DiscoveryProgress> = { phase: 'ai', ai: 'thinking', percent: 92 };
@@ -4945,7 +4946,7 @@ export async function runAIPhase(
   let aiInsights = '';
   let aiAnalysis: AIAnalysis | undefined;
   try {
-    const facts = computeMarketFacts(businesses, population, cityName, countryName, signals);
+    const facts = computeMarketFacts(businesses, population, cityName, countryName, signals, scanMeta);
     // Attach real opportunity scores to the facts (LLM sees exact numbers)
     const scoreByCat = new Map(opportunities.map(o => [o.category, o.score]));
     facts.categories.forEach(c => { c.score = scoreByCat.get(c.category) ?? 0; });
@@ -4964,6 +4965,17 @@ export async function runAIPhase(
     // a visible warning insight so absurd numbers can't pass silently.
     const sanity = sanityCheckOpportunities(opportunities, population);
     analysis.sanity = sanity;
+    // v6.9.36: deterministic healing transparency — added BEFORE the model's
+    // insights so it's the first thing the user reads. No LLM needed: this is
+    // a fact about collection methodology, not an interpretation.
+    if (scanMeta?.healed && scanMeta.initialCount != null) {
+      analysis.insights = [{
+        title: `🔍 Scan auto-healed: area expanded ${scanMeta.areaFactor}×`,
+        detail: `First pass found only ${scanMeta.initialCount} businesses; a retry with a ${scanMeta.areaFactor}× larger area found ${facts.totalBusinesses}. Counts reflect the wider area — neighboring towns may be included.`,
+        severity: 'low',
+        categories: undefined,
+      }, ...analysis.insights];
+    }
     const absurd = sanity.filter(s => s.verdict === 'absurd');
     if (absurd.length > 0) {
       analysis.insights = [{
@@ -5399,6 +5411,13 @@ export interface MarketFacts {
     concentration: number;       // 0-100, share of businesses in top cluster
   };
   contactCoverage: { emails: number; phones: number; websites: number };
+  // v6.9.36: how this scan was collected — lets the LLM (and the UI) treat
+  // self-healed results appropriately instead of as raw first-pass data.
+  scanMeta?: {
+    areaFactor: number;        // 1 = base area; 2 / 3.5 = self-healing enlarged it
+    healed: boolean;           // a retry found MORE businesses and was kept
+    initialCount: number | null; // businesses the first pass found (when healed)
+  };
 }
 
 // Deterministic pattern detection over the real scan results — the numbers
@@ -5409,6 +5428,7 @@ export function computeMarketFacts(
   cityName: string,
   countryName: string,
   demandSignals?: Map<string, DemandSignal>,
+  scanMeta?: MarketFacts['scanMeta'],
 ): MarketFacts {
   const totalBusinesses = Array.from(businesses.values()).reduce((s, a) => s + a.length, 0);
 
@@ -5488,6 +5508,7 @@ export function computeMarketFacts(
       concentration,
     },
     contactCoverage: { emails, phones, websites },
+    scanMeta: scanMeta, // v6.9.36: healing transparency for the LLM
   };
 }
 
@@ -5507,9 +5528,17 @@ function factsToPrompt(f: MarketFacts, opps: OpportunityResult[]): string {
   const undTxt = f.underservedCluster.length ? f.underservedCluster.map(c => getCategoryLabel(c)).join(', ') : 'none';
   const lowTxt = f.lowCompetition.length ? f.lowCompetition.map(c => getCategoryLabel(c)).join(', ') : 'none';
 
+  // v6.9.36: collection methodology — when self-healing enlarged the scan
+  // area, the model must know so it doesn't treat neighboring towns' data
+  // as the city's own market.
+  const scanMetaLine = f.scanMeta && f.scanMeta.areaFactor > 1
+    ? `
+SCAN METHOD: the initial scan area found too few businesses and was auto-expanded ${f.scanMeta.areaFactor}×${f.scanMeta.healed ? ` (retry kept: ${f.scanMeta.initialCount} → ${f.totalBusinesses} businesses)` : ''}. Treat counts as reflecting the WIDER area, not ${f.cityName} alone; be conservative about city-specific gaps and mention the wider coverage when relevant.`
+    : '';
+
   return `CITY: ${f.cityName}, ${f.countryName}
 POPULATION: ${f.population > 0 ? f.population.toLocaleString() : 'unknown'}
-TOTAL BUSINESSES SCANNED: ${f.totalBusinesses}
+TOTAL BUSINESSES SCANNED: ${f.totalBusinesses}${scanMetaLine}
 
 CATEGORY DATA (top ${Math.min(f.categories.length, 18)}):
 ${catLines}
@@ -5571,7 +5600,9 @@ Generate exactly 3 insights, 2-3 patterns, 2 risks, 3 actions. Keep every string
   // the exact same AI panel instantly instead of a 20-60s LLM wait.
   const aiCk = 'ai_' + cacheKey(
     hashStr(facts.cityName + '|' + facts.countryName), facts.population, opportunities.length,
-    hashStr(JSON.stringify(facts.categories) + JSON.stringify(opportunities.map(o => [o.category, o.score, o.existing, o.gap])))
+    hashStr(JSON.stringify(facts.categories) + JSON.stringify(opportunities.map(o => [o.category, o.score, o.existing, o.gap]))),
+    // v6.9.36: a healed scan has different methodology → different analysis
+    facts.scanMeta?.areaFactor ?? 1
   );
   const cachedAI = cacheGet<AIAnalysis>(aiCk, DAY_MS);
   if (cachedAI) return cachedAI;
@@ -5634,6 +5665,17 @@ Generate exactly 3 insights, 2-3 patterns, 2 risks, 3 actions. Keep every string
       }));
 
     if (insights.length === 0 && patterns.length === 0) throw new Error('empty-analysis');
+
+    // v6.9.36: healing transparency on the model path too — prepended so
+    // users read the methodology note before any model interpretation.
+    if (facts.scanMeta?.healed && facts.scanMeta.initialCount != null) {
+      insights.unshift({
+        title: `🔍 Scan auto-healed: area expanded ${facts.scanMeta.areaFactor}×`,
+        detail: `First pass found only ${facts.scanMeta.initialCount} businesses; the ${facts.scanMeta.areaFactor}× retry found ${facts.totalBusinesses}. Counts reflect the wider area — neighboring towns may be included.`,
+        severity: 'low',
+        categories: undefined,
+      });
+    }
 
     const result: AIAnalysis = { model: usedModel, insights, patterns, risks, actions, isAI: true };
     cacheSet(aiCk, result);

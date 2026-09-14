@@ -542,7 +542,10 @@ export default function App() {
       const foundTotal = totalBusinessCount(biz);
       const HEAL_THRESHOLD = 50; // real cities (100k+) always clear this; villages legitimately don't
       // v6.9.35: badge state — starts as the base scan, updated if healing fires
+      // v6.9.36: same info feeds the AI analysis (scanMeta)
       let areaFactor = 0;
+      let healed = false;
+      const scanMeta = { areaFactor: 1, healed: false, initialCount: null as number | null };
       const setAreaBadge = () => setScanAreaLabel(
         areaFactor > 0
           ? `Scanned: ${selectedCity.name} +${areaFactor}× area`
@@ -576,6 +579,7 @@ export default function App() {
             healed = true;
             areaFactor = factor;
             setAreaBadge();
+            scanMeta.areaFactor = factor; scanMeta.healed = true; scanMeta.initialCount = foundTotal;
             setRescanNote(`Area expanded ${factor}× — found ${retryTotal} businesses (was ${foundTotal}).`);
             break; // healed — stop enlarging
           }
@@ -627,6 +631,7 @@ export default function App() {
             opps, signals,
             (dp) => setDiscoverProgress(dp),
             ac.signal,
+            scanMeta.healed ? scanMeta : { ...scanMeta, areaFactor: 1 },
           );
           if (ac.signal.aborted) return;
           if (insights) setAiInsights(insights);
