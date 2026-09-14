@@ -62,6 +62,29 @@ function escapeHtml(s: unknown): string {
     .replace(/'/g, '&#39;');
 }
 
+// ── v6.9.38: merge partial DiscoveryProgress updates ─────────────────
+// runAIPhase emits a PARTIAL dp ({phase:'ai', ai, percent}) that lacks
+// osmBatches/demand/etc. Merging it over the previous state would blank
+// those fields and crash the Discovery panel render
+// ("Cannot read properties of undefined (reading 'fallback')").
+// This merge keeps every field the partial update doesn't carry.
+function mergeDP(prev: DiscoveryProgress | null, next: DiscoveryProgress): DiscoveryProgress {
+  if (!prev) return next;
+  return {
+    ...prev,
+    ...next,
+    // Fields the AI-phase partial never sets — carry forward instead of blanking:
+    osmBatches: next.osmBatches ?? prev.osmBatches,
+    demand: next.demand ?? prev.demand,
+    demandDone: next.demandDone ?? prev.demandDone,
+    demandTotal: next.demandTotal ?? prev.demandTotal,
+    topOpps: next.topOpps ?? prev.topOpps,
+    recentQueries: next.recentQueries ?? prev.recentQueries,
+    totalFound: next.totalFound ?? prev.totalFound,
+    biggestGap: next.biggestGap ?? prev.biggestGap,
+  };
+}
+
 const COUNTRIES = [
   { name: 'Georgia', code: 'GE' }, { name: 'Armenia', code: 'AM' },
   { name: 'Azerbaijan', code: 'AZ' }, { name: 'Turkey', code: 'TR' },
@@ -529,7 +552,7 @@ export default function App() {
         (pct, msg) => { setProgress(pct); setLoadingStage(msg); },
         undefined, true,
         undefined,
-        (dp) => setDiscoverProgress(dp),
+        (dp) => setDiscoverProgress(prev => mergeDP(prev, dp)),
         baseArea,
       );
 
@@ -569,7 +592,7 @@ export default function App() {
             (pct, msg) => { setProgress(pct); setLoadingStage(msg); },
             undefined, true,
             undefined,
-            (dp) => setDiscoverProgress(dp),
+            (dp) => setDiscoverProgress(prev => mergeDP(prev, dp)),
             bigger,
           );
           if (ac.signal.aborted) break;
@@ -608,7 +631,7 @@ export default function App() {
         await runDiscoveryPhases(
           biz, selectedCity.population || 0,
           selectedCity.name, selectedCity.country,
-          (dp) => setDiscoverProgress(dp),
+          (dp) => setDiscoverProgress(prev => mergeDP(prev, dp)),
           ac.signal,
         );
       if (ac.signal.aborted) return;
@@ -629,7 +652,7 @@ export default function App() {
             biz, selectedCity.population || 0,
             selectedCity.name, selectedCity.country,
             opps, signals,
-            (dp) => setDiscoverProgress(dp),
+            (dp) => setDiscoverProgress(prev => mergeDP(prev, dp)),
             ac.signal,
             scanMeta.healed ? scanMeta : { ...scanMeta, areaFactor: 1 },
           );
@@ -1480,9 +1503,9 @@ export default function App() {
                         { key: 'foodHealth',  label: 'Food / Health / Entertainment', icon: '🍽️' },
                         { key: 'shopsRetail', label: 'Shops & Retail',                  icon: '🛍️' },
                         { key: 'hotelsGyms',  label: 'Hotels / Gyms / Services',        icon: '🏨' },
-                        ...(discoverProgress.osmBatches.fallback ? [{ key: 'fallback', label: 'Fallback retry', icon: '🔁' }] : []),
+                        ...(discoverProgress.osmBatches?.fallback ? [{ key: 'fallback', label: 'Fallback retry', icon: '🔁' }] : []),
                       ] as const).map(({ key, label, icon }) => {
-                        const b = discoverProgress.osmBatches[key as keyof typeof discoverProgress.osmBatches];
+                        const b = discoverProgress.osmBatches?.[key as keyof typeof discoverProgress.osmBatches];
                         if (!b) return null;
                         const isRunning = b.status === 'running';
                         const isDone = b.status === 'done';

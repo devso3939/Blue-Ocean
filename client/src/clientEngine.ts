@@ -3851,105 +3851,44 @@ async function tryAMPVersion(b: Business): Promise<void> {
 
 // Also try to find email by scraping the website contact page directly
 async function scrapeContactPageForEmail(b: Business): Promise<void> {
-  if (b.email || !b.website) return;
+  // v6.9.37: crawl while ANY contact field is missing (was: email only).
+  // A page carrying a phone but no email was abandoned half-parsed before.
+  if (!b.website || (b.email && b.phone && (b.facebook || b.instagram))) return;
   try {
     const base = b.website.replace(/\/$/, '');
-    // Extended contact page paths — covers most CMS platforms and languages
-    // Top 8 most effective contact page paths (speed: max 8 pages)
-    // Priority contact page paths — covers most CMS platforms and languages
+    // v6.9.37: fixed the broken '/ contacting' entry (space — could never
+    // match any URL) and added the multilingual paths that were only in
+    // the dead copy: ka/hy/ru/tr/de/es/pt/it native spellings. Ordered:
+    // English CMS standards first, then native-language paths.
     const paths = [
       '/contact', '/contact-us', '/about', '/about-us',
-      '/kontakti', '/контакты', '/iletisim', '/contato',
-      '/contacto', '/kontakt', '/scontattaci', '/ contacting',
-      '/team', '/info', '/impressum', '/locations',
-      '/find-us', '/where-to-find-us', '/reach-us', '/get-in-touch',
-      '/kontaktay', '/momkhmarebeli', '/联系方式', '/お問い合わせ',
-      '/اتصل-بنا', '/написать-нам', '/联系我们',
+      '/kontakt', '/kontakti', '/контакты', '/iletisim',
+      '/contacto', '/contato', '/contatti', '/impressum',
+      '/team', '/info', '/locations',
+      '/get-in-touch', '/find-us', '/where-to-find-us', '/reach-us',
+      '/kavshiri', '/momkhmarebeli',           // Georgian
+      '/kontaktay', '/написать-нам',            // Belarusian/Russian
+      '/lianxi-women', '/联系方式', '/联系我们',     // Chinese (translit + native)
+      '/otoiawase', '/お問い合わせ',               // Japanese
+      '/اتصل-بنا', '/اتصل بنا',                  // Arabic
     ];
     let deadContactPaths = 0;
     for (const path of paths) {
-      if (b.email) break;
+      // v6.9.37: stop only when the contact SET is complete — not just email
+      if (b.email && b.phone && (b.facebook || b.instagram)) break;
       // Host went network-dead mid-loop: bail out (circuit breaker)
       if (hostIsOpen(base)) break;
       if (deadContactPaths >= 4) break; // repeated dead probes — stop early
       try {
-        // v6.9.5: corsFetch only — same rationale as deepScrape (direct
-        // fetches to random business hosts print console errors when
-        // CORS-refused; corsFetch's allowlist already covers CORS-open APIs).
         const r = await corsFetch(base + path, { signal: AbortSignal.timeout(2500), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
         if (!r.ok) { deadContactPaths++; continue; }
         deadContactPaths = 0;
         const html = await r.text();
-        const junk = /example\.com|wixpress|sentry|googleapis|google\.com|cloudflare|schema\.org|duckduckgo/i;
-        // Look for email patterns
-        const emails = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
-        if (emails) {
-          for (const e of emails) {
-            const clean = e.replace(/[\s>);]+$/, '');
-            if (!junk.test(clean) && clean.length > 6 && clean.length < 80) {
-              b.email = clean;
-              break;
-            }
-          }
-        }
-        // Also check Cloudflare encoded emails
-        if (!b.email) {
-          const cfM = html.match(/data-cfemail="([a-f0-9]+)"/i);
-          if (cfM) {
-            try {
-              const bytes = cfM[1].match(/.{2}/g)!.map(h => parseInt(h, 16));
-              const key = bytes[0];
-              const decoded = bytes.slice(1).map(x => x ^ key).map(x => String.fromCharCode(x)).join('');
-              if (decoded.includes('@') && !junk.test(decoded)) b.email = decoded;
-            } catch {}
-          }
-        }
-        // Also extract phone from contact page
-        if (!b.phone) {
-          const telM = html.match(/href="tel:([^"]+)"/);
-          if (telM) b.phone = telM[1].trim();
-          if (!b.phone) {
-            const phM = html.match(/\+?[\d][\d\s\-\.()]{7,18}/g);
-            if (phM) {
-              for (const p of phM) {
-                const digits = p.replace(/[^\d+]/g, '');
-                if (digits.length >= 8 && digits.length <= 15 && !junk.test(p)) { b.phone = p.trim(); break; }
-              }
-            }
-          }
-          if (!b.phone) {
-            const labeledPh = html.match(/(?:phone|tel|telephone|mobile|cell|fax|calls)\s*[:;]\s*([+\d][\d\s\-\.()]{7,18})/i);
-            if (labeledPh) {
-              const digits = labeledPh[1].replace(/\D/g, '');
-              if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(labeledPh[1])) b.phone = labeledPh[1].trim();
-            }
-          }
-        }
-        // Also extract social media links from contact page
-        if (!b.facebook) {
-          const fbM = html.match(/facebook\.com\/([a-zA-Z0-9._]+)/i);
-          if (fbM && !fbM[0].includes('login') && !fbM[0].includes('sharer')) {
-            b.facebook = 'https://facebook.com/' + fbM[1].replace(/\/$/, '');
-          }
-        }
-        if (!b.instagram) {
-          const igM = html.match(/instagram\.com\/([a-zA-Z0-9._]+)/i);
-          if (igM && !igM[0].includes('accounts')) {
-            b.instagram = 'https://instagram.com/' + igM[1].replace(/\/$/, '');
-          }
-        }
-        // Also extract from href attributes
-        const hrefs = [...html.matchAll(/href="([^"]+)"/gi)].map(m => m[1]);
-        for (const href of hrefs) {
-          if (!b.facebook && /facebook\.com\/[^/]+/i.test(href) && !href.includes('login')) {
-            const m2 = href.match(/facebook\.com\/([a-zA-Z0-9._]+)/i);
-            if (m2) b.facebook = 'https://facebook.com/' + m2[1];
-          }
-          if (!b.instagram && /instagram\.com\/[^/]+/i.test(href) && !href.includes('accounts')) {
-            const m3 = href.match(/instagram\.com\/([a-zA-Z0-9._]+)/i);
-            if (m3) b.instagram = 'https://instagram.com/' + m3[1];
-          }
-        }
+        // v6.9.37: use the FULL extractor (JSON-LD, WhatsApp/Viber links,
+        // Cloudflare decode, obfuscated emails, labeled phones, socials,
+        // ratings) — this crawler previously re-implemented a weak subset
+        // and missed everything the homepage scrape already handled.
+        extractFromHtml(html, b);
       } catch {}
     }
   } catch {}
@@ -4398,10 +4337,30 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         const scrapeWebsiteOnce = async () => {
           if (websiteScraped || !b.website) return;
           websiteScraped = true;
-          if (!b.email || !b.phone || !b.facebook) {
+          // v6.9.37: full contact set = email + phone + a social profile.
+          // The old gate stopped after the homepage deep-scrape as soon as
+          // ANY two fields existed, leaving email OR phone unharvested even
+          // when the site's contact page had both.
+          const contactSetComplete = () => !!(b.email && b.phone && (b.facebook || b.instagram));
+          if (!contactSetComplete()) {
             try { await enrichFromWebsiteDeep(b); } catch {}
           }
-          if (!b.email && b.website) {
+          // v6.9.37: wire in the previously DEAD scrapers — sitemap contact
+          // discovery, WordPress REST API, and vCard files all existed but
+          // were never called, leaving free contact sources untapped.
+          if (!contactSetComplete()) {
+            try { await scrapeSitemapForContacts(b); } catch {}
+          }
+          if (!contactSetComplete()) {
+            try { await scrapeWordPressAPI(b); } catch {}
+          }
+          if (!contactSetComplete()) {
+            try { await scrapeVCard(b); } catch {}
+          }
+          // v6.9.37: run the contact-page crawler while EITHER email or
+          // phone is missing (was: email only — pages with a phone but no
+          // email were abandoned half-parsed).
+          if (!b.email || !b.phone) {
             try { await scrapeContactPageForEmail(b); } catch {}
           }
         };
@@ -4800,6 +4759,62 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         emitEP();
       }
       wbEngine.status = 'done'; emitEP();
+    }
+  }
+
+  // ── v6.9.37: Google Places batch pass (formerly DEAD code) ──
+  // enrichFromGooglePlaces existed but was never called. It finds phones/
+  // websites for businesses that every other engine missed — run it on the
+  // still-empty ones (capped; Google Places has no key-free hard quota but
+  // the underlying maps.google.com endpoint rate-limits per IP).
+  {
+    const stillEmpty = allBizList.filter(b => !b.phone && !b.email && !b.website && !b.facebook);
+    if (stillEmpty.length > 0) {
+      _ep.activePass = 'Pass 5: Google Places sweep'; _ep.passNumber = 5; _ep.percent = 97; emitEP();
+      const gpEngine: EngineStatus = { name: 'Google Places', icon: '🗺️', status: 'active', found: 0 };
+      _ep.engines.push(gpEngine); emitEP();
+      const maxGP = Math.min(stillEmpty.length, 60);
+      for (let i5 = 0; i5 < maxGP; i5 += _BATCH) {
+        if (isCancelled()) break;
+        const batch5 = stillEmpty.slice(i5, i5 + _BATCH);
+        const beforeCnt = batch5.filter(b => b.phone || b.email || b.website).length;
+        try { await enrichFromGooglePlaces(batch5); } catch {}
+        const afterCnt = batch5.filter(b => b.phone || b.email || b.website).length;
+        gpEngine.found += Math.max(0, afterCnt - beforeCnt);
+        emitEP();
+        if (i5 + _BATCH < maxGP) await wait(1500);
+      }
+      gpEngine.status = 'done'; emitEP();
+    }
+  }
+
+  // ── v6.9.37: final VALIDATION pass — every stored contact is checked ──
+  // Extraction layers are permissive (they'd rather keep a suspect value
+  // than drop a real one). Before results ship, a strict rules pass purges
+  // junk emails (file paths, noreply, placeholder hosts), implausible
+  // phones (dates, IPs, timestamps) and normalizes phones to international
+  // format. This is the layer that makes the coverage numbers TRUSTWORTHY
+  // — more data is worthless if a share of it is garbage.
+  {
+    _ep.activePass = 'Validating contacts'; _ep.passNumber = 6; _ep.percent = 98; emitEP();
+    const cc = getScanContext()?.countryCode;
+    let purgedEmails = 0, purgedPhones = 0, fixedPhones = 0;
+    for (const arr of results.values()) {
+      for (const b of arr) {
+        if (b.email && !plausibleEmail(b.email)) { b.email = ''; purgedEmails++; }
+        if (b.phone) {
+          const norm = normalizePhone(b.phone, cc);
+          const digits = norm.replace(/\D/g, '');
+          if (!plausiblePhone(b.phone) || digits.length < 8 || digits.length > 15) {
+            b.phone = ''; purgedPhones++;
+          } else if (norm !== b.phone) {
+            b.phone = norm; fixedPhones++;
+          }
+        }
+      }
+    }
+    if (purgedEmails + purgedPhones > 0) {
+      onProgress?.(99, `Validated — purged ${purgedEmails} junk emails, ${purgedPhones} bad phones, normalized ${fixedPhones}`);
     }
   }
 
@@ -6532,6 +6547,27 @@ function plausiblePhone(p: string): boolean {
 // Junk emails: asset files and placeholder addresses that regexes pick up
 const _EMAIL_FILE_RE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
 const _EMAIL_JUNK_RE = /example\.com|noreply|no-reply|donotreply|wixpress|sentry\.io|cloudflare|privacy|abuse@|postmaster@/i;
+
+// v6.9.37: structural email validation for the final data-quality pass.
+// Checks the stored email still looks like a real address after every
+// extraction layer has run — no network calls, pure rules.
+export function plausibleEmail(e: string): boolean {
+  const v = (e || '').trim().toLowerCase();
+  if (!v || v.length < 6 || v.length > 80) return false;
+  // Exactly one @, non-empty local and domain parts
+  const at = v.split('@');
+  if (at.length !== 2 || !at[0] || !at[1]) return false;
+  const [local, domain] = at;
+  // Domain needs a dot and a 2+ TLD; no file extensions posing as TLDs
+  if (!domain.includes('.') || /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|webm|mp[34])$/i.test(domain)) return false;
+  if (domain.startsWith('.') || domain.endsWith('.') || domain.includes('..')) return false;
+  // Local part: no leading/trailing dot, no consecutive dots
+  if (local.startsWith('.') || local.endsWith('.') || local.includes('..')) return false;
+  if (!/^[a-z0-9._%+-]+$/.test(local)) return false;
+  // Junk senders/roles that regexes commonly harvest from footers
+  if (_EMAIL_JUNK_RE.test(v)) return false;
+  return true;
+}
 
 // ─── Test-only exports (corsFetch is module-scope; extractFromHtml is
 // published inside queryBusinesses, which owns its scope) ───
