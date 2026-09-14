@@ -4692,12 +4692,25 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
 
   if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
 
-  // ═══ Regional fallbacks for businesses with zero data ═══
+  // ═══ Regional + verification passes — v6.9.40: ADAPTIVE PARALLEL LANES ═══
+  // These passes used to run strictly one-after-another, so a big category
+  // paid the SUM of their wall-times (dominated by the inter-batch sleeps).
+  // Engine-wise they split into two clean waves:
+  //   Wave A — 2GIS API, social-profile fetches, Google Places, Wikidata +
+  //            Wayback: four DISJOINT hosts, zero shared engines.
+  //   Wave B — Yandex (rides DDG) + deep-crawl/domain harvest (partly DDG):
+  //            both share the DDG health gate, so they run together AFTER
+  //            wave A to keep DDG pressure at two lanes, not six.
+  // Each lane is the exact former sequential block, wrapped in a closure.
+  // Percent is driven by a monotonic tracker — the slowest lane pulls the
+  // bar forward, lanes never fight over it.
+  const bumpPercent = (p: number) => { if (p > _ep.percent) { _ep.percent = p; emitEP(); } };
 
-  // ── 2GIS (excellent for Georgia, Russia, CIS countries) ──
-  const need2GIS = allBizList.filter(b => !b.phone && !b.email && !b.website);
-  if (need2GIS.length > 0) {
-    _ep.activePass = 'Pass 2: Regional (2GIS)'; _ep.passNumber = 2; _ep.percent = 92;
+  // ── Lane: 2GIS (excellent for Georgia, Russia, CIS countries) ──
+  const lane2GIS = async () => {
+    const need2GIS = allBizList.filter(b => !b.phone && !b.email && !b.website);
+    if (need2GIS.length === 0) return;
+    _ep.activePass = 'Pass 2: Regional (2GIS)'; _ep.passNumber = 2; bumpPercent(91);
     _ep.engines.find(e => e.name === '2GIS')!.status = 'active'; emitEP();
     for (let i2 = 0; i2 < Math.min(need2GIS.length, 40); i2 += _BATCH) {
       if (isCancelled()) break;
@@ -4745,15 +4758,16 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       if (i2 + _BATCH < need2GIS.length) await wait(1000);
     }
     _ep.engines.find(e => e.name === '2GIS')!.status = 'done'; emitEP();
-  }
+  };
 
-  // ── Yandex (dominant in Georgia/Russia/CIS) ──
+  // ── Lane: Yandex (dominant in Georgia/Russia/CIS) ──
   // v6.9.4: rides on the shared html.duckduckgo.com engine — when DDG is
   // cooling down / dead, skip the whole pass instead of firing one doomed
   // fetch per business (each failure logs a console error).
-  const needYandex = allBizList.filter(b => !b.phone && !b.email && !b.website);
-  if (needYandex.length > 0 && engineAvailable('ddg')) {
-    _ep.activePass = 'Pass 3: Regional (Yandex)'; _ep.passNumber = 3; _ep.percent = 94;
+  const laneYandex = async () => {
+    const needYandex = allBizList.filter(b => !b.phone && !b.email && !b.website);
+    if (needYandex.length === 0 || !engineAvailable('ddg')) return;
+    _ep.activePass = 'Pass 3: Regional (Yandex)'; _ep.passNumber = 3; bumpPercent(93);
     _ep.engines.find(e => e.name === 'Yandex')!.status = 'active'; emitEP();
     for (let i3 = 0; i3 < Math.min(needYandex.length, 30); i3 += _BATCH) {
       if (isCancelled()) break;
@@ -4776,13 +4790,13 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       if (i3 + _BATCH < needYandex.length) await wait(1200);
     }
     _ep.engines.find(e => e.name === 'Yandex')!.status = 'done'; emitEP();
-  }
+  };
 
-  // ── Pass 4: Verification (keyless 2026 additions) ──
-  // Wikidata SPARQL: official contacts for notable businesses (chains, hotels)
-  const needVerify = allBizList.filter(b => b.website && (!b.email || !b.phone));
-  if (needVerify.length > 0) {
-    _ep.activePass = 'Pass 4: Verify (Wikidata + Wayback)'; _ep.passNumber = 4; _ep.percent = 96;
+  // ── Lane: Pass 4 Verification (Wikidata SPARQL + Wayback) ──
+  const laneVerify = async () => {
+    const needVerify = allBizList.filter(b => b.website && (!b.email || !b.phone));
+    if (needVerify.length === 0) return;
+    _ep.activePass = 'Pass 4: Verify (Wikidata + Wayback)'; _ep.passNumber = 4; bumpPercent(94);
     const wdEngine: EngineStatus = { name: 'Wikidata', icon: '🔗', status: 'active', found: 0 };
     _ep.engines.push(wdEngine); emitEP();
     const maxVerify = Math.min(needVerify.length, 24);
@@ -4812,145 +4826,156 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       }
       wbEngine.status = 'done'; emitEP();
     }
-  }
+  };
 
-  // ── v6.9.39: Pass 5b: SOCIAL-PROFILE MINING ──────────────────────
+  // ── Lane: v6.9.39 SOCIAL-PROFILE MINING ──
   // Social profiles are found in earlier passes but never FOLLOWED. The
   // business's own Facebook About/Transparency page and Instagram bio are
   // public contact cards: emails, phones, and even the website live there.
-  // This pass fetches each found profile page and mines it with the same
+  // This lane fetches each found profile page and mines it with the same
   // full extractor used for websites.
-  {
+  const laneSocial = async () => {
     const socialNeedies = allBizList.filter(b => (b.facebook || b.instagram) && (!b.email || !b.phone || !b.website));
-    if (socialNeedies.length > 0) {
-      _ep.activePass = 'Pass 5b: Social profile mining'; _ep.passNumber = 5; _ep.percent = 97; emitEP();
-      const socEngine: EngineStatus = { name: 'Social Miner', icon: '👥', status: 'active', found: 0 };
-      _ep.engines.push(socEngine); emitEP();
-      const maxSoc = Math.min(socialNeedies.length, 60);
-      for (let i5b = 0; i5b < maxSoc; i5b += _BATCH) {
-        if (isCancelled()) break;
-        const batch5b = socialNeedies.slice(i5b, i5b + _BATCH);
-        const beforeCnt = batch5b.filter(x => x.email || x.phone).length;
-        await Promise.all(batch5b.map(async (b) => {
-          // Each business: try FB About → FB home → IG bio, stop early when complete
-          const urls: string[] = [];
-          if (b.facebook) {
-            urls.push(b.facebook + '/about');
-            urls.push(b.facebook);
-          }
-          if (b.instagram) {
-            urls.push(b.instagram + '/');
-          }
-          for (const u of urls) {
+    if (socialNeedies.length === 0) return;
+    _ep.activePass = 'Pass 5b: Social profile mining'; _ep.passNumber = 5; bumpPercent(95);
+    const socEngine: EngineStatus = { name: 'Social Miner', icon: '👥', status: 'active', found: 0 };
+    _ep.engines.push(socEngine); emitEP();
+    const maxSoc = Math.min(socialNeedies.length, 60);
+    for (let i5b = 0; i5b < maxSoc; i5b += _BATCH) {
+      if (isCancelled()) break;
+      const batch5b = socialNeedies.slice(i5b, i5b + _BATCH);
+      const beforeCnt = batch5b.filter(x => x.email || x.phone).length;
+      await Promise.all(batch5b.map(async (b) => {
+        // Each business: try FB About → FB home → IG bio, stop early when complete
+        const urls: string[] = [];
+        if (b.facebook) {
+          urls.push(b.facebook + '/about');
+          urls.push(b.facebook);
+        }
+        if (b.instagram) {
+          urls.push(b.instagram + '/');
+        }
+        for (const u of urls) {
+          if (b.email && b.phone) break;
+          try {
+            // Facebook serves a dumb HTML shell to logged-out crawlers;
+            // mbasic + the mobile UA return a parseable legacy page.
+            const isFb = /facebook\.com/i.test(u);
+            const r5b = await corsFetch(u, {
+              headers: { 'User-Agent': isFb ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36' : 'Mozilla/5.0' },
+              signal: AbortSignal.timeout(4000),
+            });
+            if (!r5b.ok) continue;
+            const html5b = await r5b.text();
+            // IG bio pages embed contact emails in meta description too
+            extractFromHtml(html5b, b);
+            // IG embeds emails in JSON meta — mine those explicitly
+            if (!b.email && /instagram\.com/i.test(u)) {
+              const igEmailM = html5b.match(/"business_email"\s*:\s*"([^"]+@[^"]+)"/i)
+                || html5b.match(/businessEmail"\s*:\s*"([^"]+@[^"]+)"/i)
+                || html5b.match(/"email"\s*:\s*"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"/i);
+              if (igEmailM && !/example|sentry|schema/i.test(igEmailM[1])) b.email = igEmailM[1];
+            }
             if (b.email && b.phone) break;
-            try {
-              // Facebook serves a dumb HTML shell to logged-out crawlers;
-              // mbasic + the mobile UA return a parseable legacy page.
-              const isFb = /facebook\.com/i.test(u);
-              const r5b = await corsFetch(u, {
-                headers: { 'User-Agent': isFb ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36' : 'Mozilla/5.0' },
-                signal: AbortSignal.timeout(4000),
-              });
-              if (!r5b.ok) continue;
-              const html5b = await r5b.text();
-              // IG bio pages embed contact emails in meta description too
-              const before = `${b.email}|${b.phone}|${b.website}`;
-              extractFromHtml(html5b, b);
-              // IG embeds emails in JSON meta — mine those explicitly
-              if (!b.email && /instagram\.com/i.test(u)) {
-                const igEmailM = html5b.match(/"business_email"\s*:\s*"([^"]+@[^""]+)"/i)
-                  || html5b.match(/businessEmail"\s*:\s*"([^"]+@[^"]+)"/i)
-                  || html5b.match(/"email"\s*:\s*"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"/i);
-                if (igEmailM && !/example|sentry|schema/i.test(igEmailM[1])) b.email = igEmailM[1];
-              }
-              if (b.email && b.phone) break;
-            } catch {}
-          }
-        }));
-        const afterCnt = batch5b.filter(x => x.email || x.phone).length;
-        socEngine.found += Math.max(0, afterCnt - beforeCnt);
-        emitEP();
-        if (i5b + _BATCH < maxSoc) await wait(800);
-      }
-      socEngine.status = 'done'; emitEP();
+          } catch {}
+        }
+      }));
+      const afterCnt = batch5b.filter(x => x.email || x.phone).length;
+      socEngine.found += Math.max(0, afterCnt - beforeCnt);
+      emitEP();
+      if (i5b + _BATCH < maxSoc) await wait(800);
     }
-  }
+    socEngine.status = 'done'; emitEP();
+  };
 
-  // ── v6.9.37: Google Places batch pass (formerly DEAD code) ──
-  // enrichFromGooglePlaces existed but was never called. It finds phones/
-  // websites for businesses that every other engine missed — run it on the
-  // still-empty ones (capped; Google Places has no key-free hard quota but
-  // the underlying maps.google.com endpoint rate-limits per IP).
-  {
+  // ── Lane: Google Places sweep (formerly DEAD code, wired v6.9.37) ──
+  // Finds phones/websites for businesses that every other engine missed
+  // (capped; the maps.google.com endpoint rate-limits per IP).
+  const laneGooglePlaces = async () => {
     const stillEmpty = allBizList.filter(b => !b.phone && !b.email && !b.website && !b.facebook);
-    if (stillEmpty.length > 0) {
-      _ep.activePass = 'Pass 5: Google Places sweep'; _ep.passNumber = 5; _ep.percent = 97; emitEP();
-      const gpEngine: EngineStatus = { name: 'Google Places', icon: '🗺️', status: 'active', found: 0 };
-      _ep.engines.push(gpEngine); emitEP();
-      const maxGP = Math.min(stillEmpty.length, 60);
-      for (let i5 = 0; i5 < maxGP; i5 += _BATCH) {
-        if (isCancelled()) break;
-        const batch5 = stillEmpty.slice(i5, i5 + _BATCH);
-        const beforeCnt = batch5.filter(b => b.phone || b.email || b.website).length;
-        try { await enrichFromGooglePlaces(batch5); } catch {}
-        const afterCnt = batch5.filter(b => b.phone || b.email || b.website).length;
-        gpEngine.found += Math.max(0, afterCnt - beforeCnt);
-        emitEP();
-        if (i5 + _BATCH < maxGP) await wait(1500);
-      }
-      gpEngine.status = 'done'; emitEP();
+    if (stillEmpty.length === 0) return;
+    _ep.activePass = 'Pass 5: Google Places sweep'; _ep.passNumber = 5; bumpPercent(95);
+    const gpEngine: EngineStatus = { name: 'Google Places', icon: '🗺️', status: 'active', found: 0 };
+    _ep.engines.push(gpEngine); emitEP();
+    const maxGP = Math.min(stillEmpty.length, 60);
+    for (let i5 = 0; i5 < maxGP; i5 += _BATCH) {
+      if (isCancelled()) break;
+      const batch5 = stillEmpty.slice(i5, i5 + _BATCH);
+      const beforeCnt = batch5.filter(b => b.phone || b.email || b.website).length;
+      try { await enrichFromGooglePlaces(batch5); } catch {}
+      const afterCnt = batch5.filter(b => b.phone || b.email || b.website).length;
+      gpEngine.found += Math.max(0, afterCnt - beforeCnt);
+      emitEP();
+      if (i5 + _BATCH < maxGP) await wait(1500);
     }
-  }
+    gpEngine.status = 'done'; emitEP();
+  };
 
-  // ── v6.9.39: Pass 5d: DEEP-CRAWL + SITE-DOMAIN HARVEST ──────────
-  // Two final layers for businesses still missing email or phone after
-  // every earlier pass:
+  // ── Lane: DEEP-CRAWL + SITE-DOMAIN HARVEST (v6.9.39) ──
+  // Two final layers for businesses still missing email or phone:
   //  a) deepCrawlWebsite — follow internal contact-smelling links that the
   //     fixed-path crawler couldn't guess
-  //  b) search the business's own EMAIL DOMAIN ("@cafe.ge") and
-  //     site:domain on search engines — directories and partner pages
-  //     often publish the exact address the business's own site hides
-  {
+  //  b) search the business's own EMAIL DOMAIN ("@cafe.ge") on DDG —
+  //     directories often publish the address the business's own site hides
+  const laneDeepCrawl = async () => {
     const lastNeeders = allBizList.filter(b => b.website && (!b.email || !b.phone));
-    if (lastNeeders.length > 0) {
-      _ep.activePass = 'Pass 5d: Deep crawl + domain search'; _ep.passNumber = 5; _ep.percent = 97; emitEP();
-      const dcEngine: EngineStatus = { name: 'Deep Crawl', icon: '🕷️', status: 'active', found: 0 };
-      _ep.engines.push(dcEngine); emitEP();
-      const maxDC = Math.min(lastNeeders.length, 50);
-      for (let i5d = 0; i5d < maxDC; i5d += _BATCH) {
-        if (isCancelled()) break;
-        const batch5d = lastNeeders.slice(i5d, i5d + _BATCH);
-        const beforeCnt = batch5d.filter(x => x.email || x.phone).length;
-        await Promise.all(batch5d.map(async (b) => {
-          // (a) internal-link deep crawl when fixed paths came up empty
-          if (!b.email || !b.phone) {
-            try { await deepCrawlWebsite(b); } catch {}
-          }
-          // (b) domain harvest — "@domain" reveals the address on directories
-          if (!b.email && b.website) {
-            try {
-              const host5d = new URL(b.website).hostname.replace(/^www\./, '');
-              if (/\./.test(host5d) && !/facebook|instagram|linktr|wixsite|business\.site/i.test(host5d)) {
-                const dq = encodeURIComponent('"@' + host5d + '"');
-                if (engineAvailable('ddg')) {
-                  const dr = await corsFetch('https://html.duckduckgo.com/html/?q=' + dq, {
-                    headers: { 'User-Agent': 'Mozilla/5.0' },
-                    signal: AbortSignal.timeout(4000),
-                  });
-                  if (dr.ok) extractFromHtml(await dr.text(), b);
-                }
+    if (lastNeeders.length === 0) return;
+    _ep.activePass = 'Pass 5d: Deep crawl + domain search'; _ep.passNumber = 5; bumpPercent(96);
+    const dcEngine: EngineStatus = { name: 'Deep Crawl', icon: '🕷️', status: 'active', found: 0 };
+    _ep.engines.push(dcEngine); emitEP();
+    const maxDC = Math.min(lastNeeders.length, 50);
+    for (let i5d = 0; i5d < maxDC; i5d += _BATCH) {
+      if (isCancelled()) break;
+      const batch5d = lastNeeders.slice(i5d, i5d + _BATCH);
+      const beforeCnt = batch5d.filter(x => x.email || x.phone).length;
+      await Promise.all(batch5d.map(async (b) => {
+        // (a) internal-link deep crawl when fixed paths came up empty
+        if (!b.email || !b.phone) {
+          try { await deepCrawlWebsite(b); } catch {}
+        }
+        // (b) domain harvest — "@domain" reveals the address on directories
+        if (!b.email && b.website) {
+          try {
+            const host5d = new URL(b.website).hostname.replace(/^www\./, '');
+            if (/\./.test(host5d) && !/facebook|instagram|linktr|wixsite|business\.site/i.test(host5d)) {
+              const dq = encodeURIComponent('"@' + host5d + '"');
+              if (engineAvailable('ddg')) {
+                const dr = await corsFetch('https://html.duckduckgo.com/html/?q=' + dq, {
+                  headers: { 'User-Agent': 'Mozilla/5.0' },
+                  signal: AbortSignal.timeout(4000),
+                });
+                if (dr.ok) extractFromHtml(await dr.text(), b);
               }
-            } catch {}
-          }
-        }));
-        const afterCnt = batch5d.filter(x => x.email || x.phone).length;
-        dcEngine.found += Math.max(0, afterCnt - beforeCnt);
-        emitEP();
-        if (i5d + _BATCH < maxDC) await wait(600);
-      }
-      dcEngine.status = 'done'; emitEP();
+            }
+          } catch {}
+        }
+      }));
+      const afterCnt = batch5d.filter(x => x.email || x.phone).length;
+      dcEngine.found += Math.max(0, afterCnt - beforeCnt);
+      emitEP();
+      if (i5d + _BATCH < maxDC) await wait(600);
     }
-  }
+    dcEngine.status = 'done'; emitEP();
+  };
+
+  // ── v6.9.40: adaptive orchestrator — run the lanes in two waves ──
+  // Wave A: four disjoint-host lanes in parallel (biggest wall-time win —
+  // their inter-batch sleeps now overlap instead of stacking).
+  // Wave B: the two DDG-riding lanes together (health gate shared, pressure
+  // bounded). Lanes with zero needies return instantly without touching the
+  // progress bar, so small categories skip what they don't need.
+  const waveA = [lane2GIS, laneSocial, laneGooglePlaces, laneVerify];
+  const waveB = [laneYandex, laneDeepCrawl];
+  const activeLanes =
+    (allBizList.some(b => !b.phone && !b.email && !b.website) ? 2 : 0) +
+    (allBizList.some(b => b.website && (!b.email || !b.phone)) ? 2 : 0) +
+    (allBizList.some(b => (b.facebook || b.instagram) && (!b.email || !b.phone || !b.website)) ? 1 : 0) +
+    (allBizList.some(b => !b.phone && !b.email && !b.website && !b.facebook) ? 1 : 0);
+  _ep.activePass = `Passes 2–5 in parallel (${activeLanes} lanes)`; _ep.passNumber = 2; bumpPercent(91); emitEP();
+  await Promise.all(waveA.map(fn => fn().catch(() => {})));
+  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
+  await Promise.all(waveB.map(fn => fn().catch(() => {})));
+  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
 
   // ── v6.9.37: final VALIDATION pass — every stored contact is checked ──
   // Extraction layers are permissive (they'd rather keep a suspect value
