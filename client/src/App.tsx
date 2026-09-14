@@ -26,7 +26,7 @@ import {
   type VerificationResult,
   type EnrichmentProgress,
   setScanContext, buildScanContext,
-  computeScanArea,
+  computeScanArea, healingScanArea, totalBusinessCount,
   addBackupKeys, keyPoolStatus,
   getOverpassRouteLog, resetOverpassRouteLog,
   type OverpassRouteEvent,
@@ -518,14 +518,59 @@ export default function App() {
     try {
       // Native-language context for this city (helps contact discovery)
       setScanContext(buildScanContext(selectedCity.countryCode, selectedCity.country, selectedCity.name));
+      const baseArea = computeScanArea(selectedCity.lat, selectedCity.lon, selectedCity.bbox, selectedCity.population); // v6.9.20: scan the city's REAL area, not a fixed 10 km circle
       let biz = await queryBusinesses(
         selectedCity.lat, selectedCity.lon, 10000,
         (pct, msg) => { setProgress(pct); setLoadingStage(msg); },
         undefined, true,
         undefined,
         (dp) => setDiscoverProgress(dp),
-        computeScanArea(selectedCity.lat, selectedCity.lon, selectedCity.bbox, selectedCity.population), // v6.9.20: scan the city's REAL area, not a fixed 10 km circle
+        baseArea,
       );
+
+      // ── v6.9.34: auto-rescan self-healing ──
+      // A full-city Discover scan yielding very few businesses is almost
+      // always a scan-area bug (tiny admin boundary, missing city polygon),
+      // not reality. Retry with progressively larger areas centered on the
+      // city and keep whichever scan found MORE businesses — a genuinely
+      // small city just fails the threshold twice and keeps its honest      // (small) result. Real threshold: ~50 total; full mode must clear it.
+      const foundTotal = totalBusinessCount(biz);
+      const HEAL_THRESHOLD = 50; // real cities (100k+) always clear this; villages legitimately don't
+      if (foundTotal < HEAL_THRESHOLD && !ac.signal.aborted) {
+        const center = { lat: selectedCity.lat, lon: selectedCity.lon };
+        let healed = false;
+        for (const factor of [2, 3.5] as const) {
+          if (ac.signal.aborted) break;
+          const bigger = healingScanArea(baseArea, factor, center);
+          // Skip when the cap (~55 km/axis) already bounds the base area —
+          // the "bigger" box is (nearly) identical, so a retry would just
+          // re-run the same query and waste 30–60s.
+          const baseSpan = Math.max(baseArea[2] - baseArea[0], baseArea[3] - baseArea[1]);
+          const newSpan = Math.max(bigger[2] - bigger[0], bigger[3] - bigger[1]);
+          if (newSpan < baseSpan * 1.05) continue;
+          setRescanNote(`Only ${foundTotal} businesses found — retrying with a ${factor}× larger area…`);
+          const retry = await queryBusinesses(
+            selectedCity.lat, selectedCity.lon, 10000,
+            (pct, msg) => { setProgress(pct); setLoadingStage(msg); },
+            undefined, true,
+            undefined,
+            (dp) => setDiscoverProgress(dp),
+            bigger,
+          );
+          if (ac.signal.aborted) break;
+          const retryTotal = totalBusinessCount(retry);
+          if (retryTotal > foundTotal) {
+            biz = retry;
+            healed = true;
+            setRescanNote(`Area expanded ${factor}× — found ${retryTotal} businesses (was ${foundTotal}).`);
+            break; // healed — stop enlarging
+          }
+        }
+        if (!healed && !ac.signal.aborted) {
+          setRescanNote(`Larger re-scans found nothing more — this area genuinely has ~${foundTotal} mapped businesses.`);
+        }
+      }
+
       setBusinesses(biz);
       setProgress(40);
 

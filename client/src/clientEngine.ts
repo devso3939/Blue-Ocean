@@ -2371,6 +2371,42 @@ export function computeScanArea(
   return circleBbox(lat, lon, radiusForPopulation(population));
 }
 
+// ─── v6.9.34: auto-rescan self-healing ────────────────────────────
+// Even with the settlement filter, a bad scan area can slip through (an
+// oddly small admin boundary, a city polygon missing from OSM, etc.).
+// Healing rule: a FULL-city Discover scan yielding very few businesses is
+// almost always an area bug — any real city (pop ≥ 100k) has hundreds.
+// The retry enlarges the area in two steps (2×, then 3.5× the original
+// span around the same center) and the BETTER result wins; a genuinely
+// small town just fails the threshold twice and keeps its honest result.
+export function healingScanArea(
+  base: [number, number, number, number],
+  factor: number,
+  center: { lat: number; lon: number }
+): [number, number, number, number] {
+  const [s, w, n, e] = base;
+  const grow = (lo: number, hi: number, c: number) => {
+    const half = ((hi - lo) / 2) * factor;
+    return [c - half, c + half] as [number, number];
+  };
+  let [ps, pn] = grow(s, n, center.lat);
+  let [pw, pe] = grow(w, e, center.lon);
+  // Respect the global query-size cap (~55 km per axis) — same as computeScanArea
+  if (pn - ps > MAX_AREA_SPAN_DEG) { ps = center.lat - MAX_AREA_SPAN_DEG / 2; pn = center.lat + MAX_AREA_SPAN_DEG / 2; }
+  if (pe - pw > MAX_AREA_SPAN_DEG) { pw = center.lon - MAX_AREA_SPAN_DEG / 2; pe = center.lon + MAX_AREA_SPAN_DEG / 2; }
+  // Clamp to sane ranges
+  ps = Math.max(-90, ps); pn = Math.min(90, pn);
+  pw = Math.max(-180, pw); pe = Math.min(180, pe);
+  return [ps, pw, pn, pe];
+}
+
+// Total businesses across every category of a scan result map.
+export function totalBusinessCount(biz: Map<string, Business[]>): number {
+  let n = 0;
+  for (const arr of biz.values()) n += arr.length;
+  return n;
+}
+
 export async function queryBusinesses(
   lat: number,
   lon: number,
