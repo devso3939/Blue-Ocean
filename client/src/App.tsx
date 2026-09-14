@@ -187,6 +187,10 @@ export default function App() {
   // v6.9.15: click-to-explain modal for the plausibility badge in the opportunities table
   const [sanityDetail, setSanityDetail] = useState<SanityCheck | null>(null);
   const [rescanNote, setRescanNote] = useState('');
+  // v6.9.35: badge on the results header showing the scan area actually
+  // used — e.g. "Scanned: Tbilisi" or "Scanned: Tbilisi +2× area". Makes
+  // every self-healing attempt visible instead of hidden in a note line.
+  const [scanAreaLabel, setScanAreaLabel] = useState('');
   // v6.9.13: backup API-key manager (Settings panel)
   const [showSettings, setShowSettings] = useState(false);
   const [bkInputs, setBkInputs] = useState<Record<string, string>>({});
@@ -512,6 +516,7 @@ export default function App() {
     setAiAnalysis(null);
     setAiVerification(null);
     setRescanNote('');
+    setScanAreaLabel(''); // v6.9.35: badge resets at the start of every run
     setOverpassRoute([]); resetOverpassRouteLog();
     setEngineHealth(getEngineHealthSnapshot());
 
@@ -536,6 +541,13 @@ export default function App() {
       // small city just fails the threshold twice and keeps its honest      // (small) result. Real threshold: ~50 total; full mode must clear it.
       const foundTotal = totalBusinessCount(biz);
       const HEAL_THRESHOLD = 50; // real cities (100k+) always clear this; villages legitimately don't
+      // v6.9.35: badge state — starts as the base scan, updated if healing fires
+      let areaFactor = 0;
+      const setAreaBadge = () => setScanAreaLabel(
+        areaFactor > 0
+          ? `Scanned: ${selectedCity.name} +${areaFactor}× area`
+          : `Scanned: ${selectedCity.name}`);
+      setAreaBadge();
       if (foundTotal < HEAL_THRESHOLD && !ac.signal.aborted) {
         const center = { lat: selectedCity.lat, lon: selectedCity.lon };
         let healed = false;
@@ -562,6 +574,8 @@ export default function App() {
           if (retryTotal > foundTotal) {
             biz = retry;
             healed = true;
+            areaFactor = factor;
+            setAreaBadge();
             setRescanNote(`Area expanded ${factor}× — found ${retryTotal} businesses (was ${foundTotal}).`);
             break; // healed — stop enlarging
           }
@@ -699,6 +713,7 @@ export default function App() {
     setAiAnalysis(null);
     setAiVerification(null);
     setRescanNote('');
+    setScanAreaLabel(''); // v6.9.35: badge resets at the start of every run
     setOverpassRoute([]); resetOverpassRouteLog();
     setEngineHealth(getEngineHealthSnapshot());
 
@@ -718,6 +733,8 @@ export default function App() {
         computeScanArea(selectedCity.lat, selectedCity.lon, selectedCity.bbox, selectedCity.population), // v6.9.20: scan the city's REAL area, not a fixed 10 km circle
       );
       setBusinesses(biz);
+      // v6.9.35: badge for single-industry scans too
+      setScanAreaLabel(`Scanned: ${selectedCity.name} · ${getCategoryLabel(selectedCategory)}`);
       setProgress(45);
 
       if (biz.size === 0) {
@@ -1936,10 +1953,21 @@ export default function App() {
           {/* Map + Business Panel */}
           <div className="rounded-xl border border-border bg-card">
             <div className="px-5 py-3 border-b border-border flex items-center justify-between">
-              <h3 className="text-sm font-semibold">
+              <h3 className="text-sm font-semibold flex items-center gap-2 flex-wrap">
                 {selectedOppCategory
                   ? `${getCategoryLabel(selectedOppCategory)} Map · ${categoryBusinesses.length} locations`
                   : `Competition Map · ${fmtNum(allBizCount)} businesses`}
+                {scanAreaLabel && (
+                  <span
+                    title={rescanNote || 'Actual scan area used for this result'}
+                    className={"text-[10px] font-medium px-2 py-0.5 rounded-full border " +
+                      (rescanNote && /expanded/i.test(rescanNote)
+                        ? 'border-sky-400/40 bg-sky-400/10 text-sky-300'
+                        : 'border-border text-muted-foreground')}
+                  >
+                    📍 {scanAreaLabel}
+                  </span>
+                )}
               </h3>
               <div className="flex gap-2 flex-wrap items-center">
                 {selectedOppCategory && (
