@@ -105,14 +105,50 @@ export interface CityResult {
   bbox: [number, number, number, number];
 }
 
+// ─── v6.9.33: settlement guard for Nominatim city search ──────────
+// Nominatim free-text search mixes POIs (hostels, restaurants, ATMs) with
+// real cities. A POI as result #1 silently DESTROYED Discover scans: its
+// ~5-metre bounding box became the scan area, so a "Tbilisi" scan queried a
+// 5 m circle and found exactly ONE business — the POI itself ("1 hostel,
+// PER 10K = 10000"). Keep only administrative/settlement results and rank
+// proper cities first.
+const SETTLEMENT_KINDS = new Set([
+  'city', 'town', 'village', 'municipality', 'borough', 'suburb', 'quarter',
+  'state_district', 'county', 'province', 'state', 'island',
+]);
+// Lower = better city candidate for the suggestion list.
+const SETTLEMENT_RANK: Record<string, number> = {
+  city: 0, town: 1, municipality: 2, village: 3, borough: 4,
+  suburb: 5, quarter: 6, state_district: 7, county: 8, province: 9, state: 10, island: 11,
+};
+function settlementKind(r: any): string | null {
+  if (SETTLEMENT_KINDS.has(r.addresstype)) return r.addresstype;
+  if (r.class === 'place' && SETTLEMENT_KINDS.has(r.type)) return r.type;
+  // Administrative boundary relations (city/town polygons) are real places
+  if (r.osm_type === 'relation' && r.class === 'boundary' && SETTLEMENT_KINDS.has(r.type)) return r.type;
+  return null;
+}
+
 export async function resolveCity(query: string): Promise<CityResult[]> {
-  const params = { q: query, format: 'json', addressdetails: '1', limit: '5', extratags: '1' };
+  const params = { q: query, format: 'json', addressdetails: '1', limit: '8', extratags: '1', 'accept-language': 'en' };
   // v6.9.32: server proxy first (Nominatim rate-limits aggressive browser
   // IPs — the recurring "can't find city" bug); direct fetch as fallback.
   const proxied = await nominatimViaProxy('search', params);
   if (proxied && Array.isArray(proxied) && proxied.length) {
-    const results: CityResult[] = proxied.map((r: any) => ({
-      name: r.address?.city || r.address?.town || r.address?.village || r.address?.municipality || r.display_name.split(',')[0],
+    // v6.9.33: drop POI results (hostels/cafés/offices) BEFORE mapping —
+    // a POI's 5 m bbox as the scan area is the "1 business per city" bug.
+    const settlements = proxied.filter((r: any) => settlementKind(r) !== null);
+    const usable = settlements.length ? settlements : proxied;
+    // v6.9.33: proper cities first so the top suggestion can never be a POI,
+    // and among settlements rank city > town > village > district…
+    usable.sort((a: any, b: any) =>
+      (SETTLEMENT_RANK[settlementKind(a) ?? 'zzz'] ?? 99) - (SETTLEMENT_RANK[settlementKind(b) ?? 'zzz'] ?? 99));
+    const results: CityResult[] = usable.map((r: any) => ({
+      // v6.9.33: accept-language=en (above) makes Nominatim return English
+      // names where available ("Tbilisi" instead of "თბილისი") — the
+      // suggestion label becomes clickable for English users while the
+      // native spelling stays in OSM for enrichment.
+      name: r.name || (r.display_name || '').split(',')[0],
       country: r.address?.country || '',
       countryCode: r.address?.country_code?.toUpperCase() || '',
       lat: parseFloat(r.lat),
@@ -125,6 +161,7 @@ export async function resolveCity(query: string): Promise<CityResult[]> {
         return acc;
       }, [0, 0, 0, 0] as number[]) as [number, number, number, number],
     }));
+    // v6.9.33: sorting already applied to `usable` before mapping
     await backfillCityPopulations(results);
     return results;
   }
@@ -139,7 +176,13 @@ export async function resolveCity(query: string): Promise<CityResult[]> {
     if (!res.ok) throw new Error(`Nominatim returned ${res.status}`);
     const data = await res.json();
     if (!data.length) throw new Error(`No results found for "${query}"`);
-    const results: CityResult[] = data.map((r: any) => {
+    // v6.9.33: same settlement guard as the proxy path — POIs (hostels,
+    // cafés) with 5 m bboxes must never become the scan area.
+    const settled = data.filter((r: any) => settlementKind(r) !== null);
+    const usable = (settled.length ? settled : data);
+    usable.sort((a: any, b: any) =>
+      (SETTLEMENT_RANK[settlementKind(a) ?? 'zzz'] ?? 99) - (SETTLEMENT_RANK[settlementKind(b) ?? 'zzz'] ?? 99));
+    const results: CityResult[] = usable.map((r: any) => {
       const bbox = r.boundingbox.map(Number);
       const pop = r.extratags?.population ? parseInt(r.extratags.population) : null;
       return {
@@ -1422,7 +1465,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // v6.9.30: bump 2→3 — partial Overpass responses carrying a `remark` (query
 // timed out mid-run, near-empty element set) could be cached and served for
 // 24h, producing the "Discover finishes in 5 s with 1 sphere" bug. Purge all.
-const CACHE_VERSION = 3;
+// v6.9.33: bump 3→4 — a POI bbox (hostel, 5 m) became the scan area and its
+// "1 business" result was cached too. Purge everything once more.
+const CACHE_VERSION = 4;
 (function purgeStaleCache() {
   try {
     if (localStorage.getItem('bo_cache_version') !== String(CACHE_VERSION)) {
@@ -2297,6 +2342,14 @@ export function computeScanArea(
     const [s, w, n, e] = cityBbox;
     if (s < n && w < e && s >= -90 && s <= 90 && w >= -180 && w <= 180) {
       const span = Math.max(n - s, e - w);
+      // v6.9.33: degenerate-bbox guard. A POI (hostel/café) bbox is ~5 m
+      // (span ≈ 0.00005°); scanning it yields exactly ONE business — the POI
+      // itself. Anything under 2 km per axis is not a city scan area: fall
+      // through to the population-scaled circle below.
+      const MIN_SPAN_DEG = 0.018; // ≈ 2 km
+      if (span < MIN_SPAN_DEG) {
+        return circleBbox(lat, lon, radiusForPopulation(population));
+      }
       if (span > 0 && span < 0.9) {
         const padLat = (n - s) * 0.15;
         const padLon = (e - w) * 0.15;
