@@ -3894,6 +3894,58 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
   } catch {}
 }
 
+// ─── v6.9.39: Website deep-crawl second chance ──────────────────────
+// scrapeContactPageForEmail only tries FIXED paths (/contact, /kontakt…).
+// Modern CMS sites bury contacts on pages with arbitrary slugs
+// (/reach-us-at-new-office, /book-a-table, /faqs…). When the fixed-path
+// crawl left a business incomplete, this pass fetches the homepage,
+// collects INTERNAL links that smell like contact-bearing pages, and
+// follows the top few with the full extractor.
+async function deepCrawlWebsite(b: Business): Promise<void> {
+  if (!b.website || (b.email && b.phone)) return;
+  try {
+    const base = b.website.replace(/\/$/, '');
+    let host = '';
+    try { host = new URL(base).hostname.replace(/^www\./, ''); } catch { return; }
+    if (hostIsOpen(base)) return;
+    const r = await corsFetch(base, { signal: AbortSignal.timeout(4000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
+    if (!r.ok) return;
+    const html = await r.text();
+    // Mine the homepage itself first (cheap — already fetched)
+    extractFromHtml(html, b);
+    if (b.email && b.phone) return;
+    // Collect internal candidate links, ranked by contact-smell
+    const CONTACT_SMELL = /(contact|kontakt|контакт|about|aboutus|about-us|impressum|team|staff|info|reach|touch|book|reserve|reservation|location|visit|findus|find-us|faq|support|help|office|branch|kavshiri|momkhmarebeli|iletisim|contatti|contacto|contato|lianxi)/i;
+    const seen = new Set<string>();
+    const candidates: string[] = [];
+    const links = html.matchAll(/href\s*=\s*["']([^"'#]+)["']/gi);
+    for (const m of links) {
+      let u = m[1];
+      if (u.startsWith('/')) u = base + u;
+      else if (!/^https?:\/\//i.test(u)) continue;
+      let h = '';
+      try { h = new URL(u).hostname.replace(/^www\./, ''); } catch { continue; }
+      if (h !== host || seen.has(u)) continue; // internal only, deduped
+      seen.add(u);
+      if (!CONTACT_SMELL.test(u)) continue;
+      if (/\.(png|jpe?g|gif|svg|pdf|zip|css|js)$/i.test(u)) continue;
+      candidates.push(u);
+      if (candidates.length >= 12) break;
+    }
+    // Follow the best-smelling candidates (cap 5 fetches per business)
+    let fetched = 0;
+    for (const u of candidates) {
+      if ((b.email && b.phone) || fetched >= 5 || hostIsOpen(base)) break;
+      try {
+        const cr = await corsFetch(u, { signal: AbortSignal.timeout(3000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
+        fetched++;
+        if (!cr.ok) continue;
+        extractFromHtml(await cr.text(), b);
+      } catch {}
+    }
+  } catch {}
+}
+
 async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
   const NEEDS = businesses.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
   if (NEEDS.length === 0 || !_braveKey()) return;
@@ -4762,6 +4814,68 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     }
   }
 
+  // ── v6.9.39: Pass 5b: SOCIAL-PROFILE MINING ──────────────────────
+  // Social profiles are found in earlier passes but never FOLLOWED. The
+  // business's own Facebook About/Transparency page and Instagram bio are
+  // public contact cards: emails, phones, and even the website live there.
+  // This pass fetches each found profile page and mines it with the same
+  // full extractor used for websites.
+  {
+    const socialNeedies = allBizList.filter(b => (b.facebook || b.instagram) && (!b.email || !b.phone || !b.website));
+    if (socialNeedies.length > 0) {
+      _ep.activePass = 'Pass 5b: Social profile mining'; _ep.passNumber = 5; _ep.percent = 97; emitEP();
+      const socEngine: EngineStatus = { name: 'Social Miner', icon: '👥', status: 'active', found: 0 };
+      _ep.engines.push(socEngine); emitEP();
+      const maxSoc = Math.min(socialNeedies.length, 60);
+      for (let i5b = 0; i5b < maxSoc; i5b += _BATCH) {
+        if (isCancelled()) break;
+        const batch5b = socialNeedies.slice(i5b, i5b + _BATCH);
+        const beforeCnt = batch5b.filter(x => x.email || x.phone).length;
+        await Promise.all(batch5b.map(async (b) => {
+          // Each business: try FB About → FB home → IG bio, stop early when complete
+          const urls: string[] = [];
+          if (b.facebook) {
+            urls.push(b.facebook + '/about');
+            urls.push(b.facebook);
+          }
+          if (b.instagram) {
+            urls.push(b.instagram + '/');
+          }
+          for (const u of urls) {
+            if (b.email && b.phone) break;
+            try {
+              // Facebook serves a dumb HTML shell to logged-out crawlers;
+              // mbasic + the mobile UA return a parseable legacy page.
+              const isFb = /facebook\.com/i.test(u);
+              const r5b = await corsFetch(u, {
+                headers: { 'User-Agent': isFb ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36' : 'Mozilla/5.0' },
+                signal: AbortSignal.timeout(4000),
+              });
+              if (!r5b.ok) continue;
+              const html5b = await r5b.text();
+              // IG bio pages embed contact emails in meta description too
+              const before = `${b.email}|${b.phone}|${b.website}`;
+              extractFromHtml(html5b, b);
+              // IG embeds emails in JSON meta — mine those explicitly
+              if (!b.email && /instagram\.com/i.test(u)) {
+                const igEmailM = html5b.match(/"business_email"\s*:\s*"([^"]+@[^""]+)"/i)
+                  || html5b.match(/businessEmail"\s*:\s*"([^"]+@[^"]+)"/i)
+                  || html5b.match(/"email"\s*:\s*"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"/i);
+                if (igEmailM && !/example|sentry|schema/i.test(igEmailM[1])) b.email = igEmailM[1];
+              }
+              if (b.email && b.phone) break;
+            } catch {}
+          }
+        }));
+        const afterCnt = batch5b.filter(x => x.email || x.phone).length;
+        socEngine.found += Math.max(0, afterCnt - beforeCnt);
+        emitEP();
+        if (i5b + _BATCH < maxSoc) await wait(800);
+      }
+      socEngine.status = 'done'; emitEP();
+    }
+  }
+
   // ── v6.9.37: Google Places batch pass (formerly DEAD code) ──
   // enrichFromGooglePlaces existed but was never called. It finds phones/
   // websites for businesses that every other engine missed — run it on the
@@ -4785,6 +4899,56 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         if (i5 + _BATCH < maxGP) await wait(1500);
       }
       gpEngine.status = 'done'; emitEP();
+    }
+  }
+
+  // ── v6.9.39: Pass 5d: DEEP-CRAWL + SITE-DOMAIN HARVEST ──────────
+  // Two final layers for businesses still missing email or phone after
+  // every earlier pass:
+  //  a) deepCrawlWebsite — follow internal contact-smelling links that the
+  //     fixed-path crawler couldn't guess
+  //  b) search the business's own EMAIL DOMAIN ("@cafe.ge") and
+  //     site:domain on search engines — directories and partner pages
+  //     often publish the exact address the business's own site hides
+  {
+    const lastNeeders = allBizList.filter(b => b.website && (!b.email || !b.phone));
+    if (lastNeeders.length > 0) {
+      _ep.activePass = 'Pass 5d: Deep crawl + domain search'; _ep.passNumber = 5; _ep.percent = 97; emitEP();
+      const dcEngine: EngineStatus = { name: 'Deep Crawl', icon: '🕷️', status: 'active', found: 0 };
+      _ep.engines.push(dcEngine); emitEP();
+      const maxDC = Math.min(lastNeeders.length, 50);
+      for (let i5d = 0; i5d < maxDC; i5d += _BATCH) {
+        if (isCancelled()) break;
+        const batch5d = lastNeeders.slice(i5d, i5d + _BATCH);
+        const beforeCnt = batch5d.filter(x => x.email || x.phone).length;
+        await Promise.all(batch5d.map(async (b) => {
+          // (a) internal-link deep crawl when fixed paths came up empty
+          if (!b.email || !b.phone) {
+            try { await deepCrawlWebsite(b); } catch {}
+          }
+          // (b) domain harvest — "@domain" reveals the address on directories
+          if (!b.email && b.website) {
+            try {
+              const host5d = new URL(b.website).hostname.replace(/^www\./, '');
+              if (/\./.test(host5d) && !/facebook|instagram|linktr|wixsite|business\.site/i.test(host5d)) {
+                const dq = encodeURIComponent('"@' + host5d + '"');
+                if (engineAvailable('ddg')) {
+                  const dr = await corsFetch('https://html.duckduckgo.com/html/?q=' + dq, {
+                    headers: { 'User-Agent': 'Mozilla/5.0' },
+                    signal: AbortSignal.timeout(4000),
+                  });
+                  if (dr.ok) extractFromHtml(await dr.text(), b);
+                }
+              }
+            } catch {}
+          }
+        }));
+        const afterCnt = batch5d.filter(x => x.email || x.phone).length;
+        dcEngine.found += Math.max(0, afterCnt - beforeCnt);
+        emitEP();
+        if (i5d + _BATCH < maxDC) await wait(600);
+      }
+      dcEngine.status = 'done'; emitEP();
     }
   }
 
