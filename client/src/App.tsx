@@ -91,22 +91,33 @@ function mergeDP(prev: DiscoveryProgress | null, next: DiscoveryProgress): Disco
 // delta chip shows how much enrichment runs have lifted coverage — visible
 // proof that coverage accumulates (34% → 55% → 61%) across runs/sessions.
 const COVERAGE_BASELINES_KEY = 'blueocean_coverage_baselines_v1';
-function loadCoverageBaselines(): Record<string, { p: number; t: number }> {
+interface CoverageSnapshot { p: number; t: number; n?: number; ph?: number; em?: number; web?: number; soc?: number; city?: string; cat?: string; }
+function loadCoverageBaselines(): Record<string, CoverageSnapshot> {
   try { return JSON.parse(localStorage.getItem(COVERAGE_BASELINES_KEY) || '{}'); } catch { return {}; }
 }
-function saveCoverageBest(key: string, pct: number): number {
+function saveCoverageBest(key: string, pct: number, extra?: Partial<CoverageSnapshot>): number {
   // Returns the PREVIOUS best (the baseline to display). Store only rises,
-  // capped at 200 keys (oldest evicted) so localStorage stays small.
+  // capped at 400 keys (oldest evicted) so localStorage stays small.
   try {
     const store = loadCoverageBaselines();
     const prev = store[key]?.p ?? -1;
-    if (pct > prev) {
-      store[key] = { p: pct, t: Date.now() };
-      const trimmed = Object.entries(store).sort((a, b) => b[1].t - a[1].t).slice(0, 200);
+    if (pct > prev || !store[key]) {
+      store[key] = { ...store[key], ...extra, p: pct, t: Date.now() };
+      const trimmed = Object.entries(store).sort((a, b) => b[1].t - a[1].t).slice(0, 400);
       localStorage.setItem(COVERAGE_BASELINES_KEY, JSON.stringify(Object.fromEntries(trimmed)));
     }
     return prev < 0 ? pct : prev;
   } catch { return pct; }
+}
+function deleteCoverageKey(key: string) {
+  try {
+    const store = loadCoverageBaselines();
+    delete store[key];
+    localStorage.setItem(COVERAGE_BASELINES_KEY, JSON.stringify(store));
+  } catch {}
+}
+function clearCoverageStore() {
+  try { localStorage.removeItem(COVERAGE_BASELINES_KEY); } catch {}
 }
 function CoverageRing({ pct, delta, best, n }: { pct: number; delta: number | null; best: number | null; n: number }) {
   const R = 15, C = 2 * Math.PI * R;
@@ -135,6 +146,155 @@ function CoverageRing({ pct, delta, best, n }: { pct: number; delta: number | nu
         ) : null}
       </span>
     </span>
+  );
+}
+
+// ── v6.9.43: Global Coverage dashboard ──────────────────────────────
+// Every analyzed city+category snapshot (best any-contact %, business count,
+// per-field counts) in one neediest-first table, so enrichment backlog is
+// visible at a glance. Pure client state — localStorage is the store.
+function MiniBar({ v, n, cls }: { v: number; n: number; cls: string }) {
+  const pct = n ? Math.round((v / n) * 100) : 0;
+  return (
+    <span className="inline-flex items-center gap-1.5" title={`${v}/${n} (${pct}%)`}>
+      <span className="h-1.5 w-14 overflow-hidden rounded-full bg-muted">
+        <span className={`block h-full rounded-full ${cls}`} style={{ width: `${pct}%` }} />
+      </span>
+      <span className="w-8 text-right tabular-nums text-muted-foreground">{pct}%</span>
+    </span>
+  );
+}
+function CoverageDashboard({ onBack }: { onBack: () => void }) {
+  const [entries, setEntries] = useState<[string, CoverageSnapshot][]>([]);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const load = () => setEntries(Object.entries(loadCoverageBaselines()));
+    load();
+    const iv = setInterval(load, 2000); // live-updates while enrichment runs elsewhere
+    return () => clearInterval(iv);
+  }, [tick]);
+  const rows = entries
+    .map(([k, s]) => ({ k, s }))
+    .sort((a, b) => a.s.p - b.s.p || (b.s.n ?? 0) - (a.s.n ?? 0)); // neediest first
+  const withN = rows.filter(r => r.s.n);
+  const totalBiz = withN.reduce((s, r) => s + (r.s.n ?? 0), 0);
+  const weighted = totalBiz ? Math.round(withN.reduce((s, r) => s + r.s.p * (r.s.n ?? 0), 0) / totalBiz) : 0;
+  const fully = rows.filter(r => r.s.p >= 80).length;
+  const freshness = (t: number) => {
+    const d = Date.now() - t;
+    if (d < 60_000) return 'just now';
+    if (d < 3_600_000) return `${Math.floor(d / 60_000)}m ago`;
+    if (d < 86_400_000) return `${Math.floor(d / 3_600_000)}h ago`;
+    return `${Math.floor(d / 86_400_000)}d ago`;
+  };
+  return (
+    <div className="min-h-screen bg-background">
+      <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md">
+        <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4">
+          <div className="flex items-center gap-2">
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 via-teal-500 to-cyan-500 text-white">
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>
+            </div>
+            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Global Coverage</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v{APP_VERSION}</span></span>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => { if (confirm('Clear all stored coverage history?')) { clearCoverageStore(); setTick(t => t + 1); } }}
+              className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-red-500/30 text-red-400/80 hover:text-red-300 hover:border-red-500/50 transition-all"
+            >
+              🗑 Clear history
+            </button>
+            <button onClick={onBack} className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-border text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all">
+              ← Back
+            </button>
+          </div>
+        </div>
+      </header>
+      <main className="mx-auto max-w-7xl px-4 py-6">
+        {rows.length === 0 ? (
+          <div className="rounded-xl border border-border bg-card p-10 text-center">
+            <div className="text-3xl">📊</div>
+            <h2 className="mt-3 text-lg font-bold">No coverage history yet</h2>
+            <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
+              Run an industry analysis or Enrich Contacts — every category you scan records its contact coverage here, neediest first, so you always know where the next enrichment run pays off most.
+            </p>
+          </div>
+        ) : (
+          <>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="rounded-xl border border-border bg-card p-4">
+                <div className="text-xs text-muted-foreground">Tracked snapshots</div>
+                <div className="text-3xl font-extrabold">{rows.length}</div>
+              </div>
+              <div className="rounded-xl border border-border bg-card p-4">
+                <div className="text-xs text-muted-foreground">Businesses tracked</div>
+                <div className="text-3xl font-extrabold">{fmtNum(totalBiz)}</div>
+              </div>
+              <div className="rounded-xl border border-border bg-card p-4">
+                <div className="text-xs text-muted-foreground">Weighted coverage</div>
+                <div className="text-3xl font-extrabold text-primary">{weighted}%</div>
+              </div>
+              <div className="rounded-xl border border-border bg-card p-4">
+                <div className="text-xs text-muted-foreground">Healthy (≥80%)</div>
+                <div className="text-3xl font-extrabold text-emerald-400">{fully}<span className="text-base text-muted-foreground">/{rows.length}</span></div>
+              </div>
+            </div>
+            <div className="mt-5 overflow-hidden rounded-xl border border-border bg-card">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="border-b border-border bg-muted/30 text-xs uppercase tracking-wide text-muted-foreground">
+                    <tr>
+                      <th className="px-4 py-2.5 font-medium">City · Category</th>
+                      <th className="px-4 py-2.5 font-medium">Coverage</th>
+                      <th className="px-4 py-2.5 font-medium">Biz</th>
+                      <th className="px-4 py-2.5 font-medium">📞 Phones</th>
+                      <th className="px-4 py-2.5 font-medium">✉️ Emails</th>
+                      <th className="px-4 py-2.5 font-medium">🌐 Websites</th>
+                      <th className="px-4 py-2.5 font-medium">🔗 Socials</th>
+                      <th className="px-4 py-2.5 font-medium text-right">Updated</th>
+                      <th className="px-4 py-2.5"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map(({ k, s }) => {
+                      const [city, cat] = k.split('::');
+                      const needy = s.p < 40;
+                      return (
+                        <tr key={k} className={`border-b border-border/50 last:border-0 ${needy ? 'bg-red-500/5' : ''}`}>
+                          <td className="px-4 py-2.5">
+                            <div className="font-semibold">{s.city || city} · {s.cat ? getCategoryLabel(s.cat) : cat}</div>
+                            {needy && <div className="text-[10px] font-semibold text-red-400">needs enrichment</div>}
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <span className={`text-lg font-extrabold tabular-nums ${s.p >= 80 ? 'text-emerald-400' : s.p >= 40 ? 'text-amber-400' : 'text-red-400'}`}>{s.p}%</span>
+                          </td>
+                          <td className="px-4 py-2.5 tabular-nums">{fmtNum(s.n ?? 0)}</td>
+                          <td className="px-4 py-2.5"><MiniBar v={s.ph ?? 0} n={s.n ?? 0} cls="bg-blue-400" /></td>
+                          <td className="px-4 py-2.5"><MiniBar v={s.em ?? 0} n={s.n ?? 0} cls="bg-amber-400" /></td>
+                          <td className="px-4 py-2.5"><MiniBar v={s.web ?? 0} n={s.n ?? 0} cls="bg-purple-400" /></td>
+                          <td className="px-4 py-2.5"><MiniBar v={s.soc ?? 0} n={s.n ?? 0} cls="bg-pink-400" /></td>
+                          <td className="px-4 py-2.5 text-right text-xs text-muted-foreground">{freshness(s.t)}</td>
+                          <td className="px-4 py-2.5 text-right">
+                            <button
+                              onClick={() => { deleteCoverageKey(k); setTick(t => t + 1); }}
+                              title="Remove this snapshot"
+                              className="text-xs text-muted-foreground/50 hover:text-red-400 transition-colors"
+                            >✕</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <p className="mt-3 text-xs text-muted-foreground">
+              Coverage = businesses with at least one contact channel (phone, email, or website). Snapshots keep the best value ever reached per city+category on this device.
+            </p>
+          </>
+        )}
+      </main>
+    </div>
   );
 }
 
@@ -228,7 +388,7 @@ const CAT_COLORS: Record<string, string> = {
 import { APP_VERSION } from './version'; // v6.9.29: shared stamp — visible on every view
 
 export default function App() {
-  const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country'>('analysis');
+  const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country' | 'coverage'>('analysis');
   const [selectedCountry, setSelectedCountry] = useState('');
   const [cityQuery, setCityQuery] = useState('');
   const [cityResults, setCityResults] = useState<CityResult[]>([]);
@@ -992,7 +1152,15 @@ export default function App() {
   useEffect(() => {
     if (enrichProgress === null && baselinePct != null && covKey) {
       const p = contactStats.anyContact;
-      saveCoverageBest(covKey, p);
+      saveCoverageBest(covKey, p, {
+        n: contactStats.n,
+        ph: contactStats.phones,
+        em: contactStats.emails,
+        web: contactStats.websites,
+        soc: contactStats.socials,
+        city: selectedCity?.name,
+        cat: selectedOppCategory || undefined,
+      });
       setBestPct(storeBest => storeBest != null ? Math.max(storeBest, p) : p);
       setBaselinePct(null);
     }
@@ -1083,6 +1251,10 @@ export default function App() {
     );
   }
 
+  if (viewMode === 'coverage') {
+    return <CoverageDashboard onBack={() => setViewMode('analysis')} />;
+  }
+
   if (viewMode === 'country') {
     return (
       <div className="min-h-screen bg-background">
@@ -1143,6 +1315,13 @@ export default function App() {
                 className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-border text-muted-foreground hover:text-foreground hover:border-emerald-500/50 transition-all"
               >
                 🌍 Country
+              </button>
+              <button
+                onClick={() => setViewMode('coverage')}
+                title="Contact coverage across all analyzed cities & categories"
+                className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-emerald-500/40 text-emerald-400/90 hover:text-emerald-300 hover:border-emerald-500/60 transition-all"
+              >
+                📊 Coverage
               </button>
               <button
                 onClick={() => { setShowSettings(s => !s); refreshBkStatus(); }}
