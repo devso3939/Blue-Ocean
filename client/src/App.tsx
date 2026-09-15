@@ -85,6 +85,59 @@ function mergeDP(prev: DiscoveryProgress | null, next: DiscoveryProgress): Disco
   };
 }
 
+// ── v6.9.42: contact-coverage progress ring ─────────────────────────
+// A donut showing any-contact coverage for the selected category, with the
+// pre-enrichment baseline persisted per city+category in localStorage. The
+// delta chip shows how much enrichment runs have lifted coverage — visible
+// proof that coverage accumulates (34% → 55% → 61%) across runs/sessions.
+const COVERAGE_BASELINES_KEY = 'blueocean_coverage_baselines_v1';
+function loadCoverageBaselines(): Record<string, { p: number; t: number }> {
+  try { return JSON.parse(localStorage.getItem(COVERAGE_BASELINES_KEY) || '{}'); } catch { return {}; }
+}
+function saveCoverageBest(key: string, pct: number): number {
+  // Returns the PREVIOUS best (the baseline to display). Store only rises,
+  // capped at 200 keys (oldest evicted) so localStorage stays small.
+  try {
+    const store = loadCoverageBaselines();
+    const prev = store[key]?.p ?? -1;
+    if (pct > prev) {
+      store[key] = { p: pct, t: Date.now() };
+      const trimmed = Object.entries(store).sort((a, b) => b[1].t - a[1].t).slice(0, 200);
+      localStorage.setItem(COVERAGE_BASELINES_KEY, JSON.stringify(Object.fromEntries(trimmed)));
+    }
+    return prev < 0 ? pct : prev;
+  } catch { return pct; }
+}
+function CoverageRing({ pct, delta, best, n }: { pct: number; delta: number | null; best: number | null; n: number }) {
+  const R = 15, C = 2 * Math.PI * R;
+  const grew = delta != null && delta > 0;
+  const showDelta = delta != null && delta !== 0;
+  return (
+    <span className="inline-flex items-center gap-2" title={`Any-contact coverage across ${n} businesses${best != null ? ` · best so far ${best}%` : ''}`}>
+      <span className="relative inline-flex items-center justify-center">
+        <svg width="38" height="38" viewBox="0 0 38 38" className="-rotate-90">
+          <circle cx="19" cy="19" r={R} fill="none" strokeWidth="4" className="text-muted/40" stroke="currentColor" />
+          <circle cx="19" cy="19" r={R} fill="none" strokeWidth="4" strokeLinecap="round"
+            className={grew ? 'text-emerald-400' : 'text-primary'} stroke="currentColor"
+            strokeDasharray={C} strokeDashoffset={C * (1 - Math.min(Math.max(pct, 0), 100) / 100)}
+            style={{ transition: 'stroke-dashoffset 600ms ease' }} />
+        </svg>
+        <span className="absolute text-[10px] font-bold tabular-nums">{pct}%</span>
+      </span>
+      <span className="leading-tight">
+        <span className="block font-semibold">Coverage</span>
+        {showDelta ? (
+          <span className={`block text-[10px] font-semibold ${grew ? 'text-emerald-400' : 'text-muted-foreground'}`}>
+            {grew ? '+' : ''}{delta} pp this run
+          </span>
+        ) : best != null && best > 0 ? (
+          <span className="block text-[10px] text-muted-foreground">best {best}%</span>
+        ) : null}
+      </span>
+    </span>
+  );
+}
+
 const COUNTRIES = [
   { name: 'Georgia', code: 'GE' }, { name: 'Armenia', code: 'AM' },
   { name: 'Azerbaijan', code: 'AZ' }, { name: 'Turkey', code: 'TR' },
@@ -914,6 +967,37 @@ export default function App() {
     const pct = (v: number) => (n ? Math.round((v / n) * 100) : 0);
     return { n, phones, emails, websites, socials, anyContact, full, pct };
   }, [filteredBiz]);
+
+  // ── v6.9.42: coverage-ring state ──
+  // baselinePct freezes at the start of an enrichment run; it becomes the
+  // previous best AFTER the run completes (so the delta chip shows the lift
+  // of THIS run and future runs compare against the new best).
+  const covKey = selectedCity && selectedOppCategory ? `${selectedCity.name}::${selectedOppCategory}` : null;
+  const [baselinePct, setBaselinePct] = useState<number | null>(null);
+  const [bestPct, setBestPct] = useState<number | null>(null);
+  // Load persisted best when the city+category changes
+  useEffect(() => {
+    if (!covKey) { setBaselinePct(null); setBestPct(null); return; }
+    const store = loadCoverageBaselines();
+    setBaselinePct(null);
+    setBestPct(store[covKey]?.p ?? null);
+  }, [covKey]);
+  // Freeze baseline at run start
+  useEffect(() => {
+    if (enrichProgress) {
+      setBaselinePct(prev => prev ?? contactStats.anyContact);
+    }
+  }, [enrichProgress]);
+  // Persist new best when the run finishes (progress → null)
+  useEffect(() => {
+    if (enrichProgress === null && baselinePct != null && covKey) {
+      const p = contactStats.anyContact;
+      saveCoverageBest(covKey, p);
+      setBestPct(storeBest => storeBest != null ? Math.max(storeBest, p) : p);
+      setBaselinePct(null);
+    }
+  }, [enrichProgress, baselinePct, covKey, contactStats.anyContact]);
+  const ringDelta = baselinePct != null ? contactStats.anyContact - baselinePct : null;
 
   const handleSort = (col: string) => {
     if (sortCol === col) {
@@ -2207,6 +2291,7 @@ export default function App() {
               {/* ── Contact coverage summary (v6.9.1) ── */}
               {filteredBiz.length > 0 && (
                 <div className="px-5 py-2.5 border-b border-border bg-muted/30 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
+                  <CoverageRing pct={contactStats.anyContact} delta={ringDelta} best={bestPct} n={contactStats.n} />
                   <span className="text-muted-foreground">Contact data ({contactStats.n} businesses):</span>
                   <span className="inline-flex items-center gap-1">
                     <span className="text-emerald-400 font-semibold">{contactStats.pct(contactStats.anyContact)}%</span>

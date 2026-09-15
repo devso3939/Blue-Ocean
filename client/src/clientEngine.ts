@@ -2120,14 +2120,21 @@ async function overpassViaProxy(query: string, onWait?: (msg: string) => void): 
   try {
     const t0 = Date.now();
     // Try up to 2 mirrors server-side (0 = overpass-api.de, 1 = mail.ru)
+    // v6.9.42: poll window widened — Overpass queue latency measured at ~2 min
+    // during busy periods (pg_net request 167 completed with valid data at
+    // T+122s), but the old 25×2s = 50s window abandoned LIVE requests and
+    // killed scans with "fail". Mirror 0 (the reliable one) now gets 150s;
+    // mail.ru stays short (it's either fast or dead — 504s all day).
     for (const mirror of [0, 1]) {
       const start = await supabaseRpc<{ rid?: number; error?: string }>('rpc_overpass_start', { p_q: query, p_mirror: mirror }, 15000);
       if (!start?.rid) continue;
       const rid = start.rid;
-      // Poll every 2s for up to ~50s (server-side query timeout is 60–120s)
-      for (let i = 0; i < 25; i++) {
+      const maxPolls = mirror === 0 ? 75 : 25; // 150s primary · 50s secondary
+      // Poll every 2s (server-side query timeout is 60–120s)
+      for (let i = 0; i < maxPolls; i++) {
         if (isCancelled()) return null;
         if (i > 0) await abortableWait(2000);
+        if (i > 0 && i % 5 === 0) onWait?.(`Server processing… ${i * 2}s on ${mirror === 0 ? 'overpass-api.de' : 'mail.ru'} (queue can take ~2 min)`);
         const poll = await supabaseRpc<{ state: string; data?: any; error?: string }>('rpc_overpass_poll', { p_rid: rid }, 15000);
         if (!poll) break;
         if (poll.state === 'done' && poll.data?.elements !== undefined) {
@@ -2139,7 +2146,7 @@ async function overpassViaProxy(query: string, onWait?: (msg: string) => void): 
         }
         if (poll.state === 'failed') { logRoute('supabase:' + (mirror === 0 ? 'overpass-api.de' : 'mail.ru'), false, Date.now() - t0); break; }
         // state === 'pending' → keep polling
-        if (i === 24) break;
+        if (i === maxPolls - 1) break;
       }
     }
     return null;
