@@ -2418,6 +2418,9 @@ export async function queryBusinesses(
   onDiscoverProgress?: (dp: DiscoveryProgress) => void,
   areaBbox?: [number, number, number, number] | null
 ): Promise<Map<string, Business[]>> {
+  // v6.9.41: category focus (Enrich Contacts / Analyze Industry) switches the
+  // whole enrichment to FULL-QUEUE mode — every cap below is lifted.
+  const CATEGORY_MODE = !!categoryFilter;
   const results = new Map<string, Business[]>();
   // v6.9.20: prefer the city's real bounding box over a center circle
   const [south, west, north, east] =
@@ -4247,7 +4250,8 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     // counter + per-batch gate: after 3 failures Photon is skipped for the
     // rest of the pass (addresses simply stay empty — they are cosmetic).
     let _photonFails = 0;
-    const maxEnrich = Math.min(allBizList.length, 150);
+    // v6.9.41: category mode fills addresses for the whole category
+    const maxEnrich = CATEGORY_MODE ? allBizList.length : Math.min(allBizList.length, 150);
     const CONCURRENCY = 5; // Photon allows more parallel requests
     for (let i = 0; i < maxEnrich; i += CONCURRENCY) {
       if (isCancelled()) break;
@@ -4365,7 +4369,16 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
 
   const NEEDS_ENRICHMENT = allBizList.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
-  const maxEnrich = Math.min(NEEDS_ENRICHMENT.length, 200);
+  // v6.9.41: FULL-QUEUE mode — in category focus (Enrich Contacts / Analyze
+  // Industry) the enrichment no longer stops at a fixed 200. It processes the
+  // ENTIRE need queue, so one run covers the whole category instead of needing
+  // 2-3 stacked runs on a 500-business category. Full-city Discover keeps the
+  // legacy cap: its contract is fast first results, and engines throttle.
+  const maxEnrich = CATEGORY_MODE ? NEEDS_ENRICHMENT.length : Math.min(NEEDS_ENRICHMENT.length, 200);
+  // Adaptive pacing: keep politeness sleeps short when the queue is big —
+  // 200ms sleeps every 10 businesses over 1000 businesses would waste 20s
+  // on sleeping alone. Small queues keep the gentle rhythm.
+  const _POLITE_MS = CATEGORY_MODE && NEEDS_ENRICHMENT.length > 300 ? 100 : 200;
   const _EXCLUDE = /example\.com|wixpress|sentry\.io|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|yelp\.com|tripadvisor|foursquare|booking\.com|expedia|yellowpages|justdial|zomato|opentable|flickr|pinterest|tumblr|reddit\.com|quora|wikipedia|youtube\.com|tiktok\.com|linkedin\.com|x\.com|snapchat|threads|medium\.com|substack|gh-pages|archive\.org|amazon\.com|ebay\.com|aliexpress/i;
 
   _ep.activePass = 'Enriching contacts (priority pipeline)'; _ep.passNumber = 1; _ep.percent = 80;
@@ -4674,7 +4687,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       } catch {}
     }));
 
-    if (i + _BATCH < maxEnrich) await wait(200);
+    if (i + _BATCH < maxEnrich) await wait(_POLITE_MS);
     _ep.businessesProcessed = Math.min(i + _BATCH, maxEnrich);
     _ep.engines.find(e => e.name === 'DuckDuckGo')!.found = _ep.contacts.emails;
     _ep.engines.find(e => e.name === 'Brave')!.found = _ep.contacts.phones;
@@ -4712,7 +4725,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     if (need2GIS.length === 0) return;
     _ep.activePass = 'Pass 2: Regional (2GIS)'; _ep.passNumber = 2; bumpPercent(91);
     _ep.engines.find(e => e.name === '2GIS')!.status = 'active'; emitEP();
-    for (let i2 = 0; i2 < Math.min(need2GIS.length, 40); i2 += _BATCH) {
+    for (let i2 = 0; i2 < (CATEGORY_MODE ? need2GIS.length : Math.min(need2GIS.length, 40)); i2 += _BATCH) {
       if (isCancelled()) break;
       const batch2 = need2GIS.slice(i2, i2 + _BATCH);
       await Promise.all(batch2.map(async (b) => {
@@ -4769,7 +4782,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     if (needYandex.length === 0 || !engineAvailable('ddg')) return;
     _ep.activePass = 'Pass 3: Regional (Yandex)'; _ep.passNumber = 3; bumpPercent(93);
     _ep.engines.find(e => e.name === 'Yandex')!.status = 'active'; emitEP();
-    for (let i3 = 0; i3 < Math.min(needYandex.length, 30); i3 += _BATCH) {
+    for (let i3 = 0; i3 < (CATEGORY_MODE ? needYandex.length : Math.min(needYandex.length, 30)); i3 += _BATCH) {
       if (isCancelled()) break;
       const batch3 = needYandex.slice(i3, i3 + _BATCH);
       await Promise.all(batch3.map(async (b) => {
@@ -4799,7 +4812,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     _ep.activePass = 'Pass 4: Verify (Wikidata + Wayback)'; _ep.passNumber = 4; bumpPercent(94);
     const wdEngine: EngineStatus = { name: 'Wikidata', icon: '🔗', status: 'active', found: 0 };
     _ep.engines.push(wdEngine); emitEP();
-    const maxVerify = Math.min(needVerify.length, 24);
+    const maxVerify = CATEGORY_MODE ? needVerify.length : Math.min(needVerify.length, 24);
     for (let i4 = 0; i4 < maxVerify; i4 += _BATCH) {
       if (isCancelled()) break;
       const batch4 = needVerify.slice(i4, i4 + _BATCH);
@@ -4813,7 +4826,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     }
     wdEngine.status = 'done'; emitEP();
     // Wayback: recover contacts for dead/unreachable websites
-    const deadSites = allBizList.filter(b => b.website && !b.email && !b.phone && !b.facebook).slice(0, 15);
+    const deadSites = (CATEGORY_MODE ? allBizList.filter(b => b.website && !b.email && !b.phone && !b.facebook) : allBizList.filter(b => b.website && !b.email && !b.phone && !b.facebook).slice(0, 15));
     if (deadSites.length > 0) {
       const wbEngine: EngineStatus = { name: 'Wayback', icon: '🕰️', status: 'active', found: 0 };
       _ep.engines.push(wbEngine); emitEP();
@@ -4840,7 +4853,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     _ep.activePass = 'Pass 5b: Social profile mining'; _ep.passNumber = 5; bumpPercent(95);
     const socEngine: EngineStatus = { name: 'Social Miner', icon: '👥', status: 'active', found: 0 };
     _ep.engines.push(socEngine); emitEP();
-    const maxSoc = Math.min(socialNeedies.length, 60);
+    const maxSoc = CATEGORY_MODE ? socialNeedies.length : Math.min(socialNeedies.length, 60);
     for (let i5b = 0; i5b < maxSoc; i5b += _BATCH) {
       if (isCancelled()) break;
       const batch5b = socialNeedies.slice(i5b, i5b + _BATCH);
@@ -4897,7 +4910,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     _ep.activePass = 'Pass 5: Google Places sweep'; _ep.passNumber = 5; bumpPercent(95);
     const gpEngine: EngineStatus = { name: 'Google Places', icon: '🗺️', status: 'active', found: 0 };
     _ep.engines.push(gpEngine); emitEP();
-    const maxGP = Math.min(stillEmpty.length, 60);
+    const maxGP = CATEGORY_MODE ? stillEmpty.length : Math.min(stillEmpty.length, 60);
     for (let i5 = 0; i5 < maxGP; i5 += _BATCH) {
       if (isCancelled()) break;
       const batch5 = stillEmpty.slice(i5, i5 + _BATCH);
@@ -4923,7 +4936,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     _ep.activePass = 'Pass 5d: Deep crawl + domain search'; _ep.passNumber = 5; bumpPercent(96);
     const dcEngine: EngineStatus = { name: 'Deep Crawl', icon: '🕷️', status: 'active', found: 0 };
     _ep.engines.push(dcEngine); emitEP();
-    const maxDC = Math.min(lastNeeders.length, 50);
+    const maxDC = CATEGORY_MODE ? lastNeeders.length : Math.min(lastNeeders.length, 50);
     for (let i5d = 0; i5d < maxDC; i5d += _BATCH) {
       if (isCancelled()) break;
       const batch5d = lastNeeders.slice(i5d, i5d + _BATCH);
