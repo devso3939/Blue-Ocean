@@ -1011,7 +1011,11 @@ export default function App() {
       setScanContext(buildScanContext(selectedCity.countryCode, selectedCity.country, selectedCity.name));
       let biz = await queryBusinesses(
         selectedCity.lat, selectedCity.lon, 10000,
-        (pct, msg) => { setProgress(Math.max(pct, 5)); setLoadingStage(msg); },
+        // v6.9.45: clamp at 99 — the engine emits 100 when the scan itself is
+        // done, but this flow still has demand signals + AI + verification
+        // after it. An early 100 locked the bar full while enrichment kept
+        // crawling, which read as "stuck at 100%".
+        (pct, msg) => { setProgress(Math.min(99, Math.max(pct, 5))); setLoadingStage(msg); },
         selectedCategory,
         false,
         (ep) => setEnrichProgress(ep),
@@ -2466,7 +2470,7 @@ export default function App() {
                             setScanContext(buildScanContext(selectedCity.countryCode, selectedCity.country, selectedCity.name));
                             queryBusinesses(
                               selectedCity.lat, selectedCity.lon, 10000,
-                              (pct, msg) => { setProgress(Math.max(pct, 5)); setLoadingStage(msg); },
+                              (pct, msg) => { setProgress(Math.min(99, Math.max(pct, 5))); setLoadingStage(msg); },
                               selectedOppCategory, false,
                               (ep) => setEnrichProgress(ep),
                               undefined,

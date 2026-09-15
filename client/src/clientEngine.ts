@@ -1752,9 +1752,26 @@ export function getEngineHealthSnapshot(): EngineHealthEntry[] {
 
 export function resetEngineHealth(): void { _engineHealth.clear(); }
 
+// v6.9.45: combine several abort sources into one signal (no dependency on
+// AbortSignal.any availability in the TS lib).
+function anySignal(...signals: (AbortSignal | undefined | null)[]): AbortSignal {
+  const ac = new AbortController();
+  for (const s of signals) {
+    if (!s) continue;
+    if (s.aborted) { ac.abort(); return ac.signal; }
+    s.addEventListener('abort', () => ac.abort(), { once: true });
+  }
+  return ac.signal;
+}
+
 async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', ...init?.headers };
   const callerSignal = init?.signal;
+  // v6.9.45: hard ceiling for the WHOLE proxy chain. Every arm below races
+  // its own per-arm timeout against this cap AND the caller's signal, so a
+  // single dead proxy can never stall a lane 20+ seconds — the "frozen at
+  // 100%" enrichment bug fed on exactly that.
+  const chainCap = AbortSignal.timeout(24_000);
 
   // 0) Circuit breaker: this host is currently known-dead at the network
   //    level — fail instantly instead of burning 5-30s on every request.
@@ -1795,7 +1812,7 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   //    (and printing a console error) on every single proxied request.
   if (_corsshFails < 3 || Date.now() - _corsshLastFail > 300_000) {
     try {
-      const r = await fetch('https://cors.sh/' + url, { headers, signal: AbortSignal.timeout(5000) });
+      const r = await fetch('https://cors.sh/' + url, { headers, signal: anySignal(callerSignal, chainCap, AbortSignal.timeout(5000)) });
       if (r.ok) { hostRecordSuccess(url); _corsshFails = 0; return r; }
       _corsshFails++; _corsshLastFail = Date.now();
     } catch {
@@ -1803,13 +1820,15 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
     }
   }
 
+  if (callerSignal?.aborted) throw new Error('Cancelled');
+
   // 4) Jina Reader (keyless, returns page text/markdown — good for contact
   // extraction; works from real browser sessions). v6.9.9: failure memory —
   // when Jina refuses (401/429) or times out repeatedly, skip it for 5 min
   // instead of printing one console error per proxied request.
   if (_jinaFails < 3 || Date.now() - _jinaLastFail > 300_000) {
     try {
-      const r = await fetch('https://r.jina.ai/' + url, { headers, signal: AbortSignal.timeout(12000) });
+      const r = await fetch('https://r.jina.ai/' + url, { headers, signal: anySignal(callerSignal, chainCap, AbortSignal.timeout(12000)) });
       if (r.ok) {
         const text = await r.text();
         if (text && text.length > 100) {
@@ -1827,6 +1846,7 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   // allorigins is unreachable, 10 parallel aborts printed 10 console errors
   // per wave; now only ONE in-flight request exists and the rest reuse its
   // outcome (success clones the payload, failure skips the arm).
+  if (callerSignal?.aborted) throw new Error('Cancelled');
   if (_alloFails < 3 || Date.now() - _alloLastFail > 300_000) {
     if (_alloInFlight) {
       const ok = await _alloInFlight.catch(() => false);
@@ -1834,7 +1854,7 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
     } else {
       _alloInFlight = (async () => {
         try {
-          const r = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(url), { headers, signal: AbortSignal.timeout(5000) });
+          const r = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(url), { headers, signal: anySignal(callerSignal, chainCap, AbortSignal.timeout(5000)) });
           if (r.ok) {
             const json = await r.json();
             _alloFails = 0; _alloLastPayload = json.contents || '';
@@ -2080,8 +2100,14 @@ export interface OverpassRouteEvent {
 }
 const overpassRouteLog: OverpassRouteEvent[] = [];
 function logRoute(route: string, ok: boolean, ms: number): void {
+  // v6.9.45: keep ONE chip per route — latest attempt wins. The old append-
+  // only log let five stale "fail" chips from the direct-mirror fallback sit
+  // on screen even after the Supabase proxy succeeded, looking like the scan
+  // had errored out when it hadn't.
+  const existing = overpassRouteLog.find(e => e.route === route);
+  if (existing) { existing.ok = ok; existing.ms = ms; existing.at = Date.now(); return; }
   overpassRouteLog.push({ route, ok, ms, at: Date.now() });
-  if (overpassRouteLog.length > 10) overpassRouteLog.shift();
+  if (overpassRouteLog.length > 6) overpassRouteLog.shift();
 }
 export function getOverpassRouteLog(): OverpassRouteEvent[] {
   return overpassRouteLog.slice();
@@ -4733,7 +4759,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     _ep.activePass = 'Pass 2: Regional (2GIS)'; _ep.passNumber = 2; bumpPercent(91);
     _ep.engines.find(e => e.name === '2GIS')!.status = 'active'; emitEP();
     for (let i2 = 0; i2 < (CATEGORY_MODE ? need2GIS.length : Math.min(need2GIS.length, 40)); i2 += _BATCH) {
-      if (isCancelled()) break;
+      if (laneStop()) break;
       const batch2 = need2GIS.slice(i2, i2 + _BATCH);
       await Promise.all(batch2.map(async (b) => {
         try {
@@ -4790,7 +4816,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     _ep.activePass = 'Pass 3: Regional (Yandex)'; _ep.passNumber = 3; bumpPercent(93);
     _ep.engines.find(e => e.name === 'Yandex')!.status = 'active'; emitEP();
     for (let i3 = 0; i3 < (CATEGORY_MODE ? needYandex.length : Math.min(needYandex.length, 30)); i3 += _BATCH) {
-      if (isCancelled()) break;
+      if (laneStop()) break;
       const batch3 = needYandex.slice(i3, i3 + _BATCH);
       await Promise.all(batch3.map(async (b) => {
         try {
@@ -4819,9 +4845,12 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     _ep.activePass = 'Pass 4: Verify (Wikidata + Wayback)'; _ep.passNumber = 4; bumpPercent(94);
     const wdEngine: EngineStatus = { name: 'Wikidata', icon: '🔗', status: 'active', found: 0 };
     _ep.engines.push(wdEngine); emitEP();
-    const maxVerify = CATEGORY_MODE ? needVerify.length : Math.min(needVerify.length, 24);
+    // v6.9.45: wikidataContacts runs through a GLOBAL SERIAL chain — full-
+    // queue verify meant hundreds of SEQUENTIAL 10–15s queries. Cap it (the
+    // lane deadline backstops the rest) so this lane can't stall wave A.
+    const maxVerify = Math.min(needVerify.length, CATEGORY_MODE ? 80 : 24);
     for (let i4 = 0; i4 < maxVerify; i4 += _BATCH) {
-      if (isCancelled()) break;
+      if (laneStop()) break;
       const batch4 = needVerify.slice(i4, i4 + _BATCH);
       await Promise.all(batch4.map(async (b) => {
         const before = b.email + '|' + b.phone;
@@ -4833,12 +4862,12 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     }
     wdEngine.status = 'done'; emitEP();
     // Wayback: recover contacts for dead/unreachable websites
-    const deadSites = (CATEGORY_MODE ? allBizList.filter(b => b.website && !b.email && !b.phone && !b.facebook) : allBizList.filter(b => b.website && !b.email && !b.phone && !b.facebook).slice(0, 15));
+    const deadSites = allBizList.filter(b => b.website && !b.email && !b.phone && !b.facebook).slice(0, CATEGORY_MODE ? 25 : 15);
     if (deadSites.length > 0) {
       const wbEngine: EngineStatus = { name: 'Wayback', icon: '🕰️', status: 'active', found: 0 };
       _ep.engines.push(wbEngine); emitEP();
       for (const b of deadSites) {
-        if (isCancelled()) break;
+        if (laneStop()) break;
         const before = b.email + '|' + b.phone;
         await waybackContacts(b);
         if (b.email + '|' + b.phone !== before) wbEngine.found++;
@@ -4860,9 +4889,9 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     _ep.activePass = 'Pass 5b: Social profile mining'; _ep.passNumber = 5; bumpPercent(95);
     const socEngine: EngineStatus = { name: 'Social Miner', icon: '👥', status: 'active', found: 0 };
     _ep.engines.push(socEngine); emitEP();
-    const maxSoc = CATEGORY_MODE ? socialNeedies.length : Math.min(socialNeedies.length, 60);
+    const maxSoc = Math.min(socialNeedies.length, CATEGORY_MODE ? 150 : 60);
     for (let i5b = 0; i5b < maxSoc; i5b += _BATCH) {
-      if (isCancelled()) break;
+      if (laneStop()) break;
       const batch5b = socialNeedies.slice(i5b, i5b + _BATCH);
       const beforeCnt = batch5b.filter(x => x.email || x.phone).length;
       await Promise.all(batch5b.map(async (b) => {
@@ -4917,9 +4946,9 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     _ep.activePass = 'Pass 5: Google Places sweep'; _ep.passNumber = 5; bumpPercent(95);
     const gpEngine: EngineStatus = { name: 'Google Places', icon: '🗺️', status: 'active', found: 0 };
     _ep.engines.push(gpEngine); emitEP();
-    const maxGP = CATEGORY_MODE ? stillEmpty.length : Math.min(stillEmpty.length, 60);
+    const maxGP = Math.min(stillEmpty.length, CATEGORY_MODE ? 120 : 60);
     for (let i5 = 0; i5 < maxGP; i5 += _BATCH) {
-      if (isCancelled()) break;
+      if (laneStop()) break;
       const batch5 = stillEmpty.slice(i5, i5 + _BATCH);
       const beforeCnt = batch5.filter(b => b.phone || b.email || b.website).length;
       try { await enrichFromGooglePlaces(batch5); } catch {}
@@ -4943,9 +4972,9 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     _ep.activePass = 'Pass 5d: Deep crawl + domain search'; _ep.passNumber = 5; bumpPercent(96);
     const dcEngine: EngineStatus = { name: 'Deep Crawl', icon: '🕷️', status: 'active', found: 0 };
     _ep.engines.push(dcEngine); emitEP();
-    const maxDC = CATEGORY_MODE ? lastNeeders.length : Math.min(lastNeeders.length, 50);
+    const maxDC = Math.min(lastNeeders.length, CATEGORY_MODE ? 150 : 50);
     for (let i5d = 0; i5d < maxDC; i5d += _BATCH) {
-      if (isCancelled()) break;
+      if (laneStop()) break;
       const batch5d = lastNeeders.slice(i5d, i5d + _BATCH);
       const beforeCnt = batch5d.filter(x => x.email || x.phone).length;
       await Promise.all(batch5d.map(async (b) => {
@@ -4984,6 +5013,16 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   // Wave B: the two DDG-riding lanes together (health gate shared, pressure
   // bounded). Lanes with zero needies return instantly without touching the
   // progress bar, so small categories skip what they don't need.
+  // v6.9.45: wall-clock budget for the whole lane phase. In category mode
+  // lanes process the FULL queue, and the serial layers (Wikidata chain,
+  // Wayback) crawled 30+ minutes on a 500-business category — the user saw a
+  // frozen "198/198 · 100%" forever. The budget guarantees the scan ALWAYS
+  // ends: when time is up, lanes stop early and everything found ships.
+  const LANE_BUDGET_MS = CATEGORY_MODE ? 8 * 60_000 : 3 * 60_000;
+  const laneDeadline = Date.now() + LANE_BUDGET_MS;
+  const laneStop = () => isCancelled() || Date.now() >= laneDeadline;
+  onProgress?.(92, 'Regional, social & verification lanes running…');
+
   const waveA = [lane2GIS, laneSocial, laneGooglePlaces, laneVerify];
   const waveB = [laneYandex, laneDeepCrawl];
   const activeLanes =
@@ -4994,8 +5033,12 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   _ep.activePass = `Passes 2–5 in parallel (${activeLanes} lanes)`; _ep.passNumber = 2; bumpPercent(91); emitEP();
   await Promise.all(waveA.map(fn => fn().catch(() => {})));
   if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
+  onProgress?.(96, 'Wave A done — Yandex + deep-crawl lanes…');
   await Promise.all(waveB.map(fn => fn().catch(() => {})));
   if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
+  onProgress?.(97, Date.now() >= laneDeadline
+    ? 'Lane budget reached — shipping contacts found so far…'
+    : 'All enrichment lanes complete…');
 
   // ── v6.9.37: final VALIDATION pass — every stored contact is checked ──
   // Extraction layers are permissive (they'd rather keep a suspect value
