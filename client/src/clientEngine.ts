@@ -5405,6 +5405,80 @@ const AI_MODEL_CHAIN: string[] = [
   'inclusionai/ling-3.0-flash-vl:free',
 ];
 
+// ── v6.9.46: llm7.io — keyless, CORS-open, verified ALIVE 2026-09-15 ──
+// Probe results that killed every other keyless path: Pollinations POST
+// returns HTTP 200 whose "content" IS a budget-error message (its shared
+// anonymous key is exhausted — same from Supabase's IP), GitHub Models is
+// retiring (410 brownout), Puter.js demands interactive login, duck.ai chat
+// is bot-walled server-side. llm7.io answered a real completion with HTTP
+// 200 from BOTH curl and the browser (CORS allowed). Anonymous tier models
+// verified live via GET /v1/models: mistral-Nemo-Instruct-2407 (clean fast
+// replies) and minimax-m2.7 (reasoning — emits <think> blocks; stripThink-
+// Blocks already handles them). Nemo first: no reasoning overhead.
+const LLM7_CHAIN = ['mistral-Nemo-Instruct-2407', 'minimax-m2.7'];
+let _llm7Fails = 0;
+let _llm7LastFail = 0;
+// Pollinations probe 2026-09-15: endpoint 200s but content is the literal
+// string "The API key used for this request has reached its budget…" — a
+// validator rejects it so the chain moves on instead of shipping garbage.
+const POLLEN_BUDGET_MSG = /reached its budget|raise the key budget|pollinations\.ai\/edit-key/i;
+
+async function llm7Call(
+  systemPrompt: string,
+  userPrompt: string,
+  opts?: { maxTokens?: number; temperature?: number; signal?: AbortSignal; validate?: (t: string) => boolean },
+): Promise<string | null> {
+  // failure memory: 3 consecutive fails → skip the provider for 5 min
+  if (_llm7Fails >= 3 && Date.now() - _llm7LastFail < 300_000) return null;
+  for (const model of LLM7_CHAIN) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (opts?.signal?.aborted) return null;
+      try {
+        const r = await fetch('https://api.llm7.io/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+            ],
+            max_tokens: opts?.maxTokens ?? 900,
+            temperature: opts?.temperature ?? 0.3,
+          }),
+          signal: opts?.signal ?? AbortSignal.timeout(45000),
+        });
+        if (r.ok) {
+          const d = await r.json();
+          const text = stripThinkBlocks(String(d?.choices?.[0]?.message?.content || ''));
+          if (text.trim().length > 0 && !POLLEN_BUDGET_MSG.test(text) && (!opts?.validate || opts.validate(text))) {
+            _llm7Fails = 0;
+            engineNoteSuccess('llm7', 'AI (llm7.io — keyless)');
+            _lastLlmModel = 'llm7:' + model;
+            return text;
+          }
+          // empty/garbage reply → next model
+          break;
+        }
+        // 429/5xx → brief backoff, retry same model once
+        if (r.status === 429 || r.status >= 500) {
+          _llm7Fails++; _llm7LastFail = Date.now();
+          await new Promise(res => setTimeout(res, 1200 * (attempt + 1)));
+          continue;
+        }
+        // other 4xx (model gone) → next model
+        _llm7Fails++; _llm7LastFail = Date.now();
+        break;
+      } catch (e: any) {
+        if (e?.name === 'AbortError' || e?.message === 'Cancelled') return null;
+        _llm7Fails++; _llm7LastFail = Date.now();
+        break; // network → next model
+      }
+    }
+  }
+  return null;
+}
+
 // One shared call site: sends a chat completion, walks the model chain on
 // 429/5xx, retries with exponential backoff, and returns raw text.
 // `validate` lets callers reject a successful-but-unusable reply (e.g. JSON
@@ -5529,6 +5603,14 @@ async function llmCallModel(
       }
     }
   }
+  // ── v6.9.46: Keyless arm #1 — llm7.io (verified alive + CORS-open) ──
+  // Runs BEFORE Pollinations, which is now confirmed budget-dead globally.
+  const _sig = opts?.signal;
+  if (!_sig?.aborted) {
+    const llm7Text = await llm7Call(systemPrompt, userPrompt, { maxTokens, temperature, signal: _sig, validate });
+    if (llm7Text) return { text: llm7Text, model: _lastLlmModel || 'llm7' };
+  }
+
   // ── v6.9.26: Keyless last resort — Pollinations text API ──
   // The legacy GET path died (402/429), but the OpenAI-compatible POST
   // endpoint (text.pollinations.ai/openai) still serves anonymous requests
@@ -5537,6 +5619,9 @@ async function llmCallModel(
   // system+user pair and cap length by asking for short output in the prompt.
   // Also honors the caller's validator, so garbage replies fall through to
   // the deterministic local analysis instead of surfacing junk.
+  // v6.9.46: probe showed the anonymous key is exhausted — HTTP 200 whose
+  // content is a budget-error message. Kept as a hail-mary (it may recover
+  // when they top up), but the validator now rejects budget messages.
   if (!opts?.signal?.aborted) {
     try {
       const r = await fetch('https://text.pollinations.ai/openai', {
@@ -5554,10 +5639,14 @@ async function llmCallModel(
       if (r.ok) {
         const d = await r.json();
         const text = d?.choices?.[0]?.message?.content;
-        if (typeof text === 'string' && text.trim().length > 0 && (!validate || validate(stripThinkBlocks(text)))) {
+        if (typeof text === 'string' && text.trim().length > 0 && !POLLEN_BUDGET_MSG.test(stripThinkBlocks(text)) && (!validate || validate(stripThinkBlocks(text)))) {
           engineNoteSuccess('pollinations', 'AI (Pollinations — keyless)');
           _lastLlmModel = 'pollinations:openai';
           return { text: stripThinkBlocks(text), model: 'pollinations:openai' };
+        }
+        // v6.9.46: budget-error content (200-but-dead) counts as a provider fail
+        if (typeof text === 'string' && POLLEN_BUDGET_MSG.test(stripThinkBlocks(text))) {
+          engineNoteFail('pollinations', 'AI (Pollinations — keyless)', 'quota', 'anonymous key budget exhausted (content is budget msg)');
         }
       } else {
         engineNoteFail('pollinations', 'AI (Pollinations — keyless)', classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);

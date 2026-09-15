@@ -29,7 +29,67 @@ const AI_MODEL_CHAIN: string[] = [
   'inclusionai/ling-3.0-flash-vl:free',
 ];
 
+// ── v6.9.46: llm7.io — keyless, CORS-open, verified ALIVE 2026-09-15 ──
+// (Full probe notes in clientEngine.ts llm7Call. Same model chain here.)
+const LLM7_CHAIN = ['mistral-Nemo-Instruct-2407', 'minimax-m2.7'];
+const _stripThink = (t: string) => String(t || '')
+  .replace(/<think>[\s\S]*?<\/think>/gi, '')
+  .replace(/<\|?begin_of_thought\|?>[\s\S]*?<\|?end_of_thought\|?>/gi, '')
+  .trim();
+const BUDGET_MSG = /reached its budget|raise the key budget|pollinations\.ai\/edit-key/i;
+let _llm7Fails = 0;
+let _llm7LastFail = 0;
+
+async function llm7Call(prompt: string, timeoutMs: number): Promise<string | null> {
+  if (_llm7Fails >= 3 && Date.now() - _llm7LastFail < 300_000) return null;
+  for (const model of LLM7_CHAIN) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const r = await fetch('https://api.llm7.io/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: 'system', content: 'You are a market analyst. Reply concisely (under 400 words), plain text.' },
+              { role: 'user', content: prompt },
+            ],
+            max_tokens: 1200,
+            temperature: 0.4,
+          }),
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (r.ok) {
+          const d = await r.json();
+          const text = _stripThink(d?.choices?.[0]?.message?.content || '');
+          if (text && text.length > 40 && !/^\s*<!doctype|<html/i.test(text) && !BUDGET_MSG.test(text)) {
+            _llm7Fails = 0;
+            return text;
+          }
+          break; // empty/garbage → next model
+        }
+        if (r.status === 429 || r.status >= 500) {
+          _llm7Fails++; _llm7LastFail = Date.now();
+          await new Promise(res => setTimeout(res, 1200 * (attempt + 1)));
+          continue;
+        }
+        _llm7Fails++; _llm7LastFail = Date.now();
+        break;
+      } catch {
+        _llm7Fails++; _llm7LastFail = Date.now();
+        break;
+      }
+    }
+  }
+  return null;
+}
+
 async function callLLM(prompt: string, timeoutMs = 60000): Promise<string | null> {
+  // v6.9.46: keyless llm7.io FIRST (verified alive; no key exists in this
+  // build, so OpenRouter below only runs when a user adds a key in Settings)
+  const llm7 = await llm7Call(prompt, Math.min(timeoutMs, 45000));
+  if (llm7) return llm7;
+
   // Prefer OpenRouter when a key is provided (better quality + reliability)
   if (OPENROUTER_API_KEY) {
     for (let mi = 0; mi < AI_MODEL_CHAIN.length; mi++) {
@@ -84,8 +144,8 @@ async function callLLM(prompt: string, timeoutMs = 60000): Promise<string | null
     });
     if (!r.ok) return null;
     const data = await r.json().catch(() => null);
-    const text = (data?.choices?.[0]?.message?.content || '').trim();
-    if (text && text.length > 40 && !/^\s*<!doctype|<html/i.test(text)) return text;
+    const text = _stripThink((data?.choices?.[0]?.message?.content || ''));
+    if (text && text.length > 40 && !/^\s*<!doctype|<html/i.test(text) && !BUDGET_MSG.test(text)) return text;
     return null;
   } catch {
     return null;
