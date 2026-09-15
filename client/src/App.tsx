@@ -176,6 +176,43 @@ function CoverageDashboard({ onBack }: { onBack: () => void }) {
   const rows = entries
     .map(([k, s]) => ({ k, s }))
     .sort((a, b) => a.s.p - b.s.p || (b.s.n ?? 0) - (a.s.n ?? 0)); // neediest first
+  const exportCsv = () => {
+    if (rows.length === 0) return;
+    const esc = (v: unknown) => {
+      const str = String(v ?? '');
+      return /[",\n]/.test(str) ? '"' + str.replace(/"/g, '""') + '"' : str;
+    };
+    const header = ['City', 'Category', 'Category ID', 'Coverage %', 'Businesses', 'Phones', 'Emails', 'Websites', 'Socials', 'Phone %', 'Email %', 'Website %', 'Social %', 'Last Updated'];
+    const lines = rows.map(({ k, s }) => {
+      const [city, cat] = k.split('::');
+      const n = s.n ?? 0;
+      const pc = (v: number) => (n ? Math.round((v / n) * 100) + '%' : '0%');
+      return [
+        esc(s.city || city),
+        esc(s.cat ? getCategoryLabel(s.cat) : cat),
+        esc(s.cat || cat),
+        s.p,
+        n,
+        s.ph ?? 0,
+        s.em ?? 0,
+        s.web ?? 0,
+        s.soc ?? 0,
+        pc(s.ph ?? 0),
+        pc(s.em ?? 0),
+        pc(s.web ?? 0),
+        pc(s.soc ?? 0),
+        new Date(s.t).toISOString(),
+      ].join(',');
+    });
+    const csv = '\uFEFF' + header.join(',') + '\n' + lines.join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `blue-ocean-coverage-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
   const withN = rows.filter(r => r.s.n);
   const totalBiz = withN.reduce((s, r) => s + (r.s.n ?? 0), 0);
   const weighted = totalBiz ? Math.round(withN.reduce((s, r) => s + r.s.p * (r.s.n ?? 0), 0) / totalBiz) : 0;
@@ -198,6 +235,14 @@ function CoverageDashboard({ onBack }: { onBack: () => void }) {
             <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Global Coverage</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v{APP_VERSION}</span></span>
           </div>
           <div className="flex items-center gap-3">
+            <button
+              onClick={exportCsv}
+              disabled={rows.length === 0}
+              title="Download the coverage table as CSV"
+              className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-border text-muted-foreground hover:text-foreground hover:border-emerald-500/50 transition-all disabled:opacity-40 disabled:pointer-events-none"
+            >
+              ⬇️ Export CSV
+            </button>
             <button
               onClick={() => { if (confirm('Clear all stored coverage history?')) { clearCoverageStore(); setTick(t => t + 1); } }}
               className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-red-500/30 text-red-400/80 hover:text-red-300 hover:border-red-500/50 transition-all"
