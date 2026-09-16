@@ -71,3 +71,8 @@ client/parsertest.cjs
 # Taxonomy sample (regenerated)
 backend/taxonomy_sample.json
 build.sh
+
+# local production-build preview harness (dev-only)
+client/serve_dist/
+client/serve_root/
+client/serve_prod.py

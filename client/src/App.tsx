@@ -21,6 +21,7 @@ import {
   sanityCheckOpportunities,
   aiVerifyOpportunities,
   rescanWideNet,
+  supplementProServices,
   getEngineHealthSnapshot,
   type EngineHealthEntry,
   type VerificationResult,
@@ -925,11 +926,19 @@ export default function App() {
           if (absurdCats.length > 0 && !ac.signal.aborted) {
             try {
               setLoadingStage(`Re-checking ${absurdCats.length} suspicious categor${absurdCats.length > 1 ? 'ies' : 'y'}…`);
-              const merged = await rescanWideNet(biz, absurdCats, selectedCity.lat, selectedCity.lon, 10000, {
-                signal: ac.signal,
-                onProgress: (msg) => setRescanNote(msg),
-                areaBbox: computeScanArea(selectedCity.lat, selectedCity.lon, selectedCity.bbox, selectedCity.population),
-              });
+              // v6.9.48: hard 90s budget. Cold Overpass mirrors used to stall
+              // this stage for many minutes with the feed frozen; the web
+              // supplement below now covers whatever the re-check cannot.
+              const racedWide = await Promise.race([
+                rescanWideNet(biz, absurdCats, selectedCity.lat, selectedCity.lon, 10000, {
+                  signal: ac.signal,
+                  onProgress: (msg) => setRescanNote(msg),
+                  areaBbox: computeScanArea(selectedCity.lat, selectedCity.lon, selectedCity.bbox, selectedCity.population),
+                }),
+                new Promise<null>(res => setTimeout(() => res(null), 90000)),
+              ]);
+              const merged = racedWide ?? biz;
+              if (!racedWide) setRescanNote('Re-check timed out on slow mirrors — trying the web instead…');
               const addedTotal = Array.from(merged.entries()).reduce((s, [c, arr]) => {
                 const before = biz.get(c)?.length ?? 0;
                 return s + Math.max(0, arr.length - before);
@@ -948,6 +957,42 @@ export default function App() {
                 ? `Re-check added ${addedTotal} businesses missed by the first scan.`
                 : 'Re-check confirmed the first scan — no additional businesses found.');
             } catch { /* rescan best-effort */ }
+          }
+
+          // ── v6.9.48: web-registry supplement for thin professional services ──
+          // Deliberately INDEPENDENT of the rescan above: when Overpass mirrors
+          // are cold (400/504), the rescan throws and used to take the
+          // supplement down with it. This step only needs the web + the city.
+          if (absurdCats.length > 0 && !ac.signal.aborted) {
+            const stillThin = absurdCats.filter(c => (biz.get(c)?.length ?? 0) < 15);
+            if (stillThin.length > 0) {
+              try {
+                setLoadingStage('Searching the web for businesses OSM missed…');
+                const supp = await supplementProServices(biz, stillThin, selectedCity.lat, selectedCity.lon, {
+                  signal: ac.signal,
+                  onProgress: (msg) => setRescanNote(msg),
+                });
+                const suppAdded = Array.from(supp.entries()).reduce((s, [c, arr]) => {
+                  const before = biz.get(c)?.length ?? 0;
+                  return s + Math.max(0, arr.length - before);
+                }, 0);
+                biz = supp;
+                setBusinesses(supp);
+                if (suppAdded > 0) {
+                  const opps3 = computeOpportunities(supp, selectedCity.population || 0, signals);
+                  setOpportunities(opps3);
+                  if (analysis) {
+                    analysis.sanity = sanityCheckOpportunities(opps3, selectedCity.population || 0);
+                    setAiAnalysis(analysis);
+                  }
+                  setRescanNote(`Web supplement added ${suppAdded} businesses not present in OpenStreetMap.`);
+                }
+                // When nothing was added, keep the engine's diagnostic note
+                // ("45 web results → 0 new (dropped: 32 directory-host…)").
+              } catch (e) {
+                setRescanNote(`Web supplement unavailable: ${(e as Error)?.message?.slice(0, 60) || 'error'}`);
+              }
+            }
           }
 
           // ── AI verification pass (v6.9.2): LLM cross-checks the flags ──
@@ -1081,11 +1126,18 @@ export default function App() {
       if (absurdCats1.includes(selectedCategory) && !ac.signal.aborted) {
         try {
           setLoadingStage('Re-checking with a wider search…');
-          const merged = await rescanWideNet(biz, [selectedCategory], selectedCity.lat, selectedCity.lon, 10000, {
-            signal: ac.signal,
-            onProgress: (msg) => setRescanNote(msg),
-            areaBbox: computeScanArea(selectedCity.lat, selectedCity.lon, selectedCity.bbox, selectedCity.population), // v6.9.20: match the main scan area
-          });
+          // v6.9.48: hard 90s budget (see note in the Discover flow) — a cold
+          // mirror must not freeze this stage for minutes.
+          const racedWide = await Promise.race([
+            rescanWideNet(biz, [selectedCategory], selectedCity.lat, selectedCity.lon, 10000, {
+              signal: ac.signal,
+              onProgress: (msg) => setRescanNote(msg),
+              areaBbox: computeScanArea(selectedCity.lat, selectedCity.lon, selectedCity.bbox, selectedCity.population), // v6.9.20: match the main scan area
+            }),
+            new Promise<null>(res => setTimeout(() => res(null), 90000)),
+          ]);
+          const merged = racedWide ?? biz;
+          if (!racedWide) setRescanNote('Re-check timed out on slow mirrors — trying the web instead…');
           const before = biz.get(selectedCategory)?.length ?? 0;
           const after = merged.get(selectedCategory)?.length ?? 0;
           if (after > before) {
@@ -1102,6 +1154,35 @@ export default function App() {
             setRescanNote('Re-check confirmed the first scan — no additional businesses found.');
           }
         } catch { /* rescan best-effort */ }
+      }
+
+      // ── v6.9.48: web-registry supplement when the category is still thin ──
+      // Independent of the rescan (Overpass failures must not block it).
+      if ((biz.get(selectedCategory)?.length ?? 0) < 15 && !ac.signal.aborted) {
+        try {
+          setLoadingStage('Searching the web for businesses OSM missed…');
+          const supp = await supplementProServices(biz, [selectedCategory], selectedCity.lat, selectedCity.lon, {
+            signal: ac.signal,
+            onProgress: (msg) => setRescanNote(msg),
+          });
+          const sBefore = biz.get(selectedCategory)?.length ?? 0;
+          const sAfter = supp.get(selectedCategory)?.length ?? 0;
+          biz = supp;
+          setBusinesses(supp);
+          if (sAfter > sBefore) {
+            const opps2 = computeOpportunities(supp, selectedCity.population || 0, signals);
+            setOpportunities(opps2);
+            if (analysis) {
+              analysis.sanity = sanityCheckOpportunities(opps2, selectedCity.population || 0);
+              setAiAnalysis(analysis);
+            }
+            setRescanNote(`Web supplement added ${sAfter - sBefore} businesses not present in OpenStreetMap.`);
+          }
+          // When nothing was added, keep the engine's diagnostic note so the
+          // drop-reason breakdown stays visible.
+        } catch (e) {
+          setRescanNote(`Web supplement unavailable: ${(e as Error)?.message?.slice(0, 60) || 'error'}`);
+        }
       }
 
       // ── AI verification pass (v6.9.2) ──

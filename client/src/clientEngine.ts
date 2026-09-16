@@ -480,6 +480,8 @@ export interface Business {
   hours: string;
   twitter: string;
   pinterest: string;
+  /** v6.9.48: found via the web-registry supplement (not OSM) — approximate pin */
+  supplemented?: boolean;
 }
 
 // ─── Enrichment Progress (real-time panel) ──────────────────────
@@ -6595,6 +6597,258 @@ export async function rescanWideNet(
         opts?.onProgress?.(`Found ${added} more ${getCategoryLabel(cat)} businesses in the re-check`);
       }
     } catch { /* mirror busy — keep original count */ }
+  }
+  return merged;
+}
+
+// ─── v6.9.48: Web-registry supplement for OSM-thin professional services ──
+// OSM under-maps accountants, consultants, software firms and lawyers nearly
+// everywhere (0 office=accountant in all of Tbilisi). The wide-net rescan can
+// only recover what OSM has; this supplement searches the live web instead.
+// Source: Brave web search (key already pooled, CORS-direct). Query templates
+// use the category's native-language term + city name + the country ccTLD so
+// results come from the country's own business web, in any language.
+
+// Titles that are directory/listing PAGES, not individual businesses. If the
+// result's URL host matches, the entry is an index — skip it (the *businesses*
+// listed inside will each appear as their own result on related queries).
+// Registries, yellow pages, marketplaces and mirror-sites: pages ABOUT
+// businesses, never a business's own site.
+const SUPP_DIRECTORY_HOSTS = /(^|\.)(yell|yellow|yellowpages|goldenpages|phonebook|companyinfo|azbuka|infobiz|facebook|instagram|linkedin|twitter|tiktok|youtube|wikipedia|tripadvisor|yelp|zomato|glassdoor|indeed|clutch|goodfirms|sortlist|designrush|upwork|fiverr|toptal|freelancer|opendi|hotfrog|cybo|zaubee|nicelocal|worldorgs|cityseeker|trustpilot|provenexpert|companieshouse|opencorporates|zoominfo|lusha|rocketreach|yp|madloba|tagalliances|techbehemoths|kompas|bizapedia|companylist|goods?list|europages|kompass|directory|directories|taxravens|relocup|catalog|catalogue|gis|2gis|map|maps|plan)\.[a-z]{2,}/i;
+// Multi-label platform hosts (need the full domain, not just a label).
+const SUPP_DIRECTORY_HOSTS2 = /(^|\.)(x\.com|bir\.ai|apollo\.io|dnb\.com|top-?rated\.|top10\.|bestof\.|find-open\.|spyur\.|usembassy\.|embassy\.|portal\.)/i;
+// Registrable domains that ARE the plural profession word are always portals
+// (lawyers.ge, accountants.am, auditors.ge) — never a single firm's own site.
+const SUPP_PROFESSION_PORTAL = /^(lawyers?|accountants?|auditors?|attorneys?|realtors?|notaries|notary|jurists?)\.[a-z]{2,}/i;
+// Government / education / chamber-of-commerce hosts: sector bodies, not firms.
+const SUPP_INSTITUTIONAL = /(^|\.)(gov|mil|edu|ac|chamber|chambers)\.[a-z]{2,}$|(^|\.)(gov|mil|edu|ac|chamber|chambers)\.[a-z]{2,}\.[a-z]{2,}$/i;
+
+// Paths that mark a page as a listing/profile of a REGISTRY or a freelancer
+// marketplace rather than a firm's own site (yp.com.ge/organizations/org-…,
+// kompas.ge/en/company/…, toptal.com/developers/resume/…).
+const SUPP_DIRECTORY_PATHS = /^\/(organizations?|orgs?|company|companies|firm|firms|agency|agencies|resume|resumes|profile|profiles|freelancers?|developers?\/resume|en\/company|dir|dirs|biz|business|businesses|listing|listings)(\/|$)/;
+
+// Category → web-query templates. {city} is the scan city (native if possible,
+// English fallback — search engines cross-match), {tld} the country ccTLD.
+// NOTE (measured v6.9.48): Brave's API returns ZERO results for `site:`
+// filters — both `site:.*\.ge` and plain `site:.ge`. Templates therefore use
+// free-text locality + the native-language category term instead, and the
+// ccTLD is used only as a *preference* in the filter below.
+const SUPP_QUERIES: Record<string, string[]> = {
+  accountant: [
+    '{catNative} {city} accounting company',
+    'accounting firm {city} contact',
+    'bookkeeping audit company {city}',
+  ],
+  it_consulting: [
+    '{catNative} {city} consulting company',
+    'consulting firm {city} contact',
+    'business consulting services {city}',
+  ],
+  software: [
+    'software company {city} contact',
+    'software development company {city}',
+    '{catNative} {city} IT company',
+  ],
+  lawyer: [
+    'law firm {city} contact',
+    '{catNative} {city} attorney',
+    'legal services company {city}',
+  ],
+  real_estate: [
+    'real estate agency {city} contact',
+    '{catNative} {city} realtor',
+    'property management company {city}',
+  ],
+  it: [
+    'IT company {city} contact',
+    '{catNative} {city} technology company',
+  ],
+  digital_marketing: [
+    'digital marketing agency {city} contact',
+    '{catNative} {city} marketing agency',
+  ],
+  web_agency: [
+    'web design agency {city}',
+    'web development studio {city}',
+  ],
+};
+
+// Title before the separator is the page title; for business sites it's
+// usually "Business Name — what they do" or "Business Name | location".
+function suppBrandFromHost(host: string): string {
+  const parts = (host || '').split('.');
+  if (parts.length < 2) return '';
+  // handle ccSLDs like .com.ge / .co.uk
+  const idx = parts.length >= 3 && /^(com|co|org|net|gov|edu|ac)$/i.test(parts[parts.length - 2])
+    ? parts.length - 3 : parts.length - 2;
+  const brand = parts[idx] || '';
+  if (!brand || brand.length < 3) return '';
+  if (/^(site|index|main|home|www|en|eng|ka|hy|az|ru|geo)$/i.test(brand)) return '';
+  return brand.charAt(0).toUpperCase() + brand.slice(1);
+}
+
+function suppExtractName(title: string, url: string): string {
+  let name = (title || '').split(/\s*[|—–·»«-]\s+/)[0].trim();
+  // Titles like "Accounting Services in Tbilisi" are service pages —
+  // fall back to the domain brand.
+  if (!name || /^(account|consult|law|legal|real estate|bookkeep|software|it |best|top \d)/i.test(name)) {
+    name = '';
+  }
+  if (!name) {
+    try {
+      // v6.9.48e: was parts[len-2], which yields "Com" for every *.com.ge
+      // host. suppBrandFromHost understands ccSLDs (.com.ge/.co.uk).
+      const host = new URL(url).hostname.replace(/^www\./, '');
+      name = suppBrandFromHost(host);
+    } catch { /* bad URL */ }
+  }
+  // Never accept a bare TLD-ish token as a firm name.
+  if (/^(com|net|org|info|biz|ge|am|az|tr|ru|co|io|www|site|index|main|home|en)$/i.test(name)) name = '';
+  return name;
+}
+
+/**
+ * v6.9.48: supplement thin professional-services categories from the live
+ * web. Runs after rescanWideNet when sanity flags remain: searches Brave
+ * for real firms the OSM scan cannot see, merges them into the map with
+ * `supplemented: true` and approximate pins (city center ± 2km). Rate-limit
+ * friendly: one query at a time, skips when Brave reports exhausted.
+ */
+export async function supplementProServices(
+  businesses: Map<string, Business[]>,
+  thinCategories: string[],
+  cityLat: number,
+  cityLon: number,
+  opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void },
+): Promise<Map<string, Business[]>> {
+  const ctx = getScanContext();
+  const tld = countryTld();
+  if (!tld || thinCategories.length === 0) return businesses;
+  const merged = new Map(businesses);
+  let supplementTotal = 0;
+  // v6.9.48d: drop-reason counters. Tuning this filter blind wasted a full
+  // debugging cycle — the operator now sees exactly why results were dropped.
+  const drops: Record<string, number> = {};
+  let rawTotal = 0;
+  const bump = (why: string) => { drops[why] = (drops[why] || 0) + 1; };
+
+  for (const cat of thinCategories.slice(0, 5)) {
+    if (opts?.signal?.aborted) break;
+    const templates = SUPP_QUERIES[cat];
+    if (!templates) continue;
+    const existing = merged.get(cat) || [];
+    if (existing.length >= 25) continue; // only genuinely thin categories
+    const catNative = ctx ? categoryInNative(cat, getCategoryLabel(cat)) : getCategoryLabel(cat);
+    const seenHosts = new Set(existing.map(b => {
+      try { return new URL(b.website || `https://${b.id}`).hostname.replace(/^www\./, ''); } catch { return b.id; }
+    }));
+    const seenNames = new Set(existing.map(b => b.name.trim().toLowerCase()));
+    let added = 0;
+
+    for (const tpl of templates) {
+      if (opts?.signal?.aborted || added >= 15) break;
+      // v6.9.48b: Brave blocks browser CORS (preflight → 405), so the search
+      // runs server-side via the Supabase Brave proxy (token in Vault).
+      const q = tpl
+        .replace('{city}', ctx?.cityEn || '')
+        .replace('{catNative}', catNative)
+        .replace(/\{tld\}/g, tld);
+      opts?.onProgress?.(`Searching the web for more ${getCategoryLabel(cat)} businesses…`);
+      try {
+        const start = await supabaseRpc<{ rid?: number; error?: string }>('rpc_brave_start', { p_query: q }, 15000);
+        if (!start?.rid) { if (start?.error) engineNoteFail('brave', 'Brave', 'net', `proxy: ${start.error}`); break; }
+        const rid = start.rid;
+        let data: any = null;
+        for (let i = 0; i < 10; i++) {
+          if (opts?.signal?.aborted) break;
+          if (i > 0) await abortableWait(1500);
+          const poll = await supabaseRpc<{ state: string; data?: any; error?: string }>('rpc_brave_poll', { p_rid: rid }, 15000);
+          if (!poll) break;
+          if (poll.state === 'done') { data = poll.data; break; }
+          if (poll.state === 'failed') { braveNoteFail('net', `proxy: ${poll.error || 'failed'}`); break; }
+        }
+        if (!data) continue;
+        const rawResults = (data.web?.results || []).length;
+        rawTotal += rawResults;
+        for (const res of (data.web?.results || [])) {
+          if (added >= 15) break;
+          const url: string = res.url || '';
+          if (!url || !/^https?:\/\//i.test(url)) { bump('bad-url'); continue; }
+          const host = (() => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } })();
+          if (!host) { bump('bad-url'); continue; }
+          if (SUPP_DIRECTORY_HOSTS.test(host) || SUPP_DIRECTORY_HOSTS2.test(host)) { bump('directory-host'); continue; }
+          if (SUPP_PROFESSION_PORTAL.test(host) || SUPP_INSTITUTIONAL.test(host)) { bump('registry-host'); continue; }
+          if (seenHosts.has(host)) { bump('duplicate'); continue; }
+          // v6.9.48c: small-city queries return mostly DIRECTORY pages
+          // (madloba.info/en/batumi/accounting…, taxravens.com/en/accountant/…).
+          // A real firm's site never carries the CITY in its path — reject
+          // those. (The country token alone is normal on country sites, so it
+          // is only used as a soft signal, not a hard drop.)
+          let path = '';
+          try { path = new URL(url).pathname.toLowerCase(); } catch { path = ''; }
+          const citySlug = (ctx?.cityEn || '').toLowerCase();
+          if (citySlug && path.includes(citySlug)) { bump('city-in-path'); continue; }
+          if (SUPP_DIRECTORY_PATHS.test(path)) { bump('registry-path'); continue; }
+          if (/\/(directory|listings?|catalog|catalogues?|companies|company-directory|firms?|agencies|business-directory|categories|category|browse|search|find|local|yellow[_-]?pages?|yp|legal-assistance|embassy)\//.test(path)) { bump('listing-path'); continue; }
+          const titleLc = (res.title || '').toLowerCase();
+          // Title must look like a firm, not a listing page: reject plural
+          // roundups, "top N", "list of", "companies in <city>".
+          if (/(\btop \d|\bbest \d|\blist of|\ddirectory|\bcompanies in\b|\bfirms in\b|\bagencies in\b|\bservices in\b)/i.test(titleLc)) { bump('generic-title'); continue; }
+          if (/\b(companies|firms|agencies|specialists|professionals)\b/i.test(titleLc) && !/\b(llc|ltd|inc|gmbh|group|partners|associates|studio|solutions)\b/i.test(titleLc)) { bump('plural-title'); continue; }
+          let name = suppExtractName(res.title || '', url);
+          // A long title is a page headline, not a brand → use the domain.
+          if (name.length > 40) name = suppBrandFromHost(host) || name.slice(0, 40);
+          if (!name || name.length < 3) { bump('no-name'); continue; }
+          if (seenNames.has(name.toLowerCase())) { bump('duplicate-name'); continue; }
+          // Approximate pin: deterministic per-domain hash → ±2km around the
+          // city center so pins are spread, stable across rescans, and not
+          // stacked on one spot.
+          let h = 0;
+          for (let i = 0; i < host.length; i++) h = (h * 31 + host.charCodeAt(i)) >>> 0;
+          const lat = cityLat + (((h >>> 8) % 400) - 200) / 100000; // ±0.002°
+          const lon = cityLon + ((h % 400) - 200) / 100000;
+          seenHosts.add(host);
+          seenNames.add(name.toLowerCase());
+          existing.push({
+            id: `supp/${cat}/${h.toString(36)}`,
+            name,
+            lat, lon,
+            category: cat,
+            categoryLabel: getCategoryLabel(cat),
+            address: `${ctx?.cityEn || ''} · found on the web${res.description ? '' : ''}`.trim(),
+            phone: '',
+            website: url,
+            email: '',
+            brand: '',
+            cuisine: '',
+            facebook: '',
+            instagram: '',
+            linkedin: '',
+            youtube: '',
+            tiktok: '',
+            rating: 0,
+            reviewCount: 0,
+            hours: '',
+            twitter: '',
+            pinterest: '',
+            supplemented: true,
+          });
+          added++;
+        }
+      } catch { /* network fail — try next template */ }
+      await abortableWait(600);
+    }
+    if (added > 0) {
+      merged.set(cat, existing);
+      supplementTotal += added;
+      opts?.onProgress?.(`Web supplement: +${added} ${getCategoryLabel(cat)} businesses from company websites`);
+    }
+  }
+  if (opts?.onProgress && rawTotal > 0) {
+    const why = Object.entries(drops).sort((a, b) => b[1] - a[1]).slice(0, 3)
+      .map(([k, v]) => `${v} ${k}`).join(', ');
+    opts.onProgress(`Web supplement: ${rawTotal} web results → ${supplementTotal} new businesses${why ? ` (dropped: ${why})` : ''}.`);
   }
   return merged;
 }
