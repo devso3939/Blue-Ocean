@@ -14,6 +14,261 @@
 import { parsePhoneNumberFromString, AsYouType } from 'libphonenumber-js';
 // Native-language scan context (country → language/ccTLD/category terms)
 import { setScanContext, getScanContext, buildScanContext, categoryInNative, countryTld, contactTermsNative, type ScanContext } from './lang';
+async function scrapeWordPressAPI(b: Business): Promise<void> {
+  if (!b.website || (b.email && b.phone)) return;
+  const base = b.website.replace(/\/$/, '');
+  const JUNK = /example\.com|wixpress|sentry|googleapis|google\.com|cloudflare|schema\.org/i;
+  const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
+
+  const endpoints = ['/wp-json/', '/wp-json/wp/v2/users', '/wp-json/wp/v2/pages'];
+  for (const ep of endpoints) {
+    if (b.email && b.phone) break;
+    try {
+      const r = await corsFetch(base + ep, {
+        signal: AbortSignal.timeout(4000),
+        headers: { 'Accept': 'application/json' },
+      });
+      if (!r.ok) continue;
+      const text = await r.text();
+      // Extract emails
+      if (!b.email) {
+        const emails = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+        if (emails) {
+          for (const e of emails) {
+            const clean = e.replace(/[\s>);]+$/, '');
+            if (!JUNK.test(clean) && !EMAIL_FILE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
+          }
+        }
+      }
+      // Extract phones
+      if (!b.phone) {
+        const phones = text.match(/\+?[\d][\d\s\-\.()]{7,18}/g);
+        if (phones) {
+          for (const p of phones) {
+            // v6.9.50: plausiblePhone rejects ISO dates ("2022-08-04"), IP-like
+            // runs and timestamp digit-runs — WP JSON is full of all three.
+            if (p.replace(/[^\d+]/g, '').length >= 8 && p.replace(/[^\d+]/g, '').length <= 15 && plausiblePhone(p)) {
+              b.phone = p.trim(); break;
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+}
+
+// --- v6.9.50: HOISTED out of queryBusinesses (were nested by an earlier scripted patch,
+// invisible to supplementProServices; no closure dependencies, safe to hoist) ---
+
+async function enrichFromWebsiteDeep(b: Business): Promise<void> {
+  if (!b.website) return;
+  const EXCLUDE = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com/i;
+
+  async function deepScrape(url: string): Promise<boolean> {
+    // Contact-fill snapshot: did this fetch change any field?
+    const snapDS = () => [b.email, b.phone, b.facebook, b.instagram, b.website].join('|');
+    const beforeDS = snapDS();
+    try {
+      // v6.9.5: route through corsFetch directly — its host-keyed direct
+      // fetch already covers CORS-open hosts, and business websites reject
+      // CORS far more often than they allow it, so direct-first just paid
+      // one unavoidable console error per host-path for no gain.
+      const r = await corsFetch(url, { signal: AbortSignal.timeout(5000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
+      if (!r.ok) return false;
+      const html = await r.text();
+      const full = html.substring(0, 80000);
+
+      // 1. JSON-LD structured data extraction (schema.org/LocalBusiness)
+      if (!b.phone || !b.email || !b.website) {
+        const jsonLdBlocks = full.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi);
+        for (const match of jsonLdBlocks) {
+          try {
+            const data = JSON.parse(match[1]);
+            const entities = Array.isArray(data) ? data : [data];
+            for (const entity of entities) {
+              const types = Array.isArray(entity['@type']) ? entity['@type'] : [entity['@type']];
+              if (types.some((t: string) => /LocalBusiness|Restaurant|Bar|Cafe|Store|Hotel|Organization/i.test(t || ''))) {
+                if (!b.phone && entity.telephone) {
+                  const digits = String(entity.telephone).replace(/\D/g, '');
+                  if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(String(entity.telephone))) b.phone = String(entity.telephone).trim();
+                }
+                if (!b.email && entity.email) b.email = entity.email;
+                if (!b.website && entity.url && !EXCLUDE.test(entity.url) && isLikelyBusinessWebsite(entity.url, b.name)) b.website = entity.url;
+                if (!b.facebook && entity.sameAs) {
+                  const sameAs = Array.isArray(entity.sameAs) ? entity.sameAs : [entity.sameAs];
+                  for (const s of sameAs) {
+                    if (typeof s === 'string') {
+                      if (/facebook\.com/i.test(s) && !b.facebook) b.facebook = s;
+                      if (/instagram\.com/i.test(s) && !b.instagram) b.instagram = s;
+                    }
+                  }
+                }
+                if (entity.address && !b.address) {
+                  const a = entity.address;
+                  if (typeof a === 'string') b.address = a;
+                  else if (a.streetAddress) b.address = [a.streetAddress, a.addressLocality, a.addressRegion].filter(Boolean).join(', ');
+                }
+              }
+            }
+          } catch {}
+        }
+      }
+
+      // 2. Open Graph meta tags
+      if (!b.email || !b.phone) {
+        const ogTags = full.matchAll(/<meta[^>]*(?:property|name)="(og:[^"]+)"[^>]*content="([^"]*)"/gi);
+        for (const m of ogTags) {
+          const prop = m[1].toLowerCase();
+          const val = m[2];
+          if (!b.email && prop === 'og:email') { b.email = val.replace('mailto:', ''); }
+          if (!b.phone && prop === 'og:phone') {
+            const digits = val.replace(/\D/g, '');
+            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(val)) b.phone = val.trim();
+          }
+        }
+      }
+
+      // 3. Phone from tel: links or structured text
+      if (!b.phone) {
+        const telMatch = full.match(/href="tel:([^"]+)"/);
+        if (telMatch && plausiblePhone(telMatch[1])) b.phone = telMatch[1].trim();
+        else {
+          // Look for phone in structured areas (footer, header, contact section)
+          const phoneText = full.match(/\+?[\d][\d\s\-\.()]{7,18}/g);
+          if (phoneText) {
+            for (const p of phoneText) {
+              // v6.9.50: plausiblePhone kills dates, IPs and timestamp runs
+              if (p.replace(/[^\d+]/g, '').length >= 8 && p.replace(/[^\d+]/g, '').length <= 15 && plausiblePhone(p)) {
+                b.phone = p.trim(); break;
+              }
+            }
+          }
+        }
+      }
+
+      // 4. Email — multiple strategies
+      if (!b.email) {
+        // a. mailto: links
+        const mailtoMatch = full.match(/href="mailto:([^"?\s]+)/i);
+        if (mailtoMatch && !EXCLUDE.test(mailtoMatch[1])) b.email = mailtoMatch[1].trim();        // b. email in text
+        if (!b.email) {
+          const emails = full.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+          if (emails) {
+            for (const e of emails) {
+              const clean = e.replace(/[\s>);]+$/, '');
+              // v6.9.50: reject asset filenames masquerading as emails
+              // (finance-software-slider-225x225@2x.png) via the same
+              // file-extension rule the WordPress scraper uses.
+              if (!EXCLUDE.test(clean) && !_EMAIL_FILE_RE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break;
+              }
+            }
+          }
+        }
+        // c. Cloudflare encoded emails
+        if (!b.email) {
+          const encoded = full.match(/data-cfemail="([a-f0-9]+)"/i);
+          if (encoded) {
+            try {
+              const bytes = encoded[1].match(/.{2}/g)!.map(h => parseInt(h, 16));
+              const key = bytes[0];
+              const decoded = bytes.slice(1).map(b => b ^ key).map(b => String.fromCharCode(b)).join('');
+              if (decoded.includes('@') && !EXCLUDE.test(decoded)) b.email = decoded;
+            } catch {}
+          }
+        }
+        // d. Encoded with &#64; (HTML entity for @)
+        if (!b.email) {
+          const encodedAt = full.match(/([a-zA-Z0-9._%+-]+)&#64;([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+          if (encodedAt && !EXCLUDE.test(encodedAt[0])) b.email = encodedAt[1] + '@' + encodedAt[2];
+        }
+      }
+
+      // 5. Facebook — multiple patterns
+      if (!b.facebook) {
+        const fbPatterns = [
+          /facebook\.com\/([a-zA-Z0-9._]+)/i,
+          /fb\.com\/([a-zA-Z0-9._]+)/i,
+          /facebook\.com\/pages\/[^/]+\/(\d+)/i,
+        ];
+        for (const pat of fbPatterns) {
+          const m = full.match(pat);
+          if (m && !m[0].includes('login') && !m[0].includes('sharer') && !m[0].includes('dialog')) {
+            b.facebook = 'https://facebook.com/' + m[1].replace(/\/$/, '');
+            break;
+          }
+        }
+      }
+
+      // 6. Instagram
+      if (!b.instagram) {
+        const igMatch = full.match(/instagram\.com\/([a-zA-Z0-9._]+)/i);
+        if (igMatch && !igMatch[0].includes('accounts') && !igMatch[0].includes('explore')) {
+          b.instagram = 'https://instagram.com/' + igMatch[1].replace(/\/$/, '');
+        }
+      }
+
+      // 7. YouTube channel link — dedicated social field, NEVER b.website
+      if (!b.youtube) {
+        const ytMatch = full.match(/youtube\.com\/(?:channel\/([^"\s&]+)|@([a-zA-Z0-9._-]+))/i);
+        if (ytMatch) {
+          const ytUrl = ytMatch[1] ? 'https://youtube.com/channel/' + ytMatch[1] : 'https://youtube.com/@' + ytMatch[2];
+          b.youtube = ytUrl;
+        }
+      }
+
+      // 8. TikTok link
+      if (!b.tiktok) {
+        const ttMatch = full.match(/tiktok\.com\/@([a-zA-Z0-9._]+)/i);
+        if (ttMatch && !ttMatch[0].includes('login')) {
+          b.tiktok = 'https://tiktok.com/@' + ttMatch[1];
+        }
+      }
+
+      // 9. Extract social links from href attributes (comprehensive)
+      const allHrefs = [...full.matchAll(/href="([^"]+)"/gi)].map(m => m[1]);
+      for (const href of allHrefs) {
+        if (!b.facebook && /facebook\.com\/[^/]+/i.test(href) && !href.includes('login') && !href.includes('sharer')) {
+          const fbM = href.match(/facebook\.com\/([a-zA-Z0-9._]+)/i);
+          if (fbM) b.facebook = 'https://facebook.com/' + fbM[1];
+        }
+        if (!b.instagram && /instagram\.com\/[^/]+/i.test(href) && !href.includes('accounts')) {
+          const igM2 = href.match(/instagram\.com\/([a-zA-Z0-9._]+)/i);
+          if (igM2) b.instagram = 'https://instagram.com/' + igM2[1];
+        }
+        if (!b.email && /^mailto:/i.test(href)) {
+          const emailAddr = href.replace(/^mailto:/i, '').split('?')[0].trim();
+          if (emailAddr.includes('@') && !EXCLUDE.test(emailAddr)) b.email = emailAddr;
+        }
+      }
+    } catch {}
+    return snapDS() !== beforeDS;
+  }
+
+  // Scrape main page
+  await deepScrape(b.website);
+
+  // Scrape contact/about pages if still missing data
+  if (!b.email || !b.phone || !b.facebook || !b.instagram) {
+    const base = b.website.replace(/\/$/, '');
+    const paths = ['/contact', '/contact-us', '/about', '/about-us', '/kontakti', '/kontakt',
+                   '/contacte', '/team', '/info', '/impressum', '/locations', '/find-us',
+                   '/where-to-find-us', '/reach-us', '/get-in-touch',
+                   '/kontaktay', '/kavshiri', '/momkhmarebeli', '/tsmrunebi',
+                   '/contactos', '/contato', '/联系我们', '/お問い合わせ', '/اتصل بنا', '/написать-нам'];
+    let deadPaths = 0; // consecutive probes that yielded nothing
+    for (const path of paths) {
+      if (b.email && b.phone && b.facebook) break;
+      // Host went network-dead mid-loop: bail out (circuit breaker)
+      if (hostIsOpen(base)) break;
+      const touched = await deepScrape(base + path);
+      // A site that answers 6 straight probes with nothing (dead host,
+      // 404 SPA fallback, or hard-CORS) won't answer the remaining 18
+      // either — stop instead of spraying 18 more failing requests.
+      if (!touched) { deadPaths++; if (deadPaths >= 6) break; } else { deadPaths = 0; }
+    }
+  }
+}
+
 export type { ScanContext };
 export { setScanContext, buildScanContext };
 
@@ -2820,254 +3075,8 @@ async function enrichFromSocialPlatforms(businesses: Business[], onProgress?: (p
 
 
 // ─── Enhanced Website Scraper (JSON-LD, OpenGraph, deep contact) ──
-async function enrichFromWebsiteDeep(b: Business): Promise<void> {
-  if (!b.website) return;
-  const EXCLUDE = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com/i;
-
-  async function deepScrape(url: string): Promise<boolean> {
-    // Contact-fill snapshot: did this fetch change any field?
-    const snapDS = () => [b.email, b.phone, b.facebook, b.instagram, b.website].join('|');
-    const beforeDS = snapDS();
-    try {
-      // v6.9.5: route through corsFetch directly — its host-keyed direct
-      // fetch already covers CORS-open hosts, and business websites reject
-      // CORS far more often than they allow it, so direct-first just paid
-      // one unavoidable console error per host-path for no gain.
-      const r = await corsFetch(url, { signal: AbortSignal.timeout(5000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
-      if (!r.ok) return false;
-      const html = await r.text();
-      const full = html.substring(0, 80000);
-
-      // 1. JSON-LD structured data extraction (schema.org/LocalBusiness)
-      if (!b.phone || !b.email || !b.website) {
-        const jsonLdBlocks = full.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi);
-        for (const match of jsonLdBlocks) {
-          try {
-            const data = JSON.parse(match[1]);
-            const entities = Array.isArray(data) ? data : [data];
-            for (const entity of entities) {
-              const types = Array.isArray(entity['@type']) ? entity['@type'] : [entity['@type']];
-              if (types.some((t: string) => /LocalBusiness|Restaurant|Bar|Cafe|Store|Hotel|Organization/i.test(t || ''))) {
-                if (!b.phone && entity.telephone) {
-                  const digits = String(entity.telephone).replace(/\D/g, '');
-                  if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(String(entity.telephone))) b.phone = String(entity.telephone).trim();
-                }
-                if (!b.email && entity.email) b.email = entity.email;
-                if (!b.website && entity.url && !EXCLUDE.test(entity.url) && isLikelyBusinessWebsite(entity.url, b.name)) b.website = entity.url;
-                if (!b.facebook && entity.sameAs) {
-                  const sameAs = Array.isArray(entity.sameAs) ? entity.sameAs : [entity.sameAs];
-                  for (const s of sameAs) {
-                    if (typeof s === 'string') {
-                      if (/facebook\.com/i.test(s) && !b.facebook) b.facebook = s;
-                      if (/instagram\.com/i.test(s) && !b.instagram) b.instagram = s;
-                    }
-                  }
-                }
-                if (entity.address && !b.address) {
-                  const a = entity.address;
-                  if (typeof a === 'string') b.address = a;
-                  else if (a.streetAddress) b.address = [a.streetAddress, a.addressLocality, a.addressRegion].filter(Boolean).join(', ');
-                }
-              }
-            }
-          } catch {}
-        }
-      }
-
-      // 2. Open Graph meta tags
-      if (!b.email || !b.phone) {
-        const ogTags = full.matchAll(/<meta[^>]*(?:property|name)="(og:[^"]+)"[^>]*content="([^"]*)"/gi);
-        for (const m of ogTags) {
-          const prop = m[1].toLowerCase();
-          const val = m[2];
-          if (!b.email && prop === 'og:email') { b.email = val.replace('mailto:', ''); }
-          if (!b.phone && prop === 'og:phone') {
-            const digits = val.replace(/\D/g, '');
-            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(val)) b.phone = val.trim();
-          }
-        }
-      }
-
-      // 3. Phone from tel: links or structured text
-      if (!b.phone) {
-        const telMatch = full.match(/href="tel:([^"]+)"/);
-        if (telMatch) b.phone = telMatch[1].trim();
-        else {
-          // Look for phone in structured areas (footer, header, contact section)
-          const phoneText = full.match(/\+?[\d][\d\s\-\.()]{7,18}/g);
-          if (phoneText) {
-            for (const p of phoneText) {
-              if (p.replace(/[^\d+]/g, '').length >= 8 && p.replace(/[^\d+]/g, '').length <= 15) {
-                b.phone = p.trim(); break;
-              }
-            }
-          }
-        }
-      }
-
-      // 4. Email — multiple strategies
-      if (!b.email) {
-        // a. mailto: links
-        const mailtoMatch = full.match(/href="mailto:([^"?\s]+)/i);
-        if (mailtoMatch && !EXCLUDE.test(mailtoMatch[1])) b.email = mailtoMatch[1].trim();
-        // b. email in text
-        if (!b.email) {
-          const emails = full.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
-          if (emails) {
-            for (const e of emails) {
-              const clean = e.replace(/[\s>);]+$/, '');
-              if (!EXCLUDE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
-            }
-          }
-        }
-        // c. Cloudflare encoded emails
-        if (!b.email) {
-          const encoded = full.match(/data-cfemail="([a-f0-9]+)"/i);
-          if (encoded) {
-            try {
-              const bytes = encoded[1].match(/.{2}/g)!.map(h => parseInt(h, 16));
-              const key = bytes[0];
-              const decoded = bytes.slice(1).map(b => b ^ key).map(b => String.fromCharCode(b)).join('');
-              if (decoded.includes('@') && !EXCLUDE.test(decoded)) b.email = decoded;
-            } catch {}
-          }
-        }
-        // d. Encoded with &#64; (HTML entity for @)
-        if (!b.email) {
-          const encodedAt = full.match(/([a-zA-Z0-9._%+-]+)&#64;([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
-          if (encodedAt && !EXCLUDE.test(encodedAt[0])) b.email = encodedAt[1] + '@' + encodedAt[2];
-        }
-      }
-
-      // 5. Facebook — multiple patterns
-      if (!b.facebook) {
-        const fbPatterns = [
-          /facebook\.com\/([a-zA-Z0-9._]+)/i,
-          /fb\.com\/([a-zA-Z0-9._]+)/i,
-          /facebook\.com\/pages\/[^/]+\/(\d+)/i,
-        ];
-        for (const pat of fbPatterns) {
-          const m = full.match(pat);
-          if (m && !m[0].includes('login') && !m[0].includes('sharer') && !m[0].includes('dialog')) {
-            b.facebook = 'https://facebook.com/' + m[1].replace(/\/$/, '');
-            break;
-          }
-        }
-      }
-
-      // 6. Instagram
-      if (!b.instagram) {
-        const igMatch = full.match(/instagram\.com\/([a-zA-Z0-9._]+)/i);
-        if (igMatch && !igMatch[0].includes('accounts') && !igMatch[0].includes('explore')) {
-          b.instagram = 'https://instagram.com/' + igMatch[1].replace(/\/$/, '');
-        }
-      }
-
-      // 7. YouTube channel link — dedicated social field, NEVER b.website
-      if (!b.youtube) {
-        const ytMatch = full.match(/youtube\.com\/(?:channel\/([^"\s&]+)|@([a-zA-Z0-9._-]+))/i);
-        if (ytMatch) {
-          const ytUrl = ytMatch[1] ? 'https://youtube.com/channel/' + ytMatch[1] : 'https://youtube.com/@' + ytMatch[2];
-          b.youtube = ytUrl;
-        }
-      }
-
-      // 8. TikTok link
-      if (!b.tiktok) {
-        const ttMatch = full.match(/tiktok\.com\/@([a-zA-Z0-9._]+)/i);
-        if (ttMatch && !ttMatch[0].includes('login')) {
-          b.tiktok = 'https://tiktok.com/@' + ttMatch[1];
-        }
-      }
-
-      // 9. Extract social links from href attributes (comprehensive)
-      const allHrefs = [...full.matchAll(/href="([^"]+)"/gi)].map(m => m[1]);
-      for (const href of allHrefs) {
-        if (!b.facebook && /facebook\.com\/[^/]+/i.test(href) && !href.includes('login') && !href.includes('sharer')) {
-          const fbM = href.match(/facebook\.com\/([a-zA-Z0-9._]+)/i);
-          if (fbM) b.facebook = 'https://facebook.com/' + fbM[1];
-        }
-        if (!b.instagram && /instagram\.com\/[^/]+/i.test(href) && !href.includes('accounts')) {
-          const igM2 = href.match(/instagram\.com\/([a-zA-Z0-9._]+)/i);
-          if (igM2) b.instagram = 'https://instagram.com/' + igM2[1];
-        }
-        if (!b.email && /^mailto:/i.test(href)) {
-          const emailAddr = href.replace(/^mailto:/i, '').split('?')[0].trim();
-          if (emailAddr.includes('@') && !EXCLUDE.test(emailAddr)) b.email = emailAddr;
-        }
-      }
-    } catch {}
-    return snapDS() !== beforeDS;
-  }
-
-  // Scrape main page
-  await deepScrape(b.website);
-
-  // Scrape contact/about pages if still missing data
-  if (!b.email || !b.phone || !b.facebook || !b.instagram) {
-    const base = b.website.replace(/\/$/, '');
-    const paths = ['/contact', '/contact-us', '/about', '/about-us', '/kontakti', '/kontakt',
-                   '/contacte', '/team', '/info', '/impressum', '/locations', '/find-us',
-                   '/where-to-find-us', '/reach-us', '/get-in-touch',
-                   '/kontaktay', '/kavshiri', '/momkhmarebeli', '/tsmrunebi',
-                   '/contactos', '/contato', '/联系我们', '/お問い合わせ', '/اتصل بنا', '/написать-нам'];
-    let deadPaths = 0; // consecutive probes that yielded nothing
-    for (const path of paths) {
-      if (b.email && b.phone && b.facebook) break;
-      // Host went network-dead mid-loop: bail out (circuit breaker)
-      if (hostIsOpen(base)) break;
-      const touched = await deepScrape(base + path);
-      // A site that answers 6 straight probes with nothing (dead host,
-      // 404 SPA fallback, or hard-CORS) won't answer the remaining 18
-      // either — stop instead of spraying 18 more failing requests.
-      if (!touched) { deadPaths++; if (deadPaths >= 6) break; } else { deadPaths = 0; }
-    }
-  }
-}
-
 // ─── WordPress REST API Scraper ────────────────────────────────
 // WordPress sites expose contact info via /wp-json/wp/v2/users and /wp-json/
-async function scrapeWordPressAPI(b: Business): Promise<void> {
-  if (!b.website || (b.email && b.phone)) return;
-  const base = b.website.replace(/\/$/, '');
-  const JUNK = /example\.com|wixpress|sentry|googleapis|google\.com|cloudflare|schema\.org/i;
-  const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
-
-  const endpoints = ['/wp-json/', '/wp-json/wp/v2/users', '/wp-json/wp/v2/pages'];
-  for (const ep of endpoints) {
-    if (b.email && b.phone) break;
-    try {
-      const r = await corsFetch(base + ep, {
-        signal: AbortSignal.timeout(4000),
-        headers: { 'Accept': 'application/json' },
-      });
-      if (!r.ok) continue;
-      const text = await r.text();
-      // Extract emails
-      if (!b.email) {
-        const emails = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
-        if (emails) {
-          for (const e of emails) {
-            const clean = e.replace(/[\s>);]+$/, '');
-            if (!JUNK.test(clean) && !EMAIL_FILE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
-          }
-        }
-      }
-      // Extract phones
-      if (!b.phone) {
-        const phones = text.match(/\+?[\d][\d\s\-\.()]{7,18}/g);
-        if (phones) {
-          for (const p of phones) {
-            if (p.replace(/[^\d+]/g, '').length >= 8 && p.replace(/[^\d+]/g, '').length <= 15) {
-              b.phone = p.trim(); break;
-            }
-          }
-        }
-      }
-    } catch {}
-  }
-}
-
 // ─── Sitemap Scraper ────────────────────────────────────────────
 // Parse sitemap.xml to find contact/about pages, then scrape them
 async function scrapeSitemapForContacts(b: Business): Promise<void> {
@@ -6697,6 +6706,11 @@ function suppExtractName(title: string, url: string): string {
   if (!name || /^(account|consult|law|legal|real estate|bookkeep|software|it |best|top \d)/i.test(name)) {
     name = '';
   }
+  // v6.9.50: generic page titles ("Home Page", "Contact", "About us") are
+  // navigation pages, not brands — same fallback to the domain brand.
+  if (/^(home|home ?page|homepage|contact( us)?|about( us)?|welcome|main page|index|services?|our (team|company|services))$/i.test(name)) {
+    name = '';
+  }
   if (!name) {
     try {
       // v6.9.48e: was parts[len-2], which yields "Com" for every *.com.ge
@@ -6849,6 +6863,40 @@ export async function supplementProServices(
       merged.set(cat, existing);
       supplementTotal += added;
       opts?.onProgress?.(`Web supplement: +${added} ${getCategoryLabel(cat)} businesses from company websites`);
+      // ── v6.9.50: enrich immediately from each firm's own website ──────
+      // Web-found firms arrive with a URL but empty contacts. Per the scan
+      // principle (v6.9.16): the firm's site → contact page is the #1 source
+      // of phone/email — do it NOW so results show contacts without needing
+      // a separate Enrich Contacts run. Reuses the proven scrapers.
+      const newlyAdded = existing.slice(-added).filter(b => b.supplemented && b.website);
+      if (newlyAdded.length > 0) {
+        opts?.onProgress?.(`Checking ${newlyAdded.length} new websites for phones & emails…`);
+        const BUDGET_MS = 60_000; // hard stop — dead sites can't stall the scan
+        const t0 = Date.now();
+        const CONC = 6;
+        for (let i = 0; i < newlyAdded.length; i += CONC) {
+          if (opts?.signal?.aborted || Date.now() - t0 > BUDGET_MS) break;
+          const batch = newlyAdded.slice(i, i + CONC);
+          await Promise.all(batch.map(async (b) => {
+            try {
+              await enrichFromWebsiteDeep(b); // JSON-LD → tel:/mailto: → multilingual contact pages
+              if (!b.email || !b.phone) { try { await scrapeWordPressAPI(b); } catch {} }
+            } catch { /* single site failing must never break the scan */ }
+          }));
+          await abortableWait(150);
+        }
+        let gotPhone = 0, gotEmail = 0;
+        for (const b of newlyAdded) {
+          // v6.9.50: final validation sweep — anything the extractors let
+          // through that fails plausibility is dropped, never displayed.
+          if (b.phone && !plausiblePhone(b.phone)) b.phone = '';
+          if (b.email && !plausibleEmail(b.email)) b.email = '';
+          if (b.phone) gotPhone++; if (b.email) gotEmail++;
+        }
+        if (gotPhone + gotEmail > 0) {
+          opts?.onProgress?.(`Websites yielded ${gotPhone} phones, ${gotEmail} emails across ${newlyAdded.length} new firms.`);
+        }
+      }
     }
   }
   if (opts?.onProgress && rawTotal > 0) {
@@ -7180,6 +7228,11 @@ function plausiblePhone(p: string): boolean {
   // bare 1-prefixed 10-13 digit runs without + are usually timestamps/IDs
   // (real international numbers in our regions carry +995/+374/+90/+7)
   if (/^1\d{9,12}$/.test(digits) && !t.startsWith('+')) return false;
+  // v6.9.50: a NAKED digit run (no separators BETWEEN digits, no leading +)
+  // of ≤10 digits is an ID/timestamp fragment ("12946800", "795560990"),
+  // not a phone — real local numbers carry formatting or a country +.
+  const core = t.replace(/^[^\d]+/, '').replace(/[^\d]+$/, '');
+  if (!t.startsWith('+') && !/[()\s\-.]/.test(core) && digits.length <= 10) return false;
   return true;
 }
 
@@ -7203,6 +7256,11 @@ export function plausibleEmail(e: string): boolean {
   // Local part: no leading/trailing dot, no consecutive dots
   if (local.startsWith('.') || local.endsWith('.') || local.includes('..')) return false;
   if (!/^[a-z0-9._%+-]+$/.test(local)) return false;
+  // v6.9.50: URL-encoding artifacts ("%22@abcg.ge") are fragment debris,
+  // not addresses — %/encoding in the local part is always junk.
+  if (/%[0-9a-f]{2}/i.test(local) || /%/.test(local)) return false;
+  // Pure-digit locals ("12946800@site") are IDs, not people.
+  if (/^\d+$/.test(local)) return false;
   // Junk senders/roles that regexes commonly harvest from footers
   if (_EMAIL_JUNK_RE.test(v)) return false;
   return true;
