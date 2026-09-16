@@ -6538,7 +6538,9 @@ export async function rescanWideNet(
       opts?.onProgress?.(`Re-checking ${getCategoryLabel(cat)} with a wider search…`);
       const d = await fetchOverpass(q, 30);
       if (!d?.elements) continue;
-      const existing = merged.get(cat) || [];
+      // v6.9.49: clone — `new Map()` shares the inner arrays, so pushing here
+      // also grew the CALLER's map and made its before/after delta read as 0.
+      const existing = [...(merged.get(cat) || [])];
       const seenIds = new Set(existing.map(b => b.id));
       const seenLocs = new Set(existing.map(b => `${Math.round(b.lat * 1000)},${Math.round(b.lon * 1000)}`));
       let added = 0;
@@ -6737,7 +6739,11 @@ export async function supplementProServices(
     if (opts?.signal?.aborted) break;
     const templates = SUPP_QUERIES[cat];
     if (!templates) continue;
-    const existing = merged.get(cat) || [];
+    // v6.9.49: clone the bucket. `new Map(businesses)` copies the map but the
+    // arrays inside stay SHARED — pushing into them silently grew the caller's
+    // own map too, which made "did the supplement add anything?" always false
+    // (callers compared the same array before and after).
+    const existing = [...(merged.get(cat) || [])];
     if (existing.length >= 25) continue; // only genuinely thin categories
     const catNative = ctx ? categoryInNative(cat, getCategoryLabel(cat)) : getCategoryLabel(cat);
     const seenHosts = new Set(existing.map(b => {

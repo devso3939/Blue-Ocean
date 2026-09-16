@@ -968,12 +968,15 @@ export default function App() {
             if (stillThin.length > 0) {
               try {
                 setLoadingStage('Searching the web for businesses OSM missed…');
+                // Snapshot counts BEFORE the call — the engine returns a new
+                // map, so comparing after it can miss/overstate the delta.
+                const beforeCounts = new Map(Array.from(biz, ([c, arr]) => [c, arr.length]));
                 const supp = await supplementProServices(biz, stillThin, selectedCity.lat, selectedCity.lon, {
                   signal: ac.signal,
                   onProgress: (msg) => setRescanNote(msg),
                 });
                 const suppAdded = Array.from(supp.entries()).reduce((s, [c, arr]) => {
-                  const before = biz.get(c)?.length ?? 0;
+                  const before = beforeCounts.get(c) ?? 0;
                   return s + Math.max(0, arr.length - before);
                 }, 0);
                 biz = supp;
@@ -1161,11 +1164,11 @@ export default function App() {
       if ((biz.get(selectedCategory)?.length ?? 0) < 15 && !ac.signal.aborted) {
         try {
           setLoadingStage('Searching the web for businesses OSM missed…');
+          const sBefore = biz.get(selectedCategory)?.length ?? 0;
           const supp = await supplementProServices(biz, [selectedCategory], selectedCity.lat, selectedCity.lon, {
             signal: ac.signal,
             onProgress: (msg) => setRescanNote(msg),
           });
-          const sBefore = biz.get(selectedCategory)?.length ?? 0;
           const sAfter = supp.get(selectedCategory)?.length ?? 0;
           biz = supp;
           setBusinesses(supp);
@@ -1212,6 +1215,27 @@ export default function App() {
 
   // Businesses for the selected category
   const categoryBusinesses = selectedOppCategory ? (businesses.get(selectedOppCategory) || []) : [];
+
+  // ── v6.9.49: data-source provenance ────────────────────────────────
+  // Every business knows whether OSM found it or the web-registry
+  // supplement did (`supplemented`). Surfacing the split keeps the
+  // numbers honest: a category with 20 from OSM is a very different
+  // signal than one with 3 from OSM + 17 from the web.
+  const sourceSplitOf = (catId: string): { osm: number; web: number } => {
+    const list = businesses.get(catId) || [];
+    let web = 0;
+    for (const b of list) if (b.supplemented) web++;
+    return { osm: list.length - web, web };
+  };
+  const totalSourceSplit = (() => {
+    let osm = 0, web = 0;
+    for (const list of businesses.values()) {
+      for (const b of list) { if (b.supplemented) web++; else osm++; }
+    }
+    return { osm, web };
+  })();
+  const sourceTitle = (s: { osm: number; web: number }) =>
+    `${fmtNum(s.osm)} from OpenStreetMap · ${fmtNum(s.web)} from the web registry supplement`;
   const [bizSearch, setBizSearch] = useState('');
   const [sortCol, setSortCol] = useState<string>('name');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
@@ -2109,7 +2133,14 @@ export default function App() {
             <div className="flex flex-wrap items-center gap-4">
               <h2 className="text-lg font-bold">Opportunities in {selectedCity.name}</h2>
               <div className="flex gap-3 text-xs text-muted-foreground">
-                <span>📊 {fmtNum(allBizCount)} businesses</span>
+                <span title={sourceTitle(totalSourceSplit)}>
+                  📊 {fmtNum(allBizCount)} businesses
+                  {totalSourceSplit.web > 0 && (
+                    <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded-full bg-sky-500/15 text-sky-400 align-middle">
+                      🗺 {fmtNum(totalSourceSplit.osm)} · 🌐 {fmtNum(totalSourceSplit.web)}
+                    </span>
+                  )}
+                </span>
                 {selectedCity.population
                   ? <span>👥 pop. {fmtCompact(selectedCity.population)}</span>
                   : <span className="text-amber-500">⚠ population unknown — gap metrics disabled, ranking by competition & demand</span>}
@@ -2477,7 +2508,11 @@ export default function App() {
                 <div className="rounded-lg bg-muted/50 p-3">
                   <div className="text-xs text-muted-foreground">Existing</div>
                   <div className="text-2xl font-bold">{fmtNum(selectedOpp.existing)}</div>
-                  <div className="text-xs text-muted-foreground">businesses</div>
+                  <div className="text-xs text-muted-foreground">
+                    {sourceSplitOf(selectedOpp.category).web > 0
+                      ? <>🗺 {fmtNum(sourceSplitOf(selectedOpp.category).osm)} OSM · 🌐 {fmtNum(sourceSplitOf(selectedOpp.category).web)} web</>
+                      : 'businesses'}
+                  </div>
                 </div>
                 <div className="rounded-lg bg-muted/50 p-3">
                   <div className="text-xs text-muted-foreground">Per 10k residents</div>
@@ -2522,6 +2557,14 @@ export default function App() {
               <div className="px-5 py-3 border-b border-border flex items-center justify-between gap-4">
                 <h3 className="text-sm font-semibold">
                   {getCategoryLabel(selectedOppCategory)} Businesses · {categoryBusinesses.length} found
+                  {sourceSplitOf(selectedOppCategory).web > 0 && (
+                    <span
+                      className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-sky-500/15 text-sky-400 font-normal align-middle"
+                      title={sourceTitle(sourceSplitOf(selectedOppCategory))}
+                    >
+                      🗺 {fmtNum(sourceSplitOf(selectedOppCategory).osm)} OSM · 🌐 {fmtNum(sourceSplitOf(selectedOppCategory).web)} web
+                    </span>
+                  )}
                 </h3>
                 <div className="flex items-center gap-2 flex-wrap">
                   <input
@@ -2731,7 +2774,7 @@ export default function App() {
                   <tr className="border-b border-border text-xs uppercase tracking-wide text-muted-foreground">
                     <th className="px-5 py-2.5 font-medium">#</th>
                     <th className="px-4 py-2.5 font-medium">Category</th>
-                    <th className="px-4 py-2.5 font-medium text-right">Existing</th>
+                    <th className="px-4 py-2.5 font-medium text-right" title="Counts found by OpenStreetMap, plus a 🌐 badge for firms the web-registry supplement added">Existing</th>
                     <th className="px-4 py-2.5 font-medium text-right">Per 10k</th>
                     <th className="px-4 py-2.5 font-medium text-right">Gap</th>
                     <th className="px-4 py-2.5 font-medium text-right">Demand</th>
@@ -2749,6 +2792,7 @@ export default function App() {
                     const sanityFlag = aiAnalysis?.sanity?.find(s => s.category === opp.category && s.verdict === 'absurd');
                     // v6.9.15: clear badge label + click-to-explain instead of hover-only title
                     const badgeLabel = sanityFlag?.kind === 'high' ? '⚠ too many' : '⚠ low data';
+                    const split = sourceSplitOf(opp.category);
                     return (
                       <tr
                         key={opp.category}
@@ -2770,7 +2814,17 @@ export default function App() {
                             </button>
                           )}
                         </td>
-                        <td className="px-4 py-3 text-right tabular-nums">{fmtNum(opp.existing)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums whitespace-nowrap">
+                          {fmtNum(opp.existing)}
+                          {split.web > 0 && (
+                            <span
+                              className="ml-1.5 inline-block align-middle text-[10px] px-1.5 py-0.5 rounded-full bg-sky-500/15 text-sky-400 font-normal"
+                              title={sourceTitle(split)}
+                            >
+                              🌐{fmtNum(split.web)}
+                            </span>
+                          )}
+                        </td>
                         <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">{opp.per10k}</td>
                         <td className="px-4 py-3 text-right tabular-nums">
                           <span className={opp.gap != null && opp.gap > 0 ? 'text-emerald-400' : 'text-rose-400'}>
