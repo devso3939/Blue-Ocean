@@ -649,6 +649,18 @@ const RX_YOGA = /(yoga|pilates|йога|пилатес|пілатес|یوگا|�
 const RX_DANCE = /((^|[^a-zà-öø-ÿ])(danc|danza|tanz(?!an))|ballet|choreo|танц|балет|хорео|バレエ|ダンス|発レ|발레|댄스|무용|舞蹈|芭蕾|舞踏|رقص|باليه|ריקוד|מחול|नृत्य|เต้น|รำ|ქორეოგრაფი|ცეკვ|պար|salsa|bachata|kizomba|zumba|tango|hip.?hop|breakdance|break.?danc|b\.?boy|flamenco|merengue|cha.?cha|foxtrot|waltz|jazz.?danc|lindy.?hop|street.?danc)/i;
 const RX_MASSAGE = /(massage|masaż|массаж|масаж|masaj|マッサージ|마사지|按摩|推拿|นวด|مساج|تدليك|מסאז|मालिश)/i;
 const RX_SPA = /(spa|спа|สปา|スパ)/i;
+// ── v6.9.47: professional-services name banks ──
+// Tbilisi probe (2026-09-15, city bbox): office=accountant ×0, office=it ×4,
+// office=consulting ×2, office=lawyer ×50, office=estate_agent ×27 — yet the
+// bbox holds 173 NAMED generic offices (office=company/yes). Real accounting,
+// IT, consulting and real-estate firms live there under generic tags, filed
+// by NAME. These banks sub-bucket them in every language the probe languages
+// actually appear in (Georgian, Russian, English, Turkish at minimum).
+const RX_ACC = /(account|audit|bookkeep|buhgalter|buhuchet|бухгалт|аудит|ბუღალტ|აუდიტ|հաշվապա|mühasib|mühasib|muhasebe|denetç|会計|監査|회계|세무|מהנהלת חשבונות|حسابداری|contabil|comptable|bilancio|rachunkow)/i;
+const RX_LAW = /(law|legal|attorney|advokat|advo[cg]at|lawyer|notar|юрис|адвокат|нотари|იურიდ|ადვოკატ|ნოტარ|իրավաբան|փաստաբան|hüquq|hukuk|avukat|noter|法律|弁護士|司法|법률|변호사|משפט|قانوني|jurid|anwalt|kancelaria|avocat|avvocat)/i;
+const RX_ESTATE = /(real.?estate|realty|property|immobili|estate agent|нерухом|недвиж|агентств недвижимости|უძრავ|ქონებ|անշարժ գույք|əmlak|gayrimenkul|emlak|房地产|不動産|부동산|נדל"?ן|عقار|immo|inmobiliaria|kinnisvara|nekilnojam)/i;
+const RX_CONSULT = /(consult|консалт|консульт|კონსალტ|დარგობრივ|խորհրդատ|məsləhət|danışman| consultants|コンサル|컨설팅|ייעוץ|استشارات|konsult|conseil|berat)/i;
+const RX_ITCO = /(software|soft\s|\bit\b|\bIT\b|it company|tech|digital|web|dev|data|\bai\b|cloud|cyber|\bapp\b|სისტემ|პროგრამ|программ|ит-|разработ|ծրագրավոր|proqram|bilişim|yazılım|ソフト|ソフトウェア|システム|소프트|개발|תוכנה|הייטק|برمجة|تكنولوج|szoftver|programmatic)/i;
 // v6.9.24: hostels are misfiled as hotels whenever they carry a generic
 // office/company tag or a hotel-ish tourism tag. Word-boundary guarded so
 // e.g. "Ghostel" doesn't match; covers the languages hostels actually
@@ -949,10 +961,14 @@ export function categorizeBusiness(tags: Record<string, string>): string | null 
       o === 'business' || o === 'services' || o === 'enterprise') {
     // Generic office=company: sub-bucket by name, else 'software' bucket for
     // generic companies (they are overwhelmingly private companies).
+    // v6.9.47: the old inline patterns were English-only — a Georgian
+    // accounting firm (ბუღალტერია), a Russian consulting office (консалтинг)
+    // or a Turkish law office (hukuk) all fell through to 'software',
+    // poisoning that bucket while accountant/it_consulting read as "gaps".
     const nm = nameOf();
-    if (/(law|legal|attorney|advo[ck]at|notar)/.test(nm)) return 'lawyer';
-    if (/(account|buh|finance|audit|tax)/.test(nm)) return 'accountant';
-    if (/(real.?estate|property|immobili)/.test(nm)) return 'real_estate';
+    if (RX_LAW.test(nm)) return 'lawyer';
+    if (RX_ACC.test(nm)) return 'accountant';
+    if (RX_ESTATE.test(nm)) return 'real_estate';
     if (/(insur|strakhov)/.test(nm) || /(insur)/.test(nm)) return 'insurance';
     if (/(travel|tur|tour)/.test(nm)) return 'travel_agency';
     if (/(clean|ubor|cleaning|清扫|청소|تنظيف|temizlik)/.test(nm)) return 'cleaning';
@@ -967,8 +983,10 @@ export function categorizeBusiness(tags: Record<string, string>): string | null 
     if (/(hair|friseur|coiff|kuaf|пари)/i.test(nm)) return 'hair_salon';
     // v6.9.16: word-boundary 'it' — bare substring matched "Italian",
     // "Capital", "Suite" etc. and misfiled them as software.
-    if (/(soft|\bit\b|tech|digital|web|dev|data|\bai\b|cloud|cyber|app)/.test(nm)) return 'software';
-    if (/(consult|консалт)/.test(nm)) return 'it_consulting';
+    // v6.9.47: consulting BEFORE software — "IT Consulting LLC" contains
+    // both; the specific bucket must win. Multilingual banks used.
+    if (RX_CONSULT.test(nm)) return 'it_consulting';
+    if (RX_ITCO.test(nm)) return 'software';
     if (/(market|advertis|reklam|agency|agenc|media|pr\b|brand|design|studio)/.test(nm)) return 'digital_marketing';
     if (/(construct|building|development)/.test(nm)) return 'hardware';
     if (/(logist|transport|delivery|courier)/.test(nm)) return 'courier';
@@ -1022,8 +1040,16 @@ export function categorizeBusiness(tags: Record<string, string>): string | null 
   if (o) return 'software'; // remaining named offices are private companies
 
   // ─── Name-based heuristics for new categories (no office tag) ───
+  // v6.9.47: multilingual professional-services banks — an element tagged
+  // only `name=ბუღალტრის ოფისი` with no office=* tag is still an accounting
+  // firm; the English-only regexes skipped it entirely.
   const nameLower = nameOf();
   if (!o && nameLower) {
+    if (RX_LAW.test(nameLower)) return 'lawyer';
+    if (RX_ACC.test(nameLower)) return 'accountant';
+    if (RX_ESTATE.test(nameLower)) return 'real_estate';
+    if (RX_CONSULT.test(nameLower)) return 'it_consulting';
+    if (RX_ITCO.test(nameLower)) return 'software';
     if (/(law|legal|attorney|advo[ck]at)/.test(nameLower)) return 'lawyer';
     if (/(account|buh|finance|audit)/.test(nameLower)) return 'accountant';
     if (/(real.?estate|property|immobili)/.test(nameLower)) return 'real_estate';
@@ -6612,6 +6638,18 @@ WIDE_NET_KEYWORDS.dance = '["name"~"dance|ballet|танц|балет|舞蹈|ダ�
 // rescues them; overlap with the hotel bucket is impossible because the
 // categorizer's hostel branch runs before the hotel branch.
 WIDE_NET_KEYWORDS.hostel = '["name"~"hostel|hostal|ostello|хостел|ჰოსტელი|ホステル|호스텔|青年旅舍|青旅|ユースホステル|유스호스텔|青年旅社",i]|["tourism"="hostel"]';
+// ── v6.9.47: professional-services rescues ──
+// These five had NO wide-net entries: when Discover under-scanned them (the
+// exact Accounting/IT-Consulting/Software/Real-Estate/Law-Firm story from the
+// Tbilisi v6.9.46 run), the second-chance rescan silently skipped them and
+// the "low data" warning just stayed. Name-keyword banks in the languages
+// the local market actually names these businesses (plus Georgian, since the
+// tag probe showed local-language names dominate generic offices there).
+WIDE_NET_KEYWORDS.accountant = '["name"~"account|audit|bookkeep|buhgalter|бухгалт|аудит|ბუღალტ|აუდიტ|հաշվապա|mühasib|mühasib|muhasebe|denetim|会計|会計事務所|회계|세무|הנהלת חשבונות|محاسبة|contabilit|comptab|rachunkow",i]|["office"~"accountant|tax_advisor|tax|audit|bookkeeping"]';
+WIDE_NET_KEYWORDS.lawyer = '["name"~"law|legal|attorney|advokat|advo[cg]at|notar|юрис|адвокат|нотари|იურიდ|ადვოკატ|ნოტარ|իրավաբան|փաստաբան|hüquq|hukuk|avukat|noter|法律|法律事務所|弁護士|법률|변호사|משפט|محاماة|قانوني|kancelaria|anwalt|avocat|avvocat",i]|["office"~"lawyer|attorney|notary|law"]';
+WIDE_NET_KEYWORDS.real_estate = '["name"~"real.?estate|realty|property|immobili|нерухом|недвиж|უძრავი|ქონებ|անշարժ|əmlak|gayrimenkul|emlak|房地产|不動産|부동산|נדל|عقار|immo|inmobiliaria|kinnisvara",i]|["office"~"estate_agent|real_estate|property_management"]|["shop"="estate_agent"]';
+WIDE_NET_KEYWORDS.it_consulting = '["name"~"consult|консалт|консульт|კონსალტ|խորհրդաტ|məsləhət|danışman|コンサル|컨설팅|ייעוץ|استشارات|konsult|conseil|beratunge|staffing|recruit|hr\b|personnel",i]|["office"~"consulting|business_consulting|it_consulting|management_consulting|employment_agency|staffing"]';
+WIDE_NET_KEYWORDS.software = '["name"~"software|\bit\b|it company|tech|digital|web|dev|data|cloud|cyber|სისტემ|პროგრამ|программ|разработ|ծրագրավոր|proqram|bilişim|yazılım|ソフトウェア|システム|소프트|개발|תוכנה|הייטק|برمجة",i]|["office"~"it|software|computer|it_company|web_design|web_developer|hosting|game_developer|technology"]';
 
 export function getGoogleMapsUrl(b: Business): string {
   if (b.name) {
