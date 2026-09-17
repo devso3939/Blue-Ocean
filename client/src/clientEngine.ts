@@ -2562,7 +2562,10 @@ async function braveSearchViaSupabase(q: string): Promise<{ title: string; url: 
       if (start?.error) engineNoteFail('brave_s', 'Brave (server)', 'net', `proxy: ${start.error}`);
       return null;
     }
-    for (let i = 0; i < 8; i++) {
+    // v6.9.55b: 12 polls × 1.5s = 18s — live testing showed the proxy queue
+    // regularly takes >12s under load (8-poll budget timed out to null and
+    // the lane yielded nothing); the supplement's 10-poll budget works.
+    for (let i = 0; i < 12; i++) {
       if (i > 0) await abortableWait(1500);
       const poll = await supabaseRpc<{ state: string; data?: any; error?: string }>('rpc_brave_poll', { p_rid: start.rid }, 15000);
       if (!poll) break;
