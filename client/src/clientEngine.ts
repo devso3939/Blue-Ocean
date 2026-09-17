@@ -1332,12 +1332,50 @@ export function categorizeBusiness(tags: Record<string, string>): string | null 
  * OSM stores multi-numbers ';'-separated; pass countryCode (e.g. 'GE')
  * so local formats (032 2xx xx xx) resolve correctly.
  */
+// v6.9.53: phone/email fields get MISFILED values too — mappers put an
+// email into phone= and vice versa. Mirrors extractRescueWebsite: real
+// data must be rescued into the right field, not dropped by validation.
+
+// Structural email shape (no TLD dictionary — junk regexes filter later)
+const RX_EMAIL_SHAPE = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
+// Phone: any segment with 7-15 digits (optionally +) is a phone candidate
+const RX_PHONE_SEGMENT = /^\+?[\d\s().-]{7,20}$/;
+
+// Pull a real email out of a phone-ish raw value: whole-value emails
+// ("info@site.ge" in phone=), emails inside mixed lists, or embedded in
+// prose ("Email: info@site.ge"). Substring match covers all three.
+function rescueEmailFromPhoneish(raw: string): string {
+  if (!raw) return '';
+  const m = raw.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
+  return m ? m[0] : '';
+}
+
+// Pull a phone out of an email-ish raw value: emails inside a phone list
+// yield the phone part; prose-wrapped numbers ("call us: 599 66 33 00")
+// are found by substring match. plausiblePhone(light) keeps dates/IPs out.
+function rescuePhoneFromEmailish(raw: string): string {
+  if (!raw) return '';
+  if (RX_EMAIL_SHAPE.test(raw.trim())) return ''; // whole value is an email — nothing to rescue
+  for (const seg of raw.split(/[;,/\n]/)) {
+    const t = seg.trim();
+    if (RX_EMAIL_SHAPE.test(t)) continue; // email segment inside the list
+    for (const m of t.matchAll(/\+?\d[\d\s().-]{6,17}\d/g)) {
+      const digits = m[0].replace(/\D/g, '');
+      if (digits.length >= 7 && digits.length <= 15 && plausiblePhone(m[0], false)) return m[0].trim();
+    }
+  }
+  return '';
+}
+
 function extractPhone(tags: Record<string, string>, countryCode?: string): string {
   const raw = tags.phone || tags['contact:phone'] || tags['contact:mobile'] ||
               tags['phone:mobile'] || tags['phone:international'] ||
               tags['contact:landline'] || tags['contact:fax'] ||
               tags['contact:whatsapp'] || tags['contact:viber'] || '';
   if (!raw) return '';
+  // v6.9.53: if the whole value is an email, the phone number itself (if any)
+  // lives in the email field — treat as misfiled and return empty.
+  if (RX_EMAIL_SHAPE.test(raw.trim())) return '';
   const first = raw.split(/[;,/]/)[0].trim();
   try {
     const cc = (countryCode || '').toLowerCase() || undefined;
@@ -1363,7 +1401,24 @@ export function normalizePhone(raw: string, countryCode?: string): string {
 }
 
 function extractEmail(tags: Record<string, string>): string {
-  return tags.email || tags['contact:email'] || tags['email:office'] || '';
+  const raw = tags.email || tags['contact:email'] || tags['email:office'] || '';
+  if (!raw) return '';
+  const first = raw.split(/[;,/\n]/)[0].trim();
+  // v6.9.53: junk/misfiled first segment — try to find a real email inside
+  // the value before giving up (mixed lists like "info@x.ge; +995 555 12 34").
+  if (!RX_EMAIL_SHAPE.test(first)) return rescueEmailFromPhoneish(raw) || '';
+  return first;
+}
+
+// v6.9.53: composed contact extraction with CROSS-FIELD rescue — an email
+// hiding in a phone field fills the email slot and vice versa, so misfiled
+// data lands in the right column instead of being dropped by validation.
+function extractContactPair(tags: Record<string, string>, countryCode?: string): { phone: string; email: string } {
+  const phoneRaw = tags.phone || tags['contact:phone'] || tags['contact:mobile'] || '';
+  const emailRaw = tags.email || tags['contact:email'] || tags['email:office'] || '';
+  const email = extractEmail(tags) || rescueEmailFromPhoneish(phoneRaw);
+  const phone = extractPhone(tags, countryCode) || normalizePhone(rescuePhoneFromEmailish(emailRaw), countryCode);
+  return { phone, email };
 }
 
 // Directory/listing sites that should NEVER be set as a business website
@@ -3022,11 +3077,10 @@ out center body;`;
       category,
       categoryLabel: getCategoryLabel(category),
       address: formatAddress(tags),
-      phone: extractPhone(tags, ctx?.countryCode),
+      ...(() => extractContactPair(tags, ctx?.countryCode))(),
       // v6.9.52: `|| extractRescueWebsite(tags)` — a misfiled social URL
       // fills an empty website field so the data is rescued, not dropped.
       website: extractWebsite(tags) || extractRescueWebsite(tags),
-      email: extractEmail(tags),
       brand: tags.brand || '',
       cuisine: tags.cuisine || '',
       facebook: extractFacebook(tags),
@@ -6657,9 +6711,8 @@ export async function rescanWideNet(
           category: cat,
           categoryLabel: getCategoryLabel(cat),
           address: formatAddress(tags),
-          phone: extractPhone(tags, ctx?.countryCode),
+          ...(() => extractContactPair(tags, ctx?.countryCode))(),
           website: extractWebsite(tags) || extractRescueWebsite(tags), // v6.9.52 rescue
-          email: extractEmail(tags),
           brand: tags.brand || '',
           cuisine: tags.cuisine || '',
           facebook: extractFacebook(tags),
