@@ -101,6 +101,7 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
 
       // 1. JSON-LD structured data extraction (schema.org/LocalBusiness)
       if (!b.phone || !b.email || !b.website) {
+        yieldTry('jsonld');
         const jsonLdBlocks = full.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi);
         for (const match of jsonLdBlocks) {
           try {
@@ -114,9 +115,9 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
               if (!b.phone && entity.telephone) {
                 const tp = Array.isArray(entity.telephone) ? String(entity.telephone[0]) : String(entity.telephone);
                 const digits = tp.replace(/\D/g, '');
-                if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(tp)) b.phone = tp.trim();
+                if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(tp)) { b.phone = tp.trim(); yieldBump('jsonld'); }
               }
-              if (!b.email && typeof entity.email === 'string' && entity.email && !JUNK.test(entity.email) && !_EMAIL_FILE_RE.test(entity.email)) b.email = entity.email;
+              if (!b.email && typeof entity.email === 'string' && entity.email && !JUNK.test(entity.email) && !_EMAIL_FILE_RE.test(entity.email)) { b.email = entity.email; yieldBump('jsonld'); }
               const types = (Array.isArray(entity['@type']) ? entity['@type'] : [entity['@type']]) as unknown[];
               if (types.some((t: unknown) => /LocalBusiness|Restaurant|Bar|Cafe|Store|Hotel|Organization/i.test(String(t || '')))) {
                 if (!b.website && typeof entity.url === 'string' && !EXCLUDE.test(entity.url) && isLikelyBusinessWebsite(entity.url, b.name)) b.website = entity.url;
@@ -145,14 +146,15 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
 
       // 2. Open Graph meta tags
       if (!b.email || !b.phone) {
+        yieldTry('meta');
         const ogTags = full.matchAll(/<meta[^>]*(?:property|name)="(og:[^"]+)"[^>]*content="([^"]*)"/gi);
         for (const m of ogTags) {
           const prop = m[1].toLowerCase();
           const val = m[2];
-          if (!b.email && prop === 'og:email') { b.email = val.replace('mailto:', ''); }
+          if (!b.email && prop === 'og:email') { b.email = val.replace('mailto:', ''); yieldBump('meta'); }
           if (!b.phone && prop === 'og:phone') {
             const digits = val.replace(/\D/g, '');
-            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(val)) b.phone = val.trim();
+            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(val)) { b.phone = val.trim(); yieldBump('meta'); }
           }
         }
       }
@@ -816,6 +818,8 @@ export interface EnrichmentProgress {
     stage: 'address' | 'phone' | 'email' | 'website' | 'social' | 'done';
   };
   recentQueries: string[];             // last ~12 search queries sent (audit trail)
+  // v6.9.59: per-extraction-layer yield — which parsers actually found contacts
+  layerYield?: { key: string; label: string; icon: string; found: number; tries: number }[];
 }
 
 export interface RecentBusiness {
@@ -4506,6 +4510,12 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     _ep.contacts.websites = allBizList.filter(b => b.website).length;
     _ep.contacts.social = allBizList.filter(b => b.facebook || b.instagram).length;
     _ep.contacts.total = _ep.contacts.emails + _ep.contacts.phones + _ep.contacts.websites + _ep.contacts.social;
+    // v6.9.59: carry per-layer extraction yield into every progress push
+    const _y = getExtractionYield();
+    _ep.layerYield = _EXTRACT_LAYER_META
+      .map(m => ({ ...m, found: _y[m.key]?.found || 0, tries: _y[m.key]?.tries || 0 }))
+      .filter(r => r.tries > 0 || r.found > 0)
+      .sort((a, b) => b.found - a.found || b.tries - a.tries);
     onEnrichProgress?.({
       ..._ep,
       engines: _ep.engines.map(e => ({ ...e })),
@@ -7583,33 +7593,72 @@ export const __internals: any = {};
 __internals.corsFetch = corsFetch;
 __internals.extractFromHtml = extractFromHtmlModule;
 
+// ─── v6.9.59: Per-extraction-layer yield counters ───────────────
+// Answers "which layers actually find contacts?" — JSON-LD vs microdata vs
+// mailto vs Cloudflare etc. Module-level so both scrape sites (deep crawler
+// and this module extractor) feed the same tally. Purely additive telemetry:
+// no extraction behavior changes, reset at every scan start.
+export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta';
+export interface ExtractionYieldEntry { found: number; tries: number; }
+export interface ExtractionYieldMap { [k: string]: ExtractionYieldEntry; }
+const _extractYield: ExtractionYieldMap = {};
+export function resetExtractionYield(): void { for (const k of Object.keys(_extractYield)) delete _extractYield[k]; }
+function yieldBump(key: ExtractionLayerKey): void {
+  const e = _extractYield[key] || (_extractYield[key] = { found: 0, tries: 0 });
+  e.found++;
+}
+function yieldTry(key: ExtractionLayerKey): void {
+  const e = _extractYield[key] || (_extractYield[key] = { found: 0, tries: 0 });
+  e.tries++;
+}
+export const _EXTRACT_LAYER_META: { key: ExtractionLayerKey; label: string; icon: string }[] = [
+  { key: 'tel',       label: 'tel: links',      icon: '📞' },
+  { key: 'wa',        label: 'WhatsApp',        icon: '💬' },
+  { key: 'viber',     label: 'Viber',           icon: '🟣' },
+  { key: 'jsonld',    label: 'JSON-LD',         icon: '🧬' },
+  { key: 'microdata', label: 'Microdata',       icon: '🏷️' },
+  { key: 'label',     label: 'Labeled',         icon: '🏷️' },
+  { key: 'regex',     label: 'Regex',           icon: '🔤' },
+  { key: 'mailto',    label: 'mailto:',         icon: '✉️' },
+  { key: 'cfdecode',  label: 'CF decode',       icon: '☁️' },
+  { key: 'entity',    label: '&#64;',           icon: '🔤' },
+  { key: 'obfusc',    label: '[at] forms',      icon: '🔑' },
+  { key: 'jslit',     label: 'JS literals',     icon: '📜' },
+  { key: 'dataattr',  label: 'data-email',      icon: '🔗' },
+  { key: 'meta',      label: 'Meta/OG',         icon: '🌐' },
+];
+export function getExtractionYield(): ExtractionYieldMap { return JSON.parse(JSON.stringify(_extractYield)); }
+
 // ── Unified extraction: pull phone, email, website, social from any HTML/text ──
 // (module-scope utility: pure parsing, no closure state — used by the
 // enrichment pipeline inside queryBusinesses and by the parsing test harness)
+// v6.9.59: every extraction point now reports hits/tries to _extractYield.
 function extractFromHtmlModule(html: string, b: Business): void {
   const JUNK = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|duckduckgo|schema\.org|privacy.*policy|terms.*service|cookie/i;
-  const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
-
-  // Phone: tel: links, then text regex
+  const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;    // Phone: tel: links, then text regex
   if (!b.phone) {
     // 1. tel: links (most reliable — tolerate single quotes & spacing)
+    yieldTry('tel');
     const telM = html.match(/href\s*=\s*["']tel:([^"']+)["']/i);
-    if (telM) b.phone = (() => { try { return decodeURIComponent(telM[1]).trim(); } catch { return telM[1].trim(); } })();
+    if (telM) { b.phone = (() => { try { return decodeURIComponent(telM[1]).trim(); } catch { return telM[1].trim(); } })(); yieldBump('tel'); }
     // 1b. WhatsApp click-to-chat links — wa.me/995… or api.whatsapp.com/send?phone=…
     if (!b.phone) {
+      yieldTry('wa');
       const waM = html.match(/(?:wa\.me\/(\+?\d{7,15})|whatsapp\.com\/send[^"']*\?phone=(\+?\d{7,15}))/i);
       const raw = waM ? (waM[1] || waM[2]) : '';
-      if (raw) b.phone = raw.startsWith('+') ? raw : `+${raw}`;
+      if (raw) { b.phone = raw.startsWith('+') ? raw : `+${raw}`; yieldBump('wa'); }
     }
     // 1c. Viber deep links — viber://chat?number=%2B995…
     if (!b.phone) {
+      yieldTry('viber');
       const vbM = html.match(/viber:\/\/chat\?number=%2B(\d{7,15})/i);
-      if (vbM) b.phone = `+${vbM[1]}`;
+      if (vbM) { b.phone = `+${vbM[1]}`; yieldBump('viber'); }
     }
     // 1d. JSON-LD structured data: "telephone": "+995 …"
     if (!b.phone) {
+      yieldTry('jsonld');
       const ldPhoneM = html.match(/"telephone"\s*:\s*"(\+?[\d\s\-\(\)]{7,20})"/i);
-      if (ldPhoneM && plausiblePhone(ldPhoneM[1])) b.phone = ldPhoneM[1].trim();
+      if (ldPhoneM && plausiblePhone(ldPhoneM[1])) { b.phone = ldPhoneM[1].trim(); yieldBump('jsonld'); }
     }
     // 2. Country-specific formats
     if (!b.phone) {
@@ -7631,6 +7680,7 @@ function extractFromHtmlModule(html: string, b: Business): void {
     // 2b. JSON-LD telephone — many sites embed the phone ONLY in structured
     // data. v6.9.58: the walker reaches @graph + contactPoint nodes.
     if (!b.phone) {
+      yieldTry('jsonld');
       for (const jl of html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)) {
         try {
           const entities: Record<string, unknown>[] = [];
@@ -7639,7 +7689,7 @@ function extractFromHtmlModule(html: string, b: Business): void {
             const tp = Array.isArray(e.telephone) ? String(e.telephone[0]) : (typeof e.telephone === 'string' ? e.telephone : '');
             if (!tp) continue;
             const digits = tp.replace(/\D/g, '');
-            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(tp)) { b.phone = tp.trim(); break; }
+            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(tp)) { b.phone = tp.trim(); yieldBump('jsonld'); break; }
           }
         } catch {}
         if (b.phone) break;
@@ -7647,15 +7697,16 @@ function extractFromHtmlModule(html: string, b: Business): void {
     }
     // 2c. Microdata (itemprop) — schema.org HTML annotations
     if (!b.phone) {
+      yieldTry('microdata');
       const mdP = html.match(/itemprop=["'](?:telephone|faxNumber)["'][^>]*>([^<]{7,25})</i) || html.match(/<meta[^>]*itemprop=["'](?:telephone|faxNumber)["'][^>]*content=["']([^"']{7,25})/i);
       if (mdP) {
         const digits = mdP[1].replace(/\D/g, '');
-        if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(mdP[1])) b.phone = mdP[1].trim();
+        if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(mdP[1])) { b.phone = mdP[1].trim(); yieldBump('microdata'); }
       }
     }
     if (!b.email) {
       const mdE = html.match(/itemprop=["']email["'][^>]*>([^<]{6,80})</i) || html.match(/<meta[^>]*itemprop=["']email["'][^>]*content=["']([^"']{6,80})/i);
-      if (mdE && mdE[1].includes('@') && !JUNK.test(mdE[1]) && !EMAIL_FILE.test(mdE[1])) b.email = mdE[1].trim();
+      if (mdE && mdE[1].includes('@') && !JUNK.test(mdE[1]) && !EMAIL_FILE.test(mdE[1])) { b.email = mdE[1].trim(); yieldBump('microdata'); }
     }
     // 3. Labeled phone patterns (Phone: +xxx, Tel: xxx, etc.)
     // v6.9.57: multilingual labels — Spanish sites label numbers "Teléfono:"
@@ -7663,22 +7714,24 @@ function extractFromHtmlModule(html: string, b: Business): void {
     // "Телефон:", Greek "Τηλέφωνο:" — the English-only list missed all of
     // them even when the scraper reached the right page.
     if (!b.phone) {
+      yieldTry('label');
       const labeledPh = html.match(/(?:phone|tel|telephone|mobile|cell|fax|calls?|whatsapp|viber|contact|teléfono|teléfonos|móvil|móviles|telefone|téléphone|téléphones|telefon(?:o|i|ul)?|telefonnummer|telefoon|телефон|телефоны|τηλέφωνο|τηλέφωνα|تلفن|هاتف)\s*[:;=\s"'>]*([+\d][\d\s\-\.()]{7,18})/i);
       if (labeledPh) {
         const digits = labeledPh[1].replace(/\D/g, '');
-        if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(labeledPh[1])) b.phone = labeledPh[1].trim();
+        if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(labeledPh[1])) { b.phone = labeledPh[1].trim(); yieldBump('label'); }
       }
     }
     // 4. General phone regex (fallback). Unlabeled text is noisy: require a
     // leading '+' so floats/coordinates (2.3333…), IDs and fragments don't
     // match. Labeled/tel: paths above stay permissive for local formats.
     if (!b.phone) {
+      yieldTry('regex');
       const phM = html.match(/(?:\+?\d[\d\s\-\.\(\)]{7,18})/g);
       if (phM) {
         for (const p of phM) {
           if (!p.includes('+')) continue;
           const digits = p.replace(/[^\d+]/g, '');
-          if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(p) && !JUNK.test(p)) { b.phone = p.trim(); break; }
+          if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(p) && !JUNK.test(p)) { b.phone = p.trim(); yieldBump('regex'); break; }
         }
       }
     }
@@ -7688,13 +7741,14 @@ function extractFromHtmlModule(html: string, b: Business): void {
   // Strategy 1: Look for contact info in structured HTML (most reliable)
   if (!b.email) {
     // Contact section: look for labeled email near "contact" heading
+    yieldTry('label');
     const contactSection = html.match(/<(?:div|section|footer|aside)[^>]*class="[^"]*contact[^"]*"[^>]*>([\s\S]*?)<\/(?:div|section|footer|aside)/i);
     if (contactSection) {
       const emails = contactSection[1].match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
       if (emails) {
         for (const e of emails) {
           const clean = e.replace(/[\s>);]+$/, '');
-          if (!JUNK.test(clean) && !EMAIL_FILE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
+          if (!JUNK.test(clean) && !EMAIL_FILE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; yieldBump('label'); break; }
         }
       }
     }
@@ -7703,16 +7757,19 @@ function extractFromHtmlModule(html: string, b: Business): void {
   // Email: mailto, text, Cloudflare decode, &#64; encode, JSON-LD
   if (!b.email) {
     // 1. mailto: links (most reliable)
+    yieldTry('mailto');
     const mailM = html.match(/href="mailto:([^"\?\s]+)/i);
-    if (mailM && !JUNK.test(mailM[1]) && !EMAIL_FILE.test(mailM[1])) b.email = mailM[1].trim();
+    if (mailM && !JUNK.test(mailM[1]) && !EMAIL_FILE.test(mailM[1])) { b.email = mailM[1].trim(); yieldBump('mailto'); }
     // 2. Labeled email patterns (Email: xxx@yyy.com)
     if (!b.email) {
       // v6.9.57: + correo/courriel/e-mail international labels
+      yieldTry('label');
       const labelM = html.match(/(?:email|e-mail|mail|contact|correo(?:\s+electr\u00f3nico)?|courriel|\u043f\u043e\u0447\u0442\u0430|\u03b5\u03c0\u03b9\u03ba\u03bf\u03b9\u03bd\u03c9\u03bd\u03af\u03b1|\u0627\u06cc\u0645\u06cc\u0644)\s*[:;=\s"'>]*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
-      if (labelM && !JUNK.test(labelM[1]) && !EMAIL_FILE.test(labelM[1])) b.email = labelM[1];
+      if (labelM && !JUNK.test(labelM[1]) && !EMAIL_FILE.test(labelM[1])) { b.email = labelM[1]; yieldBump('label'); }
     }
     // 3. JSON-LD structured data
     if (!b.email) {
+      yieldTry('jsonld');
       const jsonLdEmails = html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi);
       for (const m of jsonLdEmails) {
         try {
@@ -7721,7 +7778,7 @@ function extractFromHtmlModule(html: string, b: Business): void {
           const entities: Record<string, unknown>[] = [];
           collectJsonLdEntities(data, entities);
           for (const e of entities) {
-            if (typeof e.email === 'string' && e.email && !JUNK.test(e.email) && !EMAIL_FILE.test(e.email)) { b.email = e.email; break; }
+            if (typeof e.email === 'string' && e.email && !JUNK.test(e.email) && !EMAIL_FILE.test(e.email)) { b.email = e.email; yieldBump('jsonld'); break; }
           }
         } catch {}
         if (b.email) break;
@@ -7729,56 +7786,63 @@ function extractFromHtmlModule(html: string, b: Business): void {
     }
     // 4. General email regex (fallback)
     if (!b.email) {
+      yieldTry('regex');
       const emails = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
       if (emails) {
         for (const e of emails) {
           const clean = e.replace(/[\s>);]+$/, '');
-          if (!JUNK.test(clean) && !EMAIL_FILE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break; }
+          if (!JUNK.test(clean) && !EMAIL_FILE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; yieldBump('regex'); break; }
         }
       }
     }
     // 5. Cloudflare encoded emails
     if (!b.email) {
+      yieldTry('cfdecode');
       const cfM = html.match(/data-cfemail="([a-f0-9]+)"/i);
       if (cfM) {
         try {
           const bytes = cfM[1].match(/.{2}/g)!.map(h => parseInt(h, 16));
           const key = bytes[0];
           const decoded = bytes.slice(1).map(x => x ^ key).map(x => String.fromCharCode(x)).join('');
-          if (decoded.includes('@') && !JUNK.test(decoded)) b.email = decoded;
+          if (decoded.includes('@') && !JUNK.test(decoded)) { b.email = decoded; yieldBump('cfdecode'); }
         } catch {}
       }
     }
     // 6. HTML entity encoded (@)
     if (!b.email) {
+      yieldTry('entity');
       const entM = html.match(/([a-zA-Z0-9._%+-]+)&#64;([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
-      if (entM && !JUNK.test(entM[0])) b.email = entM[1] + '@' + entM[2];
+      if (entM && !JUNK.test(entM[0])) { b.email = entM[1] + '@' + entM[2]; yieldBump('entity'); }
     }
     // 7. Human-obfuscated: name [at] site [dot] com — bracket forms only
     // (unambiguous markers; a bare " at " would false-positive on prose)
     if (!b.email) {
+      yieldTry('obfusc');
       const obM = html.match(/([a-zA-Z0-9._%+-]{2,})\s*(?:\[\s*at\s*\]|\(\s*at\s*\))\s*([a-zA-Z0-9][a-zA-Z0-9.-]{1,60})\s*(?:\[\s*(?:dot|\.|\u2022)\s*\]|\(\s*(?:dot|\.|\u2022)\s*\)|\.)\s*([a-zA-Z]{2,15})/i);
       if (obM) {
         const em = (obM[1] + '@' + obM[2] + '.' + obM[3]).toLowerCase();
-        if (!JUNK.test(em) && !EMAIL_FILE.test(em)) b.email = em;
+        if (!JUNK.test(em) && !EMAIL_FILE.test(em)) { b.email = em; yieldBump('obfusc'); }
       }
     }
     // 7. JavaScript string literals
     if (!b.email) {
+      yieldTry('jslit');
       const jsEmailM = html.match(/['"]([\w][\w._%+-]*@[\w.-]+\.[a-zA-Z]{2,})['"]/);
-      if (jsEmailM && !JUNK.test(jsEmailM[1]) && !EMAIL_FILE.test(jsEmailM[1]) && jsEmailM[1].length > 6) b.email = jsEmailM[1];
+      if (jsEmailM && !JUNK.test(jsEmailM[1]) && !EMAIL_FILE.test(jsEmailM[1]) && jsEmailM[1].length > 6) { b.email = jsEmailM[1]; yieldBump('jslit'); }
     }
     // 8. data-email attributes
     if (!b.email) {
+      yieldTry('dataattr');
       const dataEmailM = html.match(/data-email\s*=\s*["']([^"']+@[^"']+)/i);
-      if (dataEmailM && !JUNK.test(dataEmailM[1]) && !EMAIL_FILE.test(dataEmailM[1])) b.email = dataEmailM[1];
+      if (dataEmailM && !JUNK.test(dataEmailM[1]) && !EMAIL_FILE.test(dataEmailM[1])) { b.email = dataEmailM[1]; yieldBump('dataattr'); }
     }
     // 9. Obfuscated forms — "name [at] domain [dot] com", "name(at)domain(dot)com"
     if (!b.email) {
+      yieldTry('obfusc');
       const obfM = html.match(/([\w][\w._%+-]{1,40})\s*(?:\(|\[|\{)?\s*(?:at|@|&#64;)\s*(?:\)|\]|\})?\s*([\w-]{2,40})\s*(?:\(|\[|\{)?\s*(?:dot|\.|&#46;)\s*(?:\)|\]|\})?\s*([a-zA-Z]{2,12})\b/i);
       if (obfM) {
         const cand = `${obfM[1]}@${obfM[2]}.${obfM[3]}`;
-        if (!JUNK.test(cand) && !EMAIL_FILE.test(cand)) b.email = cand.toLowerCase();
+        if (!JUNK.test(cand) && !EMAIL_FILE.test(cand)) { b.email = cand.toLowerCase(); yieldBump('obfusc'); }
       }
     }
   }

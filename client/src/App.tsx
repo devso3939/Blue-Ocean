@@ -23,6 +23,7 @@ import {
   rescanWideNet,
   supplementProServices,
   getEngineHealthSnapshot,
+  resetExtractionYield,
   type EngineHealthEntry,
   type VerificationResult,
   type EnrichmentProgress,
@@ -800,6 +801,7 @@ export default function App() {
     setRescanNote('');
     setScanAreaLabel(''); // v6.9.35: badge resets at the start of every run
     setOverpassRoute([]); resetOverpassRouteLog();
+    resetExtractionYield(); // v6.9.59: per-layer yield counters start fresh each run
     setEngineHealth(getEngineHealthSnapshot());
 
     try {
@@ -1049,6 +1051,7 @@ export default function App() {
     setRescanNote('');
     setScanAreaLabel(''); // v6.9.35: badge resets at the start of every run
     setOverpassRoute([]); resetOverpassRouteLog();
+    resetExtractionYield(); // v6.9.59: per-layer yield counters start fresh each run
     setEngineHealth(getEngineHealthSnapshot());
 
     try {
@@ -1726,6 +1729,25 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+
+                  {/* ── v6.9.59: Extraction-layer yield — which parsers found contacts ── */}
+                  {enrichProgress.layerYield && enrichProgress.layerYield.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1 border-b border-border/60 bg-sky-500/5 px-3 py-1.5">
+                      <span className="mr-1 text-[9px] uppercase tracking-wider text-muted-foreground/70">Layer yield</span>
+                      {enrichProgress.layerYield.map(l => (
+                        <span key={l.key}
+                          title={`${l.label}: ${l.found} contacts from ${l.tries} attempt${l.tries === 1 ? '' : 's'}`}
+                          className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] font-medium ${
+                            l.found > 0 ? 'bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30' : 'bg-muted/30 text-muted-foreground/40'
+                          }`}
+                        >
+                          <span>{l.icon}</span>
+                          <span className="max-w-[110px] truncate">{l.label}</span>
+                          {l.found > 0 && <span className="tabular-nums font-bold text-foreground/80">{l.found}</span>}
+                        </span>
+                      ))}
+                    </div>
+                  )}
 
                   {/* ── Engine leaderboard ── */}
                   <div className="flex flex-wrap gap-1 border-b border-border/60 px-3 py-2">
