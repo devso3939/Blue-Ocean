@@ -2549,6 +2549,36 @@ async function supabaseRpc<T>(fn: string, body: Record<string, unknown>, timeout
   return res.json() as Promise<T>;
 }
 
+// v6.9.55: server-side Brave search fallback. The browser-side Brave API is
+// rate-limited (1 qps free tier) and gets 429s during enrichment waves; the
+// supplement's Supabase proxy (key in Vault) is a separate quota pool. When
+// the browser arm fails, per-business enrichment now reroutes here so the
+// Brave lane keeps yielding data instead of going dark for the whole scan.
+async function braveSearchViaSupabase(q: string): Promise<{ title: string; url: string; description: string }[] | null> {
+  if (!engineAvailable('brave_s')) return null;
+  try {
+    const start = await supabaseRpc<{ rid?: number; error?: string }>('rpc_brave_start', { p_query: q }, 15000);
+    if (!start?.rid) {
+      if (start?.error) engineNoteFail('brave_s', 'Brave (server)', 'net', `proxy: ${start.error}`);
+      return null;
+    }
+    for (let i = 0; i < 8; i++) {
+      if (i > 0) await abortableWait(1500);
+      const poll = await supabaseRpc<{ state: string; data?: any; error?: string }>('rpc_brave_poll', { p_rid: start.rid }, 15000);
+      if (!poll) break;
+      if (poll.state === 'done') {
+        engineNoteSuccess('brave_s', 'Brave (server)');
+        return (poll.data?.web?.results || []).map((r: any) => ({ title: r.title || '', url: r.url || '', description: r.description || '' }));
+      }
+      if (poll.state === 'failed') { engineNoteFail('brave_s', 'Brave (server)', 'net', `proxy: ${poll.error || 'failed'}`); return null; }
+    }
+    return null;
+  } catch (e: any) {
+    if (e?.message !== 'Cancelled') engineNoteFail('brave_s', 'Brave (server)', 'net', String(e?.message || '').slice(0, 60));
+    return null;
+  }
+}
+
 async function overpassViaProxy(query: string, onWait?: (msg: string) => void): Promise<any> {
   if (Date.now() < _proxyDisabledUntil) return null;
   try {
@@ -4361,6 +4391,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     engines: [
       { name: 'DuckDuckGo', icon: '🦆', status: 'idle', found: 0 },
       { name: 'Brave', icon: '🦁', status: 'idle', found: 0 },
+      { name: 'Brave (server)', icon: '🛡️', status: 'idle', found: 0 },
       { name: 'Mojeek', icon: '🔆', status: 'idle', found: 0 },
       { name: 'Startpage', icon: '🌱', status: 'idle', found: 0 },
       ...(_serperKey() ? [{ name: 'Serper', icon: '⚡', status: 'idle' as const, found: 0 }] : []),
@@ -4446,16 +4477,39 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     // counter + per-batch gate: after 3 failures Photon is skipped for the
     // rest of the pass (addresses simply stay empty — they are cosmetic).
     let _photonFails = 0;
+    // v6.9.55: Nominatim backup geocoder — when Photon is dead/rate-limited
+    // the address pass used to just stop (addresses stayed empty). Nominatim
+    // reverse is a different infrastructure with a strict 1 qps policy, so
+    // backup calls are throttled to one per second via a shared last-call
+    // timestamp; failures are counted but never throw out of the batch.
+    let _nominatimLastCall = 0;
+    const nominatimReverse = async (b: Business): Promise<boolean> => {
+      const gap = Date.now() - _nominatimLastCall;
+      if (gap < 1100) await wait(1100 - gap);
+      _nominatimLastCall = Date.now();
+      try {
+        const r = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=jsonv2&zoom=18&addressdetails=1`, {
+          headers: { 'User-Agent': 'BlueOcean/6.9 (address backup)' },
+          signal: AbortSignal.timeout(4000),
+        });
+        if (!r.ok) return false;
+        const d = await r.json();
+        const a = d?.address || {};
+        const parts = [a.road || a.pedestrian || a.footway, a.house_number, a.suburb || a.neighbourhood || a.city_district, a.city || a.town || a.village].filter(Boolean);
+        if (parts.length > 0) { b.address = parts.join(', '); return true; }
+        return false;
+      } catch { return false; }
+    };
     // v6.9.41: category mode fills addresses for the whole category
     const maxEnrich = CATEGORY_MODE ? allBizList.length : Math.min(allBizList.length, 150);
     const CONCURRENCY = 5; // Photon allows more parallel requests
     for (let i = 0; i < maxEnrich; i += CONCURRENCY) {
       if (isCancelled()) break;
-      if (_photonFails >= 3) break; // v6.9.10: dead engine, stop the pass
       const batch = allBizList.slice(i, i + CONCURRENCY);
       await Promise.allSettled(batch.map(async (b) => {
         if (b.address) return; // already has address
-        if (_photonFails >= 3) return;
+        // v6.9.10: photon dead → v6.9.55: fall back to Nominatim instead of skipping
+        if (_photonFails >= 3) { engineNoteFail('photon', 'Photon (addresses)', 'net', 'dead — using Nominatim backup'); await nominatimReverse(b); return; }
         try {
           const r = await fetch(`https://photon.komoot.io/reverse?lat=${b.lat}&lon=${b.lon}&lang=en`, {
             signal: AbortSignal.timeout(3000),
@@ -4469,11 +4523,15 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             }
           } else {
             _photonFails++;
+            await nominatimReverse(b);
           }
-        } catch { _photonFails++; }
+        } catch {
+          _photonFails++;
+          await nominatimReverse(b);
+        }
       }));
       if (i + CONCURRENCY < maxEnrich && _photonFails < 3) await wait(500);
-      onProgress?.(75, `Filling addresses… ${Math.min(i + CONCURRENCY, maxEnrich)}/${maxEnrich}`);
+      onProgress?.(75, `Filling addresses… ${Math.min(i + CONCURRENCY, maxEnrich)}/${maxEnrich}${_photonFails >= 3 ? ' (Nominatim backup)' : ''}`);
       _ep.businessesProcessed = Math.min(i + CONCURRENCY, maxEnrich);
       emitEP();
     }
@@ -4487,6 +4545,17 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   // discovered here — its health gate closes — so the waves never fire the
   // doomed per-business fetches that used to print console-error storms.
   // Cost: ~1.5s. Benefit: bounded first-contact logs (~4 instead of ~14).
+  // v6.9.55: reset session health first — cooldowns must not leak across
+  // scans. Without this, a Brave rate-limit from scan #1 skipped Brave in
+  // every later scan even when the limit had long expired, and the red
+  // badges re-appeared in the UI with no engine actually probed.
+  {
+    for (const e of _engineHealth.values()) {
+      if (e.status !== 'quota') { e.status = 'ok'; e.fails = 0; e.cooldownUntil = 0; e.detail = ''; }
+      // quota entries survive the reset (sticky for the session by design)
+    }
+    _braveFails = 0; // surge guard resets with it
+  }
   {
     const probe = async (id: string, label: string, fn: () => Promise<Response>): Promise<void> => {
       if (!engineAvailable(id)) return; // already cooled-down from a previous scan
@@ -4550,6 +4619,14 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       probe('photon', 'Photon (addresses)', async () => {
         const r = await fetch('https://photon.komoot.io/reverse?lat=41.7151&lon=44.8271&lang=en', { signal: AbortSignal.timeout(3000) });
         return r;
+      }),
+      // Bing — HTML engine; searchBing returns [] on challenge/HTTP fail,
+      // so the probe synthesizes a tiny search and counts non-empty results
+      // as success (v6.9.55: Bing failures were swallowed silently before,
+      // leaving its health gate permanently 'ok' even while dead).
+      probe('bing', 'Bing', async () => {
+        const results = await searchBing('Tbilisi cafe');
+        return new Response(results.length > 0 ? 'ok' : 'empty', { status: results.length > 0 ? 200 : 503 });
       }),
       // cors.sh — proxy health (200 on /ping when alive)
       probe('corssh', 'cors.sh proxy', async () => {
@@ -4628,10 +4705,27 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
 
         // ═══ PHASE 1: ALL search engines in PARALLEL (3-4s total, not 20s) ═══
         const q = buildSearchQuery(b);
+        // v6.9.55: shared Brave result applier — used by the browser arm AND
+        // the server-side fallback paths (same extraction, one definition).
+        const applyBraveResults = (results: { title: string; url: string; description: string }[], kgUrl?: string) => {
+          let touched = false;
+          for (const res of results) {
+            if (extractFromText((res.description || '') + ' ' + (res.title || ''), b)) touched = true;
+            if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('google.com/maps') && isLikelyBusinessWebsite(res.url, b.name, (res.description || '') + ' ' + (res.title || ''))) b.website = res.url;
+          }
+          if (kgUrl && !b.website && !_EXCLUDE.test(kgUrl) && isLikelyBusinessWebsite(kgUrl, b.name)) b.website = kgUrl;
+          if (touched || b.website) markEngine(b, 'Brave');
+        };
         // Helper: run one search-engine arm with health tracking + skip when
         // the engine is cooling down / quota-dead (no wasted failing fetches).
-        const engineArm = async (id: string, label: string, fn: () => Promise<boolean>) => {
-          if (!engineAvailable(id)) return;
+        // v6.9.55: optional `fallback` runs when the engine is SKIPPED, so a
+        // cooled-down browser engine hands the business to its backup instead
+        // of silently dropping the lane for the rest of the scan.
+        const engineArm = async (id: string, label: string, fn: () => Promise<boolean>, fallback?: () => Promise<void>) => {
+          if (!engineAvailable(id)) {
+            if (fallback) { try { await fallback(); } catch {} }
+            return;
+          }
           try {
             const ok = await fn();
             if (ok) engineNoteSuccess(id, label);
@@ -4650,30 +4744,42 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             if (bi > 0) await wait(400 * bi);
             if (!braveOkToCall()) return false;
             const bkey = _braveKey();
-            if (!bkey) { engineNoteFail('brave', 'Brave', 'quota', 'backups exceeded'); return false; }
-            const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=5`, {
-              headers: { 'Accept': 'application/json', 'X-Subscription-Token': bkey },
-              signal: AbortSignal.timeout(2000),
-            });
-            // v6.9.13: quota → rotate to next backup key (same business re-arms)
-            if (r.status === 402 || r.status === 429 || r.status === 401) {
-              const next = _poolRotate('brave');
-              engineNoteFail('brave', 'Brave', 'quota', next ? 'key exhausted — rotating to backup key' : 'backups exceeded');
-              return false;
-            }
-            if (!r.ok) {
-                braveNoteFail(classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
-                return false;
+            if (bkey) {
+              try {
+                const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=5`, {
+                  headers: { 'Accept': 'application/json', 'X-Subscription-Token': bkey },
+                  signal: AbortSignal.timeout(2000),
+                });
+                if (r.ok) {
+                  const data = await r.json();
+                  applyBraveResults(data.web?.results || [], data.knowledge_graph?.url);
+                  return true;
+                }
+                // v6.9.13: quota → rotate to next backup key (same business re-arms)
+                if (r.status === 402 || r.status === 429 || r.status === 401) {
+                  const next = _poolRotate('brave');
+                  engineNoteFail('brave', 'Brave', 'quota', next ? 'key exhausted — rotating to backup key' : 'backups exceeded');
+                } else {
+                  braveNoteFail(classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
+                }
+              } catch (e: any) {
+                if (e?.message !== 'Cancelled') braveNoteFail('net', String(e?.name === 'TimeoutError' ? 'timeout' : 'network error').slice(0, 60));
               }
-            const data = await r.json();
-            let touched = false;
-            for (const res of (data.web?.results || [])) {
-              if (extractFromText((res.description || '') + ' ' + (res.title || ''), b)) touched = true;
-              if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('google.com/maps') && isLikelyBusinessWebsite(res.url, b.name, (res.description || '') + ' ' + (res.title || ''))) b.website = res.url;
+            } else {
+              engineNoteFail('brave', 'Brave', 'quota', 'backups exceeded');
             }
-            if (!b.website && data.knowledge_graph?.url && !_EXCLUDE.test(data.knowledge_graph.url) && isLikelyBusinessWebsite(data.knowledge_graph.url, b.name)) b.website = data.knowledge_graph.url;
-            if (touched || b.website) markEngine(b, 'Brave');
-            return true;
+            // v6.9.55: browser arm failed (rate limit / no key / network) →
+            // reroute THIS business through the server-side Brave proxy —
+            // a separate quota pool (Vault key), so the lane keeps yielding.
+            const srv = await braveSearchViaSupabase(decodeURIComponent(q));
+            if (srv && srv.length > 0) { applyBraveResults(srv); return true; }
+            return false;
+          }, async () => {
+            // v6.9.55: browser engine skipped (cooldown/quota from a previous
+            // wave) → the server-side proxy keeps this business's Brave lane
+            // alive instead of silently dropping it for the whole scan.
+            const srv = await braveSearchViaSupabase(decodeURIComponent(q));
+            if (srv && srv.length > 0) applyBraveResults(srv);
           }),
           engineArm('mojeek', 'Mojeek', async () => {
             if (engineAvailable('brave') && _braveKey()) return false; // Brave is primary when healthy
@@ -4788,25 +4894,46 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               // v6.9.11: stagger span (400ms×9 = 3.6s) now exceeds the
               // reduced 2s timeout, so a dead Brave costs ≤5 errors per
               // wave instead of 10.
+              // v6.9.55: when the browser arm is gated out, the server-side
+              // proxy takes this email query so the lane still yields.
               if (bi > 0) await wait(400 * bi);
-              if (!braveOkToCall()) return;
-              const ebkey = _braveKey();
-              if (!ebkey) { engineNoteFail('brave', 'Brave', 'quota', 'backups exceeded'); return; }
-              try {
-                const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${emailQ}&count=5`, {
-                  headers: { 'Accept': 'application/json', 'X-Subscription-Token': ebkey },
-                  signal: AbortSignal.timeout(2000),
-                });
-                // v6.9.13: quota → rotate to next backup key
-                if (r.status === 402 || r.status === 429 || r.status === 401) {
-                  const next = _poolRotate('brave');
-                  engineNoteFail('brave', 'Brave', 'quota', next ? 'key exhausted — rotating to backup key' : 'backups exceeded');
-                  return;
+              if (braveOkToCall()) {
+                const ebkey = _braveKey();
+                if (ebkey) {
+                  try {
+                    const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${emailQ}&count=5`, {
+                      headers: { 'Accept': 'application/json', 'X-Subscription-Token': ebkey },
+                      signal: AbortSignal.timeout(2000),
+                    });
+                    if (r.status === 402 || r.status === 429 || r.status === 401) {
+                      const next = _poolRotate('brave');
+                      engineNoteFail('brave', 'Brave', 'quota', next ? 'key exhausted — rotating to backup key' : 'backups exceeded');
+                    } else if (r.ok) {
+                      engineNoteSuccess('brave', 'Brave');
+                      const data = await r.json();
+                      for (const res of (data.web?.results || [])) {
+                        extractFromText((res.description || '') + ' ' + (res.title || ''), b);
+                        if (!b.email && res.url && /contact|about|team/i.test(res.url)) {
+                          try {
+                            const pageR = await corsFetch(res.url, { signal: AbortSignal.timeout(3000) });
+                            if (pageR.ok) extractFromHtml(await pageR.text(), b);
+                          } catch {}
+                        }
+                      }
+                    } else {
+                      braveNoteFail(classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
+                    }
+                  } catch (e: any) {
+                    if (e?.message !== 'Cancelled') braveNoteFail('net', String(e?.name === 'TimeoutError' ? 'timeout' : 'network error').slice(0, 60));
+                  }
+                } else {
+                  engineNoteFail('brave', 'Brave', 'quota', 'backups exceeded');
                 }
-                if (r.ok) {
-                  engineNoteSuccess('brave', 'Brave');
-                  const data = await r.json();
-                  for (const res of (data.web?.results || [])) {
+              }
+              if (!engineAvailable('brave')) {
+                const srv = await braveSearchViaSupabase(decodeURIComponent(emailQ));
+                if (srv) {
+                  for (const res of srv) {
                     extractFromText((res.description || '') + ' ' + (res.title || ''), b);
                     if (!b.email && res.url && /contact|about|team/i.test(res.url)) {
                       try {
@@ -4815,12 +4942,8 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                       } catch {}
                     }
                   }
-                } else {
-                  braveNoteFail(classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
                 }
-              } catch (e: any) {
-                  if (e?.message !== 'Cancelled') braveNoteFail('net', String(e?.name === 'TimeoutError' ? 'timeout' : 'network error').slice(0, 60));
-                }
+              }
             })(),
             (async () => {
               // v6.9.8: gate — when the shared DDG engine is cooling down,
