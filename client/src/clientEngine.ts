@@ -57,12 +57,33 @@ async function scrapeWordPressAPI(b: Business): Promise<void> {
   }
 }
 
+// ─── v6.9.58: Recursive JSON-LD entity walker ───────────────────
+// Real-world JSON-LD rarely keeps LocalBusiness at the top level:
+// Wix/Squarespace/Yoast wrap it in @graph, and phone/email often live on
+// nested contactPoint (schema.org ContactPoint) nodes. A flat entities
+// loop sees none of them. Walks known container keys with a depth cap
+// (bounded, cheap) and collects every @type-bearing object.
+function collectJsonLdEntities(node: unknown, out: Record<string, unknown>[], depth = 0): void {
+  if (!node || depth > 6) return;
+  if (Array.isArray(node)) {
+    for (const n of node) collectJsonLdEntities(n, out, depth + 1);
+    return;
+  }
+  if (typeof node !== 'object') return;
+  const obj = node as Record<string, unknown>;
+  if (obj['@type'] !== undefined) out.push(obj);
+  for (const key of ['@graph', 'mainEntity', 'hasPart', 'subOrganization', 'department', 'contactPoint', 'itemListElement']) {
+    if (obj[key] !== undefined) collectJsonLdEntities(obj[key], out, depth + 1);
+  }
+}
+
 // --- v6.9.50: HOISTED out of queryBusinesses (were nested by an earlier scripted patch,
 // invisible to supplementProServices; no closure dependencies, safe to hoist) ---
 
 async function enrichFromWebsiteDeep(b: Business): Promise<void> {
   if (!b.website) return;
   const EXCLUDE = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com/i;
+  const JUNK = /example\.com|wixpress|sentry|googleapis|google\.com|gstatic|cloudflare|schema\.org|privacy|terms|cookie/i;
 
   async function deepScrape(url: string): Promise<boolean> {
     // Contact-fill snapshot: did this fetch change any field?
@@ -84,16 +105,21 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
         for (const match of jsonLdBlocks) {
           try {
             const data = JSON.parse(match[1]);
-            const entities = Array.isArray(data) ? data : [data];
+            // v6.9.58: recursive walker — Wix/Squarespace/Yoast nest
+            // LocalBusiness inside @graph and put phone/email inside
+            // contactPoint nodes; the flat entities loop missed all of them.
+            const entities: Record<string, unknown>[] = [];
+            collectJsonLdEntities(data, entities);
             for (const entity of entities) {
-              const types = Array.isArray(entity['@type']) ? entity['@type'] : [entity['@type']];
-              if (types.some((t: string) => /LocalBusiness|Restaurant|Bar|Cafe|Store|Hotel|Organization/i.test(t || ''))) {
-                if (!b.phone && entity.telephone) {
-                  const digits = String(entity.telephone).replace(/\D/g, '');
-                  if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(String(entity.telephone))) b.phone = String(entity.telephone).trim();
-                }
-                if (!b.email && entity.email) b.email = entity.email;
-                if (!b.website && entity.url && !EXCLUDE.test(entity.url) && isLikelyBusinessWebsite(entity.url, b.name)) b.website = entity.url;
+              if (!b.phone && entity.telephone) {
+                const tp = Array.isArray(entity.telephone) ? String(entity.telephone[0]) : String(entity.telephone);
+                const digits = tp.replace(/\D/g, '');
+                if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(tp)) b.phone = tp.trim();
+              }
+              if (!b.email && typeof entity.email === 'string' && entity.email && !JUNK.test(entity.email) && !_EMAIL_FILE_RE.test(entity.email)) b.email = entity.email;
+              const types = (Array.isArray(entity['@type']) ? entity['@type'] : [entity['@type']]) as unknown[];
+              if (types.some((t: unknown) => /LocalBusiness|Restaurant|Bar|Cafe|Store|Hotel|Organization/i.test(String(t || '')))) {
+                if (!b.website && typeof entity.url === 'string' && !EXCLUDE.test(entity.url) && isLikelyBusinessWebsite(entity.url, b.name)) b.website = entity.url;
                 if (!b.facebook && entity.sameAs) {
                   const sameAs = Array.isArray(entity.sameAs) ? entity.sameAs : [entity.sameAs];
                   for (const s of sameAs) {
@@ -106,7 +132,10 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
                 if (entity.address && !b.address) {
                   const a = entity.address;
                   if (typeof a === 'string') b.address = a;
-                  else if (a.streetAddress) b.address = [a.streetAddress, a.addressLocality, a.addressRegion].filter(Boolean).join(', ');
+                  else if (typeof a === 'object' && a !== null && (a as Record<string, string>).streetAddress) {
+                    const ar = a as Record<string, string>;
+                    b.address = [ar.streetAddress, ar.addressLocality, ar.addressRegion].filter(Boolean).join(', ');
+                  }
                 }
               }
             }
@@ -125,6 +154,22 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
             const digits = val.replace(/\D/g, '');
             if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(val)) b.phone = val.trim();
           }
+        }
+      }
+
+      // 2b. Microdata (itemprop) — schema.org HTML annotations emitted by
+      // WordPress SEO plugins and template sites
+      if (!b.phone || !b.email) {
+        if (!b.phone) {
+          const mdP = full.match(/itemprop=["'](?:telephone|faxNumber)["'][^>]*>([^<]{7,25})</i) || full.match(/<meta[^>]*itemprop=["'](?:telephone|faxNumber)["'][^>]*content=["']([^"']{7,25})/i);
+          if (mdP) {
+            const digits = mdP[1].replace(/\D/g, '');
+            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(mdP[1])) b.phone = mdP[1].trim();
+          }
+        }
+        if (!b.email) {
+          const mdE = full.match(/itemprop=["']email["'][^>]*>([^<]{6,80})</i) || full.match(/<meta[^>]*itemprop=["']email["'][^>]*content=["']([^"']{6,80})/i);
+          if (mdE && mdE[1].includes('@') && !JUNK.test(mdE[1])) b.email = mdE[1].trim();
         }
       }
 
@@ -3375,6 +3420,7 @@ async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct:
     onProgress?.(92, 'Google enrichment... ' + Math.min(i + BATCH, max) + '/' + max + ' (' + found + ' found)');
   }
 }
+
 
 
 // NOTE: website junk-filter (isLikelyBusinessWebsite + DIRECTORY_SITES etc.)
@@ -7582,6 +7628,35 @@ function extractFromHtmlModule(html: string, b: Business): void {
       const ruM = html.match(/\+7\s?\d{3}\s?\d{3}\s?\d{2}\s?\d{2}/);
       if (ruM) b.phone = ruM[0].trim();
     }
+    // 2b. JSON-LD telephone — many sites embed the phone ONLY in structured
+    // data. v6.9.58: the walker reaches @graph + contactPoint nodes.
+    if (!b.phone) {
+      for (const jl of html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)) {
+        try {
+          const entities: Record<string, unknown>[] = [];
+          collectJsonLdEntities(JSON.parse(jl[1]), entities);
+          for (const e of entities) {
+            const tp = Array.isArray(e.telephone) ? String(e.telephone[0]) : (typeof e.telephone === 'string' ? e.telephone : '');
+            if (!tp) continue;
+            const digits = tp.replace(/\D/g, '');
+            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(tp)) { b.phone = tp.trim(); break; }
+          }
+        } catch {}
+        if (b.phone) break;
+      }
+    }
+    // 2c. Microdata (itemprop) — schema.org HTML annotations
+    if (!b.phone) {
+      const mdP = html.match(/itemprop=["'](?:telephone|faxNumber)["'][^>]*>([^<]{7,25})</i) || html.match(/<meta[^>]*itemprop=["'](?:telephone|faxNumber)["'][^>]*content=["']([^"']{7,25})/i);
+      if (mdP) {
+        const digits = mdP[1].replace(/\D/g, '');
+        if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(mdP[1])) b.phone = mdP[1].trim();
+      }
+    }
+    if (!b.email) {
+      const mdE = html.match(/itemprop=["']email["'][^>]*>([^<]{6,80})</i) || html.match(/<meta[^>]*itemprop=["']email["'][^>]*content=["']([^"']{6,80})/i);
+      if (mdE && mdE[1].includes('@') && !JUNK.test(mdE[1]) && !EMAIL_FILE.test(mdE[1])) b.email = mdE[1].trim();
+    }
     // 3. Labeled phone patterns (Phone: +xxx, Tel: xxx, etc.)
     // v6.9.57: multilingual labels — Spanish sites label numbers "Teléfono:"
     // / "Móvil:", French "Téléphone:", Portuguese "Telefone:", Russian
@@ -7642,9 +7717,11 @@ function extractFromHtmlModule(html: string, b: Business): void {
       for (const m of jsonLdEmails) {
         try {
           const data = JSON.parse(m[1]);
-          const entities = Array.isArray(data) ? data : [data];
+          // v6.9.58: recursive walk — @graph + contactPoint emails
+          const entities: Record<string, unknown>[] = [];
+          collectJsonLdEntities(data, entities);
           for (const e of entities) {
-            if (e.email && !JUNK.test(e.email) && !EMAIL_FILE.test(e.email)) { b.email = e.email; break; }
+            if (typeof e.email === 'string' && e.email && !JUNK.test(e.email) && !EMAIL_FILE.test(e.email)) { b.email = e.email; break; }
           }
         } catch {}
         if (b.email) break;
@@ -7676,6 +7753,15 @@ function extractFromHtmlModule(html: string, b: Business): void {
     if (!b.email) {
       const entM = html.match(/([a-zA-Z0-9._%+-]+)&#64;([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
       if (entM && !JUNK.test(entM[0])) b.email = entM[1] + '@' + entM[2];
+    }
+    // 7. Human-obfuscated: name [at] site [dot] com — bracket forms only
+    // (unambiguous markers; a bare " at " would false-positive on prose)
+    if (!b.email) {
+      const obM = html.match(/([a-zA-Z0-9._%+-]{2,})\s*(?:\[\s*at\s*\]|\(\s*at\s*\))\s*([a-zA-Z0-9][a-zA-Z0-9.-]{1,60})\s*(?:\[\s*(?:dot|\.|\u2022)\s*\]|\(\s*(?:dot|\.|\u2022)\s*\)|\.)\s*([a-zA-Z]{2,15})/i);
+      if (obM) {
+        const em = (obM[1] + '@' + obM[2] + '.' + obM[3]).toLowerCase();
+        if (!JUNK.test(em) && !EMAIL_FILE.test(em)) b.email = em;
+      }
     }
     // 7. JavaScript string literals
     if (!b.email) {
