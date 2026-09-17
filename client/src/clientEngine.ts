@@ -1470,6 +1470,38 @@ function extractWebsite(tags: Record<string, string>): string {
   return isLikelyBusinessWebsite(url, tags.name || '') ? url : '';
 }
 
+// v6.9.52: rescue URLs misfiled into social fields. Mappers put the
+// business's OWN website into contact:facebook / contact:instagram
+// (Tbilisi audit: navne.ge, onex.ge rendered as "Facebook"). osmSocialUrl
+// correctly refuses to render them as socials, but the URL is real data —
+// return the first non-platform URL so it can fill an EMPTY website field
+// instead of being dropped entirely.
+function extractRescueWebsite(tags: Record<string, string>): string {
+  const name = tags.name || '';
+  // Self-sufficiency guard: if a dedicated website tag exists at all, the
+  // primary extractor owns the decision — rescue only fills a genuinely
+  // empty website field (works whether or not the caller composes with ||).
+  if (tags.website || tags['contact:website'] || tags.url) return '';
+  for (const raw of [tags['contact:facebook'], tags.facebook, tags['contact:instagram'], tags.instagram, tags['contact:linkedin'], tags.linkedin]) {
+    const v = (raw || '').split(';')[0].trim();
+    if (!v) continue;
+    // Accept full URLs, www-prefixed and bare domains; skip usernames.
+    let candidate = '';
+    if (/^https?:\/\//i.test(v)) candidate = v;
+    else {
+      const bd = bareDomainOf(v);
+      if (!bd) continue;
+      candidate = `https://${bd}`;
+    }
+    let host = '';
+    try { host = new URL(candidate).hostname.toLowerCase(); } catch { continue; }
+    // Genuine platform URLs are socials, not rescue candidates
+    if (/facebook\.com$/.test(host) || /instagram\.com$/.test(host) || /linkedin\.com$/.test(host)) continue;
+    if (isLikelyBusinessWebsite(candidate, name)) return candidate;
+  }
+  return '';
+}
+
 // ─── Multilingual Search Helpers ───────────────────────────
 // Maps common Georgian city names to English
 const CITY_EN_MAP: Record<string, string> = {
@@ -1636,7 +1668,21 @@ function osmSocialUrl(raw: string, base: string): string {
     if (!v.toLowerCase().includes(platformLabel)) return '';
     return `https://${v}`;
   }
+  // v6.9.52: bare domains ("navne.ge") are websites, not usernames — refuse
+  // when the last dot-segment is a TLD (usernames like "john.smith" end in
+  // non-TLD words, so they still resolve to a profile URL).
+  if (bareDomainOf(v)) return '';
   return `${base}/${v.replace(/^@+/, '').replace(/^\/+/, '')}`;
+}
+
+// Last-segment TLD set for distinguishing bare domains ("navne.ge") from
+// dotted usernames ("john.smith") in OSM social fields.
+const SOCIAL_TLD_RE = /^(com|net|org|info|biz|io|co|app|dev|site|online|shop|store|ge|am|az|tr|ru|ua|by|kz|de|fr|uk|us|it|es|pl|cz|ro|gr|il|ae|in|cn|jp|kr|vn|th|id|ph|my|sg|edu|gov|me|tv|cc|xyz)$/;
+function bareDomainOf(raw: string): string | null {
+  const bare = raw.replace(/^@+/, '').replace(/^www\./, '').replace(/\/.*/, '');
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,6}$/i.test(bare)) return null;
+  const last = bare.split('.').pop()!.toLowerCase();
+  return SOCIAL_TLD_RE.test(last) ? bare : null;
 }
 
 // v6.9.51 audit: junk names that survive the scan — 1-char truncation
@@ -2977,7 +3023,9 @@ out center body;`;
       categoryLabel: getCategoryLabel(category),
       address: formatAddress(tags),
       phone: extractPhone(tags, ctx?.countryCode),
-      website: extractWebsite(tags),
+      // v6.9.52: `|| extractRescueWebsite(tags)` — a misfiled social URL
+      // fills an empty website field so the data is rescued, not dropped.
+      website: extractWebsite(tags) || extractRescueWebsite(tags),
       email: extractEmail(tags),
       brand: tags.brand || '',
       cuisine: tags.cuisine || '',
@@ -6610,7 +6658,7 @@ export async function rescanWideNet(
           categoryLabel: getCategoryLabel(cat),
           address: formatAddress(tags),
           phone: extractPhone(tags, ctx?.countryCode),
-          website: extractWebsite(tags),
+          website: extractWebsite(tags) || extractRescueWebsite(tags), // v6.9.52 rescue
           email: extractEmail(tags),
           brand: tags.brand || '',
           cuisine: tags.cuisine || '',
