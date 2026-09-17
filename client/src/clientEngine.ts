@@ -3709,18 +3709,40 @@ async function probeDomains(b: Business): Promise<void> {
   if (b.website) return;
   const nameEn = getEnglishCityName(b.name);
   const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+  // v6.9.57: ASCII-fold — diacritics (València→valencia, Café→cafe, Böhm→bohm)
+  // previously VANISHED in slug generation (the [^a-z0-9] strip deleted the
+  // whole character), breaking every domain guess for Spanish/French/
+  // Portuguese/Polish/etc names. NFD decomposition + combining-mark removal
+  // folds them to their base letter instead.
+  const asciiFold = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   // Try multiple slug variants
   const slugs: string[] = [];
+  const foldedName = asciiFold(b.name.trim());
+  const compact0 = foldedName.toLowerCase().replace(/[^a-z0-9]+/g, '').substring(0, 20);
+  const dashed0 = foldedName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').substring(0, 25);
+  if (compact0.length >= 3) slugs.push(compact0);
+  if (dashed0.length >= 3 && dashed0 !== compact0) slugs.push(dashed0);
   if (nameEn && nameEn !== b.name) {
-    slugs.push(nameEn.toLowerCase().replace(/[^a-z0-9]+/g, '').substring(0, 20));
-    slugs.push(nameEn.toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 25));
+    slugs.push(asciiFold(nameEn).toLowerCase().replace(/[^a-z0-9]+/g, '').substring(0, 20));
+    slugs.push(asciiFold(nameEn).toLowerCase().replace(/[^a-z0-9]+/g, '-').substring(0, 25));
   }
   // Also try transliterated name
   const translit = transliterateGeo(b.name);
   if (translit !== b.name && translit !== nameEn) {
-    slugs.push(translit.toLowerCase().replace(/[^a-z0-9]+/g, '').substring(0, 20));
+    slugs.push(asciiFold(translit).toLowerCase().replace(/[^a-z0-9]+/g, '').substring(0, 20));
   }
-  const tlds = ['.com', '.ge', '.org', '.net', '.io', '.am', '.ru', '.tr', '.fr', '.de', '.co'];
+  // v6.9.57: country TLD FIRST — activaclub.es for a Valencia gym. The old
+  // hardcoded list (.ge/.am/.ru/.tr/.fr/.de/.co) never tried the scan
+  // country's own ccTLD, so outside the Caucasus the whole
+  // website→contact→phone chain died before it started.
+  const ccTld = countryTld();
+  const tlds = [
+    ...(ccTld && ccTld !== 'com' ? ['.' + ccTld] : []),
+    '.com',
+    ...(ccTld && ccTld !== 'com' ? ['.org', '.net'] : []),
+    '.io', '.co', '.eu',
+    '.ge', '.am', '.ru', '.tr', '.fr', '.de',
+  ];
   for (const slug of slugs) {
     if (slug.length < 3) continue;
     for (const tld of tlds) {
@@ -3987,29 +4009,6 @@ function buildSearchQueries(b: Business): string[] {
 }
 
 // Build a targeted query specifically for finding contact pages
-function buildContactQuery(b: Business): string {
-  const cityQ = getScanContext()?.cityNative || '';
-  const nameEn = getEnglishCityName(b.name);
-  const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
-  const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
-  const streetEn = getEnglishCityName(street);
-  const isLatin = /^[a-zA-Z\u00c0-\u024f\u1e00-\u1eff\s\-'&.0-9]+$/.test(b.name);
-  const parts: string[] = [];
-  if (isLatin) {
-    parts.push(`"${b.name}"`);
-  } else {
-    if (streetEn && streetEn !== street) parts.push(`"${streetEn}"`);
-    if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
-  }
-  if (cityQ) parts.push(cityQ); else if (cityEn) parts.push(cityEn);
-  // Use site: to search for contact pages specifically
-  // v6.9.16: native contact word replaces English-only "contact us"
-  parts.push('site:facebook.com OR site:instagram.com');
-  const nativeContact = contactTermsNative().split(' ')[0];
-  if (nativeContact) parts.push(`"${nativeContact}"`);
-  return encodeURIComponent(parts.join(' '));
-}
-
 // Build targeted email-only query
 function buildEmailQuery(b: Business): string {
   const cityQ = getScanContext()?.cityNative || '';
@@ -7584,8 +7583,12 @@ function extractFromHtmlModule(html: string, b: Business): void {
       if (ruM) b.phone = ruM[0].trim();
     }
     // 3. Labeled phone patterns (Phone: +xxx, Tel: xxx, etc.)
+    // v6.9.57: multilingual labels — Spanish sites label numbers "Teléfono:"
+    // / "Móvil:", French "Téléphone:", Portuguese "Telefone:", Russian
+    // "Телефон:", Greek "Τηλέφωνο:" — the English-only list missed all of
+    // them even when the scraper reached the right page.
     if (!b.phone) {
-      const labeledPh = html.match(/(?:phone|tel|telephone|mobile|cell|fax|calls?|whatsapp|viber|contact)\s*[:;=\s"'>]*([+\d][\d\s\-\.()]{7,18})/i);
+      const labeledPh = html.match(/(?:phone|tel|telephone|mobile|cell|fax|calls?|whatsapp|viber|contact|teléfono|teléfonos|móvil|móviles|telefone|téléphone|téléphones|telefon(?:o|i|ul)?|telefonnummer|telefoon|телефон|телефоны|τηλέφωνο|τηλέφωνα|تلفن|هاتف)\s*[:;=\s"'>]*([+\d][\d\s\-\.()]{7,18})/i);
       if (labeledPh) {
         const digits = labeledPh[1].replace(/\D/g, '');
         if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(labeledPh[1])) b.phone = labeledPh[1].trim();
@@ -7629,7 +7632,8 @@ function extractFromHtmlModule(html: string, b: Business): void {
     if (mailM && !JUNK.test(mailM[1]) && !EMAIL_FILE.test(mailM[1])) b.email = mailM[1].trim();
     // 2. Labeled email patterns (Email: xxx@yyy.com)
     if (!b.email) {
-      const labelM = html.match(/(?:email|e-mail|mail|contact)\s*[:;=\s"'>]*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
+      // v6.9.57: + correo/courriel/e-mail international labels
+      const labelM = html.match(/(?:email|e-mail|mail|contact|correo(?:\s+electr\u00f3nico)?|courriel|\u043f\u043e\u0447\u0442\u0430|\u03b5\u03c0\u03b9\u03ba\u03bf\u03b9\u03bd\u03c9\u03bd\u03af\u03b1|\u0627\u06cc\u0645\u06cc\u0644)\s*[:;=\s"'>]*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
       if (labelM && !JUNK.test(labelM[1]) && !EMAIL_FILE.test(labelM[1])) b.email = labelM[1];
     }
     // 3. JSON-LD structured data
