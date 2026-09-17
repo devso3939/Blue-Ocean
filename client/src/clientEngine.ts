@@ -1622,10 +1622,34 @@ function extractBizNameTokens(businessName: string): string[] {
 /** OSM social values may be full URLs, 'www.', bare usernames or '@user'. */
 function osmSocialUrl(raw: string, base: string): string {
   if (!raw) return '';
+  // v6.9.51 audit fix: mappers often put the business's OWN website into a
+  // social field (navne.ge / onex.ge rendered as "Facebook"). Accept a value
+  // only when it clearly belongs to the platform (hostname carries the
+  // platform label); bare domains are websites, not socials.
+  const platformLabel = base.replace(/^https?:\/\//, '').split('.')[0].toLowerCase();
   const v = raw.split(';')[0].trim();
-  if (/^https?:\/\//i.test(v)) return v;
-  if (v.startsWith('www.')) return `https://${v}`;
+  if (/^https?:\/\//i.test(v)) {
+    try { if (!new URL(v).hostname.toLowerCase().includes(platformLabel)) return ''; } catch { return ''; }
+    return v;
+  }
+  if (v.startsWith('www.')) {
+    if (!v.toLowerCase().includes(platformLabel)) return '';
+    return `https://${v}`;
+  }
   return `${base}/${v.replace(/^@+/, '').replace(/^\/+/, '')}`;
+}
+
+// v6.9.51 audit: junk names that survive the scan — 1-char truncation
+// artifacts ("ე"), URLs pasted as names ("http://coffee & drinks"), literal
+// junk words and punctuation-only placeholders. These pollute the table and
+// the AI's per-category analysis.
+export function isJunkBusinessName(name: string): boolean {
+  const n = (name || '').trim();
+  if (n.length < 2) return true; // 1-char artifacts (any script)
+  if (/https?:\/\/|www\./i.test(n)) return true; // URLs are not names
+  if (/^(unknown|null|undefined|test|n\/a|self|yes|true|no|false)$/i.test(n)) return true;
+  if (/^[\s\-—–_.·*#]+$/.test(n)) return true; // punctuation-only
+  return false;
 }
 
 function extractFacebook(tags: Record<string, string>): string {
@@ -2937,7 +2961,7 @@ out center body;`;
 
     // Must have a name to count as a real business
     const name = tags.name || tags['name:en'] || tags['name:int'] || tags.brand || tags.operator || '';
-    if (!name.trim()) continue;
+    if (!name.trim() || isJunkBusinessName(name)) continue;
 
     // Dedup by location + category (1m precision)
     const locKey = `${Math.round(elLat * 1000)},${Math.round(elLon * 1000)},${category}`;
@@ -5094,7 +5118,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         if (b.phone) {
           const norm = normalizePhone(b.phone, cc);
           const digits = norm.replace(/\D/g, '');
-          if (!plausiblePhone(b.phone) || digits.length < 8 || digits.length > 15) {
+          if (!plausiblePhone(b.phone, false) || digits.length < 8 || digits.length > 15) {
             b.phone = ''; purgedPhones++;
           } else if (norm !== b.phone) {
             b.phone = norm; fixedPhones++;
@@ -6571,7 +6595,7 @@ export async function rescanWideNet(
         const cat2 = categorizeBusiness(tags);
         if (cat2 && cat2 !== cat && LIFESTYLE.has(cat2) && LIFESTYLE.has(cat)) continue;
         const name = tags.name || tags['name:en'] || tags['name:int'] || tags.brand || tags.operator || '';
-        if (!name.trim()) continue;
+        if (!name.trim() || isJunkBusinessName(name)) continue;
         const locKey = `${Math.round(elLat * 1000)},${Math.round(elLon * 1000)}`;
         if (seenIds.has(`${el.type}/${el.id}`) || seenLocs.has(locKey)) continue;
         seenIds.add(`${el.type}/${el.id}`);
@@ -7217,7 +7241,7 @@ export function computeOpportunities(
 // Sanity gate for phones scraped from arbitrary page text: rejects dates
 // (2026-06-11), IP-like groups (23.58.223.22) and unix timestamps
 // (1787851477009) that naive digit-count checks accept.
-function plausiblePhone(p: string): boolean {
+function plausiblePhone(p: string, strict = true): boolean {
   const t = p.trim();
   const digits = t.replace(/\D/g, '');
   if (digits.length < 8 || digits.length > 15) return false;
@@ -7228,11 +7252,16 @@ function plausiblePhone(p: string): boolean {
   // bare 1-prefixed 10-13 digit runs without + are usually timestamps/IDs
   // (real international numbers in our regions carry +995/+374/+90/+7)
   if (/^1\d{9,12}$/.test(digits) && !t.startsWith('+')) return false;
-  // v6.9.50: a NAKED digit run (no separators BETWEEN digits, no leading +)
-  // of ≤10 digits is an ID/timestamp fragment ("12946800", "795560990"),
-  // not a phone — real local numbers carry formatting or a country +.
-  const core = t.replace(/^[^\d]+/, '').replace(/[^\d]+$/, '');
-  if (!t.startsWith('+') && !/[()\s\-.]/.test(core) && digits.length <= 10) return false;
+  // v6.9.51: naked digit runs (no separators, no +) are IDs/timestamps in
+  // SCRAPED text — but OSM tag values are mapper-curated and DO contain real
+  // domestic numbers in bare form (599663300 GE mobile, 0322196669 GE
+  // landline). Tbilisi audit: 0 real junk vs 3 false purges. So the strict
+  // naked-run rule applies by default (web scrapers), while the final
+  // OSM-validation pass calls with strict=false.
+  if (strict) {
+    const core = t.replace(/^[^\d]+/, '').replace(/[^\d]+$/, '');
+    if (!t.startsWith('+') && !/[()\s\-.]/.test(core) && digits.length <= 10) return false;
+  }
   return true;
 }
 
