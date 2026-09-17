@@ -7348,6 +7348,13 @@ function plausiblePhone(p: string, strict = true): boolean {
   if (digits.length < 8 || digits.length > 15) return false;
   // date-like: 2026-06-11 / 11.06.2026 / 2026/06/11
   if (/^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}$/.test(t) || /^\d{1,2}[-/.]\d{1,2}[-/.]\d{4}$/.test(t)) return false;
+  // v6.9.54: date WITH trailing time ("2026-09-17 10", "2026-09-17 10:42")
+  // slipped past the anchored regexes — CMS timestamps from scraped pages.
+  // Also any 19xx/20xx 4-digit group followed by two separator groups is a
+  // date prefix (real phones never start 19XX-/20XX- with 2-digit groups;
+  // US "202-555-0173" keeps its 3-digit area code and survives).
+  if (/^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}([ T]\d{1,2}(:\d{2})?)?$/.test(t)) return false;
+  if (/^(19|20)\d{2}[-/.]\d{1,2}[-/.]/.test(t)) return false;
   // IP-like: 23.58.223.22
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(t)) return false;
   // bare 1-prefixed 10-13 digit runs without + are usually timestamps/IDs
@@ -7389,8 +7396,11 @@ export function plausibleEmail(e: string): boolean {
   // v6.9.50: URL-encoding artifacts ("%22@abcg.ge") are fragment debris,
   // not addresses — %/encoding in the local part is always junk.
   if (/%[0-9a-f]{2}/i.test(local) || /%/.test(local)) return false;
-  // Pure-digit locals ("12946800@site") are IDs, not people.
-  if (/^\d+$/.test(local)) return false;
+  // Pure-digit locals ("12946800@site") are IDs, not people — EXCEPT short
+  // codes ≤4 digits, which are real corporate addresses (444@ucom.am and
+  // 111@viva.am are the official Armenian telecom contacts; the Yerevan
+  // audit proved scraped IDs are always long runs).
+  if (/^\d{5,}$/.test(local)) return false;
   // Junk senders/roles that regexes commonly harvest from footers
   if (_EMAIL_JUNK_RE.test(v)) return false;
   return true;
