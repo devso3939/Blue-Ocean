@@ -1841,7 +1841,9 @@ function formatAddress(tags: Record<string, string>): string {
 // ─── Overpass Query ────────────────────────────────────────────────
 
 // v6.9.26: verified live 2026-09-11 (POST + browser CORS preflight):
-//   WORKING: maps.mail.ru, overpass-api.de (both Access-Control-Allow-Origin: *)
+//   v6.9.64: osm.ch verified 200 + Access-Control-Allow-Origin:* — added as
+//            CORS-open slot #3 (mirrors the server-side mirror walk).
+//   WORKING: maps.mail.ru, overpass-api.de, overpass.osm.ch (Access-Control-Allow-Origin: *)
 //   DEAD:    overpass.openstreetmap.ru (connection refused) — removed; as race
 //            slot #2 it stalled every scan for its full timeout
 //   NO-CORS: kumi.systems, osm.jp — last-resort sequential fallbacks only
@@ -1849,6 +1851,7 @@ function formatAddress(tags: Record<string, string>): string {
 const OVERPASS_MIRRORS = [
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
   'https://overpass-api.de/api/interpreter',
+  'https://overpass.osm.ch/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
   'https://overpass.osm.jp/api/interpreter',
 ];
@@ -2347,6 +2350,17 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
     }
   }
 
+  // 6) v6.9.64: Server-side page fetch (the guaranteed lane). Supabase
+  //    pg_net has no CORS, no browser IP, no third-party proxy — it succeeds
+  //    exactly when the target site is up. GET-only (Tavily POST skipped).
+  if ((!init?.method || init.method === 'GET') && url.startsWith('https://')) {
+    const srvText = await pageFetchViaServer(url);
+    if (srvText) {
+      hostRecordSuccess(url);
+      return new Response(srvText, { status: 200, headers: { 'Content-Type': 'text/html' } });
+    }
+  }
+
   // v6.9.5: whole chain failed. CORS refusal is host-wide and sticky, so
   // lock the direct arm off for this host for the session — later requests
   // to it go straight to the proxies with zero new console noise. (A short
@@ -2652,32 +2666,30 @@ async function overpassViaProxy(query: string, onWait?: (msg: string) => void): 
   if (Date.now() < _proxyDisabledUntil) return null;
   try {
     const t0 = Date.now();
-    // Try up to 2 mirrors server-side (0 = overpass-api.de, 1 = mail.ru)
-    // v6.9.42: poll window widened — Overpass queue latency measured at ~2 min
-    // during busy periods (pg_net request 167 completed with valid data at
-    // T+122s), but the old 25×2s = 50s window abandoned LIVE requests and
-    // killed scans with "fail". Mirror 0 (the reliable one) now gets 150s;
-    // mail.ru stays short (it's either fast or dead — 504s all day).
-    for (const mirror of [0, 1]) {
+    // v6.9.64: walk FOUR server mirrors (0=api.de, 1=mail.ru, 4=osm.ch —
+    // osm.ch verified CORS-open + reliable; kumi/private.coffee stay
+    // browser-only last resorts). Poll window per mirror tuned to latency.
+    for (const mirror of [0, 1, 4] as const) {
       const start = await supabaseRpc<{ rid?: number; error?: string }>('rpc_overpass_start', { p_q: query, p_mirror: mirror }, 15000);
       if (!start?.rid) continue;
       const rid = start.rid;
-      const maxPolls = mirror === 0 ? 75 : 25; // 150s primary · 50s secondary
+      const mirrorName = mirror === 0 ? 'overpass-api.de' : mirror === 1 ? 'mail.ru' : 'osm.ch';
+      const maxPolls = mirror === 0 ? 75 : 25; // 150s primary · 50s others
       // Poll every 2s (server-side query timeout is 60–120s)
       for (let i = 0; i < maxPolls; i++) {
         if (isCancelled()) return null;
         if (i > 0) await abortableWait(2000);
-        if (i > 0 && i % 5 === 0) onWait?.(`Server processing… ${i * 2}s on ${mirror === 0 ? 'overpass-api.de' : 'mail.ru'} (queue can take ~2 min)`);
+        if (i > 0 && i % 5 === 0) onWait?.(`Server processing… ${i * 2}s on ${mirrorName} (queue can take ~2 min)`);
         const poll = await supabaseRpc<{ state: string; data?: any; error?: string }>('rpc_overpass_poll', { p_rid: rid }, 15000);
         if (!poll) break;
         if (poll.state === 'done' && poll.data?.elements !== undefined) {
           if (!poll.data.remark) {
-            logRoute('supabase:' + (mirror === 0 ? 'overpass-api.de' : 'mail.ru'), true, Date.now() - t0);
+            logRoute('supabase:' + mirrorName, true, Date.now() - t0);
             return poll.data; // real result
           }
           break; // remark = server-side partial → try next mirror
         }
-        if (poll.state === 'failed') { logRoute('supabase:' + (mirror === 0 ? 'overpass-api.de' : 'mail.ru'), false, Date.now() - t0); break; }
+        if (poll.state === 'failed') { logRoute('supabase:' + mirrorName, false, Date.now() - t0); break; }
         // state === 'pending' → keep polling
         if (i === maxPolls - 1) break;
       }
@@ -2718,6 +2730,64 @@ async function nominatimViaProxy(path: string, params: Record<string, string>, t
     _geoProxyDisabledUntil = Date.now() + PROXY_COOLDOWN_MS;
     return null;
   }
+}
+
+// ─── v6.9.64: Generic server-side page fetch (the guaranteed lane) ─
+// Supabase pg_net fetches ANY https page and returns the raw text — no
+// browser CORS, no flaky third-party proxies, separate IP pool. This is the
+// last arm of corsFetch and the fallback for every search-engine lane.
+let _srvFetchDisabledUntil = 0;
+
+async function pageFetchViaServer(url: string, timeoutMs = 30000): Promise<string | null> {
+  if (Date.now() < _srvFetchDisabledUntil) return null;
+  try {
+    const start = await supabaseRpc<{ rid?: number; error?: string }>('rpc_fetch_start', { p_url: url }, 15000);
+    if (!start?.rid) return null;
+    const rid = start.rid;
+    const maxPolls = Math.max(4, Math.ceil(timeoutMs / 2000));
+    for (let i = 0; i < maxPolls; i++) {
+      if (isCancelled()) return null;
+      if (i > 0) await abortableWait(2000);
+      const poll = await supabaseRpc<{ state: string; text?: string; status?: number; error?: string }>('rpc_fetch_poll', { p_rid: rid }, 15000);
+      if (!poll) return null;
+      if (poll.state === 'done' && poll.text) return poll.text;
+      if (poll.state === 'failed') return null;
+    }
+    return null;
+  } catch {
+    _srvFetchDisabledUntil = Date.now() + PROXY_COOLDOWN_MS;
+    return null;
+  }
+}
+
+// Bing via the server lane: fetch the search HTML from Supabase and run the
+// SAME b_algo parser. Independent of Brave quota, browser IP rate limits and
+// CORS entirely. Returns [] when the lane is down (never throws).
+async function searchBingViaServer(query: string): Promise<{ title: string; url: string; snippet: string }[]> {
+  const html = await pageFetchViaServer('https://www.bing.com/search?q=' + query + '&count=15');
+  if (!html) return [];
+  if (!/<li class="b_algo"/i.test(html)) return [];
+  const results: { title: string; url: string; snippet: string }[] = [];
+  const blocks = html.match(/<li class="b_algo"[^>]*>[\s\S]*?<\/li>/gi) || [];
+  for (const block of blocks) {
+    const titleMatch = block.match(/<h2[^>]*><a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+    const snippetMatch = block.match(/<div class="b_caption"[^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/i)
+      || block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+    if (titleMatch) {
+      let url = titleMatch[1];
+      if (url.includes('bing.com/ck/a')) {
+        const uMatch = url.match(/u=([^&]+)/);
+        if (uMatch?.[1].startsWith('a1')) {
+          try { url = atob(uMatch[1].substring(2)); } catch {}
+        }
+      }
+      const title = titleMatch[2].replace(/<[^>]+>/g, '').trim();
+      const snippet = (snippetMatch?.[1] || '').replace(/<[^>]+>/g, '').trim();
+      results.push({ title, url, snippet });
+    }
+  }
+  if (results.length > 0) yieldBump('svfetch');
+  return results;
 }
 
 async function overpassRace(query: string, timeoutSec: number): Promise<any> {
@@ -3721,7 +3791,7 @@ async function searchBing(query: string): Promise<{title: string; url: string; s
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
       signal: AbortSignal.timeout(8000),
     });
-    if (!r.ok) return [];
+    if (r.ok) {
     const html = await r.text();
     // Challenge/benign page detection: Bing occasionally serves an Arkose
     // challenge instead of results. b_algo==0 + challenge markers => no data.
@@ -3756,7 +3826,11 @@ async function searchBing(query: string): Promise<{title: string; url: string; s
       }
     }
     return results;
-  } catch { return []; }
+    }
+  } catch { /* browser arm failed — fall through to server lane */ }
+  // v6.9.64: browser arm blocked/failed → server-side Bing (no CORS, no
+  // browser IP). Same parser, independent lane.
+  return await searchBingViaServer(query);
 }
 
 // DuckDuckGo Lite search — different endpoint from html.duckduckgo.com, returns cleaner results
@@ -5315,6 +5389,26 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           if (b.website && (!b.email || !b.phone)) {
             try { await scrapeWebsiteOnce(); } catch {}
           }
+        }
+
+        // ═══ PHASE 7 (v6.9.64): snippet dig — server-lane search focused on
+        // contact-bearing pages. Bing/DDG snippets often expose the phone or
+        // email even when the site itself is unreachable from the browser;
+        // extraction is snippet-only, so this is cheap and junk-safe (strict
+        // extractors apply).
+        if ((!b.phone || !b.email) && b.name) {
+          try {
+            const ctxCity = getScanContext()?.cityNative || '';
+            const want = b.phone ? 'email OR e-mail OR почта' : 'phone OR телефон OR ტელეფონი OR هاتف';
+            const digQ = encodeURIComponent(`"${b.name}" ${ctxCity} ${want}`.trim());
+            const digResults = await searchBing(digQ);
+            let digTouched = false;
+            for (const res of digResults.slice(0, 6)) {
+              if (extractFromText((res.snippet || '') + ' ' + (res.title || ''), b)) digTouched = true;
+              if (b.phone && b.email) break;
+            }
+            if (digTouched) yieldBump('snippetdig');
+          } catch {}
         }
 
         if (b.phone || b.email || b.website) enrichedCount++;
@@ -7870,7 +7964,7 @@ __internals.extractFromHtml = extractFromHtmlModule;
 // mailto vs Cloudflare etc. Module-level so both scrape sites (deep crawler
 // and this module extractor) feed the same tally. Purely additive telemetry:
 // no extraction behavior changes, reset at every scan start.
-export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio';
+export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig';
 export interface ExtractionYieldEntry { found: number; tries: number; }
 export interface ExtractionYieldMap { [k: string]: ExtractionYieldEntry; }
 const _extractYield: ExtractionYieldMap = {};
@@ -7901,6 +7995,8 @@ export const _EXTRACT_LAYER_META: { key: ExtractionLayerKey; label: string; icon
   { key: 'vcard',     label: 'vCard',           icon: '📇' },
   { key: 'mxguess',   label: 'MX guess',        icon: '📮' },
   { key: 'socialbio', label: 'Social bio',      icon: '📱' },
+  { key: 'svfetch',   label: 'Server fetch',    icon: '🖥️' },
+  { key: 'snippetdig', label: 'Snippet dig',    icon: '⛏️' },
 ];
 export function getExtractionYield(): ExtractionYieldMap { return JSON.parse(JSON.stringify(_extractYield)); }
 
