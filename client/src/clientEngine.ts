@@ -2221,6 +2221,16 @@ function anySignal(...signals: (AbortSignal | undefined | null)[]): AbortSignal 
   return ac.signal;
 }
 
+// v6.9.61: cap a body read. AbortSignal.timeout caps until response HEADERS
+// arrive — a server that sends headers then stalls the body hangs an
+// unguarded `await r.text()` forever. This races the read against a timer.
+async function bodyWithCap<T>(p: Promise<T>, ms: number): Promise<T> {
+  let t: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([p, new Promise<never>((_, rej) => { t = setTimeout(() => rej(new Error('body-stall')), ms); })]);
+  } finally { if (t) clearTimeout(t); }
+}
+
 async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', ...init?.headers };
   const callerSignal = init?.signal;
@@ -2250,9 +2260,16 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   if (firstTouch) {
     if (hostAllowsDirect(url)) {
       try {
-        const r = await fetch(url, { ...init, headers });
-        if (r.ok) { hostRecordSuccess(url); return r; }
-      } catch { /* CORS error */ }
+        const r0 = await fetch(url, { ...init, headers });
+        // v6.9.61: buffer the body under a cap and rebuild the Response —
+        // the raw Response's body stream has no deadline, so a stalled
+        // body would hang every caller's `await r.text()` forever.
+        if (r0.ok) {
+          const text = await bodyWithCap(r0.text(), 4000);
+          hostRecordSuccess(url);
+          return new Response(text, { status: 200, headers: { 'Content-Type': r0.headers.get('content-type') || 'text/html' } });
+        }
+      } catch { /* CORS error or body stall */ }
     }
     markDirectDead(url);
   }
@@ -2313,7 +2330,7 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
         try {
           const r = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(url), { headers, signal: anySignal(callerSignal, chainCap, AbortSignal.timeout(5000)) });
           if (r.ok) {
-            const json = await r.json();
+            const json = await bodyWithCap(r.json() as Promise<any>, 8000); // v6.9.61: stalled bodies must not wedge single-flight
             _alloFails = 0; _alloLastPayload = json.contents || '';
             hostRecordSuccess(url);
             return true;
@@ -3286,22 +3303,68 @@ async function enrichFromSocialPlatforms(businesses: Business[], onProgress?: (p
 // ─── WordPress REST API Scraper ────────────────────────────────
 // WordPress sites expose contact info via /wp-json/wp/v2/users and /wp-json/
 // ─── Sitemap Scraper ────────────────────────────────────────────
-// Parse sitemap.xml to find contact/about pages, then scrape them
+// v6.9.60: full sitemap discovery chain — robots.txt-declared sitemaps,
+// WordPress /sitemap_index.xml, Webflow /sitemap-index.xml, then /sitemap.xml;
+// sitemap indexes (nested <sitemap>) are expanded one level. Contact-page
+// matching now covers Spanish/French/German/Russian/Turkish page words.
+const _SITEMAP_CANDIDATES_DISCOVERED = new Set<string>(); // per-session dedupe
+async function discoverSitemapUrls(base: string): Promise<string[]> {
+  const out: string[] = [];
+  const push = (u: string) => { if (!out.includes(u) && out.length < 4) out.push(u); };
+  // 1. robots.txt Sitemap: declarations (most reliable source)
+  try {
+    const rb = await corsFetch(base + '/robots.txt', { signal: AbortSignal.timeout(3000) });
+    if (rb.ok) {
+      const txt = await rb.text();
+      for (const m of txt.matchAll(/^sitemap:\s*(\S+)/gim)) {
+        const u = m[1].trim();
+        if (/^https?:\/\//i.test(u) && u.includes(new URL(base).hostname.replace(/^www\./, ''))) push(u);
+      }
+    }
+  } catch {}
+  // 2. Common CMS index conventions + default
+  push(base + '/sitemap_index.xml');  // WordPress (Yoast)
+  push(base + '/sitemap-index.xml');  // Webflow / Shopify
+  push(base + '/sitemap.xml');
+  return out;
+}
 async function scrapeSitemapForContacts(b: Business): Promise<void> {
   if (!b.website || (b.email && b.phone)) return;
   const base = b.website.replace(/\/$/, '');
   const JUNK = /example\.com|wixpress|sentry|googleapis|google\.com|cloudflare/i;
   const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
+  const PAGE_WORD = /contact|about|team|info|impressum|kontakt|контакт|iletisim|contatti|contacto|contato|nosotros|quiennes-somos|quienes|sobre|empresa|aviso-legal|aviso|nutseekond|nutiiebol|kavshiri|momkhmarebeli|connexion|mentions|კონტაქტ|კავშირ|ჩვენ შესახებ|Հետադարձ|կապ|մեր մասին/i;
 
   try {
-    const r = await corsFetch(base + '/sitemap.xml', {
-      signal: AbortSignal.timeout(4000),
-    });
-    if (!r.ok) return;
-    const xml = await r.text();
-    // Find contact/about URLs in sitemap
-    const urls = [...xml.matchAll(/<loc>([^<]+)<\/loc>/gi)].map(m => m[1]);
-    const contactUrls = urls.filter(u => /contact|about|team|info|impressum/i.test(u));
+    const sitemapUrls = await discoverSitemapUrls(base);
+    let xml = '';
+    for (const smUrl of sitemapUrls) {
+      if (xml) break;
+      try {
+        const r = await corsFetch(smUrl, { signal: AbortSignal.timeout(4000) });
+        if (!r.ok) continue;
+        const t = await r.text();
+        if (/<loc>/i.test(t)) xml = t;
+      } catch {}
+    }
+    if (!xml) return;
+    let urls = [...xml.matchAll(/<loc>([^<]+)<\/loc>/gi)].map(m => m[1]);
+    // Sitemap index: expand one level (sub-sitemaps)
+    if (/sitemapindex/i.test(xml)) {
+      const subs = urls.filter(u => /\.xml(\?|$)/i.test(u)).slice(0, 3);
+      for (const s of subs) {
+        if (b.email && b.phone) break;
+        try {
+          const sr = await corsFetch(s, { signal: AbortSignal.timeout(3500) });
+          if (sr.ok) {
+            const st = await sr.text();
+            urls = urls.concat([...st.matchAll(/<loc>([^<]+)<\/loc>/gi)].map(m => m[1]));
+          }
+        } catch {}
+      }
+    }
+    // Find contact/about URLs in sitemap (multilingual)
+    const contactUrls = urls.filter(u => PAGE_WORD.test(u));
 
     for (const url of contactUrls.slice(0, 3)) {
       if (b.email && b.phone) break;
@@ -3362,11 +3425,11 @@ async function scrapeVCard(b: Business): Promise<void> {
         // Parse vCard format
         if (!b.email) {
           const emailM = vcf.match(/EMAIL[^:]*:([^\r\n]+)/i);
-          if (emailM) b.email = emailM[1].trim();
+          if (emailM) { b.email = emailM[1].trim(); yieldBump('vcard'); }
         }
         if (!b.phone) {
           const telM = vcf.match(/TEL[^:]*:([^\r\n]+)/i);
-          if (telM) b.phone = telM[1].trim();
+          if (telM) { b.phone = telM[1].trim(); yieldBump('vcard'); }
         }
       } catch {}
     }
@@ -4106,6 +4169,54 @@ function buildPhoneQuery(b: Business): string {
 }
 // guessEmailsFromDomain removed
 
+// ─── DNS MX-validated email guessing ────────────────────────────
+// v6.9.60: for businesses with a website but no email, guess the classic
+// local-part patterns (info@, contact@, office@…) and KEEP a guess only if
+// the domain's DNS actually has MX (mail exchange) records — verified via
+// Google/Cloudflare DNS-over-HTTPS. Never fabricates: a domain without
+// mail servers rejects every guess. Per-domain results are cached so a
+// 100-business category on the same mail host pays DNS once.
+const _mxCache = new Map<string, boolean>();
+async function domainHasMx(host: string): Promise<boolean> {
+  const key = host.replace(/^www\./, '').toLowerCase();
+  if (_mxCache.has(key)) return _mxCache.get(key)!;
+  let ok = false;
+  const doh = [
+    `https://dns.google/resolve?name=${encodeURIComponent(key)}&type=MX`,
+    `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(key)}&type=MX`,
+    `https://dns.alidns.com/resolve?name=${encodeURIComponent(key)}&type=MX`,
+  ];
+  for (const u of doh) {
+    try {
+      const r = await fetch(u, {
+        headers: { 'accept': 'application/dns-json' },
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!r.ok) continue;
+      const j = await r.json() as { Answer?: { type: number; data: string }[] };
+      if (j.Answer?.some(a => a.type === 15 && a.data)) { ok = true; break; }
+      if (j.Answer) break; // authoritative empty answer → no MX
+      // No Answer block: try next resolver
+    } catch {}
+  }
+  _mxCache.set(key, ok);
+  return ok;
+}
+async function guessEmailFromDomain(b: Business): Promise<void> {
+  if (b.email || !b.website) return;
+  try {
+    const host = new URL(b.website).hostname.replace(/^www\./, '').toLowerCase();
+    // Skip free-mail hosts — info@gmail.com is never the business mailbox
+    if (/(gmail|yahoo|hotmail|outlook|yandex|mail\.ru|icloud|proton)\./i.test(host)) return;
+    if (!(await domainHasMx(host))) return;
+    const locals = ['info', 'contact', 'hello', 'office', 'mail', 'admin', 'support', 'booking', 'sales', 'hi'];
+    for (const prefix of locals) {
+      const candidate = prefix + '@' + host;
+      if (plausibleEmail(candidate)) { b.email = candidate; yieldBump('mxguess'); return; }
+    }
+  } catch {}
+}
+
 // Try Google cache as fallback for blocked websites
 async function tryGoogleCache(_b: Business): Promise<void> {
     // Google Cache discontinued in 2024
@@ -4195,20 +4306,25 @@ async function deepCrawlWebsite(b: Business): Promise<void> {
     // Mine the homepage itself first (cheap — already fetched)
     extractFromHtml(html, b);
     if (b.email && b.phone) return;
-    // Collect internal candidate links, ranked by contact-smell
+    // Collect internal candidate links, ranked by contact-smell.
+    // v6.9.60: match full <a> tags so ANCHOR TEXT counts too — many CMS
+    // menus label the contact page in plain words ("Get in touch",
+    // "Contacto", "კონტაქტი") while the slug is opaque (/page-42).
     const CONTACT_SMELL = /(contact|kontakt|контакт|about|aboutus|about-us|impressum|team|staff|info|reach|touch|book|reserve|reservation|location|visit|findus|find-us|faq|support|help|office|branch|kavshiri|momkhmarebeli|iletisim|contatti|contacto|contato|lianxi)/i;
+    const CONTACT_ANCHOR = /(contact|kontakt|контакт|iletisim|contatti|contacto|contato|contatto|get in touch|reach us|talk to us|enquir|inquir|book a table|reserve|kavshiri|momkhmarebeli|nutse|nutiieb|зв'язок|зв'яток|звязок|lianxi|lian he|savioid|saiderdzneba|კონტაქტ|კავშირ|დაგვიკავშირ|ჩვენ შესახებ|Հետադարձ կապ|կապ|մեր մասին)/i;
     const seen = new Set<string>();
     const candidates: string[] = [];
-    const links = html.matchAll(/href\s*=\s*["']([^"'#]+)["']/gi);
+    const links = html.matchAll(/<a[^>]*href\s*=\s*["']([^"'#]+)["'][^>]*>([\s\S]{0,120}?)<\/a>/gi);
     for (const m of links) {
       let u = m[1];
+      const anchorText = m[2] || '';
       if (u.startsWith('/')) u = base + u;
       else if (!/^https?:\/\//i.test(u)) continue;
       let h = '';
       try { h = new URL(u).hostname.replace(/^www\./, ''); } catch { continue; }
       if (h !== host || seen.has(u)) continue; // internal only, deduped
       seen.add(u);
-      if (!CONTACT_SMELL.test(u)) continue;
+      if (!CONTACT_SMELL.test(u) && !CONTACT_ANCHOR.test(anchorText)) continue;
       if (/\.(png|jpe?g|gif|svg|pdf|zip|css|js)$/i.test(u)) continue;
       candidates.push(u);
       if (candidates.length >= 12) break;
@@ -4717,6 +4833,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   emitEP();
 
   const _BATCH = 10;
+  const _BIZ_CAP_MS = 45_000; // v6.9.61: per-business watchdog — no lane may hold a batch hostage
   let enrichedCount = 0;
 
   for (let i = 0; i < maxEnrich; i += _BATCH) {
@@ -4726,7 +4843,15 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     batch.forEach(b => recordBusiness(b, 'parsing'));
     logQuery(buildSearchQuery(batch[0]), `${batch.length} businesses`);
     await Promise.all(batch.map(async (b, bi) => {
+      // v6.9.61: per-business watchdog. AbortSignal.timeout only caps until
+      // response HEADERS — a server that sends headers then stalls the body
+      // hangs `await r.text()` forever, freezing the whole batch and the
+      // progress counter (observed live at 290/535). The race abandons the
+      // stalled business after _BIZ_CAP_MS and lets the scan move on.
+      let _bizT: ReturnType<typeof setTimeout> | undefined;
       try {
+        await Promise.race([
+          (async (): Promise<void> => {
         // Helper: check if business has sufficient data (phone OR email + website)
         const hasSufficientData = () => (b.phone && b.email) || (b.phone && b.website) || (b.email && b.website);
         let websiteScraped = false;
@@ -4752,6 +4877,11 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           }
           if (!contactSetComplete()) {
             try { await scrapeVCard(b); } catch {}
+          }
+          // v6.9.60: DNS-MX-validated email guessing for site-owning
+          // businesses whose contact pages stayed email-dark.
+          if (!b.email && b.website) {
+            try { await guessEmailFromDomain(b); } catch {}
           }
           // v6.9.37: run the contact-page crawler while EITHER email or
           // phone is missing (was: email only — pages with a phone but no
@@ -5061,7 +5191,10 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         const finalStatus: 'parsing' | 'enriched' | 'partial' | 'minimal' =
           fieldsFound >= 3 ? 'enriched' : fieldsFound >= 1 ? 'partial' : 'minimal';
         recordBusiness(b, finalStatus, lastSuccessfulEngineFor(b));
-      } catch {}
+          })(),
+          new Promise<never>((_, rej) => { _bizT = setTimeout(() => rej(new Error('business-watchdog')), _BIZ_CAP_MS); }),
+        ]);
+      } catch {} finally { if (_bizT) clearTimeout(_bizT); }
     }));
 
     if (i + _BATCH < maxEnrich) await wait(_POLITE_MS);
@@ -7598,7 +7731,7 @@ __internals.extractFromHtml = extractFromHtmlModule;
 // mailto vs Cloudflare etc. Module-level so both scrape sites (deep crawler
 // and this module extractor) feed the same tally. Purely additive telemetry:
 // no extraction behavior changes, reset at every scan start.
-export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta';
+export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess';
 export interface ExtractionYieldEntry { found: number; tries: number; }
 export interface ExtractionYieldMap { [k: string]: ExtractionYieldEntry; }
 const _extractYield: ExtractionYieldMap = {};
@@ -7626,6 +7759,8 @@ export const _EXTRACT_LAYER_META: { key: ExtractionLayerKey; label: string; icon
   { key: 'jslit',     label: 'JS literals',     icon: '📜' },
   { key: 'dataattr',  label: 'data-email',      icon: '🔗' },
   { key: 'meta',      label: 'Meta/OG',         icon: '🌐' },
+  { key: 'vcard',     label: 'vCard',           icon: '📇' },
+  { key: 'mxguess',   label: 'MX guess',        icon: '📮' },
 ];
 export function getExtractionYield(): ExtractionYieldMap { return JSON.parse(JSON.stringify(_extractYield)); }
 

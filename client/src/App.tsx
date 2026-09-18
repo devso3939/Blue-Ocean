@@ -801,7 +801,7 @@ export default function App() {
     setRescanNote('');
     setScanAreaLabel(''); // v6.9.35: badge resets at the start of every run
     setOverpassRoute([]); resetOverpassRouteLog();
-    resetExtractionYield(); // v6.9.59: per-layer yield counters start fresh each run
+    resetExtractionYield(); // v6.9.60: per-layer yield counters start fresh each run
     setEngineHealth(getEngineHealthSnapshot());
 
     try {
@@ -1051,7 +1051,7 @@ export default function App() {
     setRescanNote('');
     setScanAreaLabel(''); // v6.9.35: badge resets at the start of every run
     setOverpassRoute([]); resetOverpassRouteLog();
-    resetExtractionYield(); // v6.9.59: per-layer yield counters start fresh each run
+    resetExtractionYield(); // v6.9.60: per-layer yield counters start fresh each run
     setEngineHealth(getEngineHealthSnapshot());
 
     try {
@@ -1730,7 +1730,7 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* ── v6.9.59: Extraction-layer yield — which parsers found contacts ── */}
+                  {/* ── v6.9.60: Extraction-layer yield — which parsers found contacts ── */}
                   {enrichProgress.layerYield && enrichProgress.layerYield.length > 0 && (
                     <div className="flex flex-wrap items-center gap-1 border-b border-border/60 bg-sky-500/5 px-3 py-1.5">
                       <span className="mr-1 text-[9px] uppercase tracking-wider text-muted-foreground/70">Layer yield</span>
