@@ -3299,6 +3299,106 @@ async function enrichFromSocialPlatforms(businesses: Business[], onProgress?: (p
 }
 
 
+// ─── v6.9.62: Social-bio scraping ───────────────────────────────
+// Most businesses without websites DO have Instagram/Facebook pages, and
+// those pages carry exactly what the website→contact chain would give us:
+// bio emails/phones, wa.me links, and one-hop external links (linktr.ee /
+// beacons / taplink → the real site). Until now the pipeline found social
+// URLs but never opened them. Strict extractors run on everything we fetch,
+// so junk stays out. Session-deduped, watchdog-covered, ≤2 fetches/business.
+const _socialBioDone = new Set<string>();
+const _BIO_LINK_HOSTS = /linktr\.ee|beacons\.ai|taplink\.cc|solo\.to|carrd\.co|milkshake\.app|linkin\.bio|bio\.link|liinks\.co|urlgeni\.us/i;
+const _SOCIAL_FETCH_HEADERS = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36' };
+
+async function _fetchSocialText(url: string): Promise<string> {
+  try {
+    const r = await corsFetch(url, { headers: _SOCIAL_FETCH_HEADERS, signal: AbortSignal.timeout(6000) });
+    if (r.ok) {
+      const t = await bodyWithCap(r.text(), 4000);
+      if (t && t.length > 60) return t;
+    }
+  } catch {}
+  try {
+    const r2 = await corsFetch('https://r.jina.ai/' + url, { signal: AbortSignal.timeout(9000) });
+    if (r2.ok) {
+      const t2 = await bodyWithCap(r2.text(), 4000);
+      if (t2 && t2.length > 60) return t2;
+    }
+  } catch {}
+  return '';
+}
+
+async function enrichFromSocialBio(b: Business): Promise<void> {
+  const urls: string[] = [];
+  if (b.instagram && /^https?:/.test(b.instagram)) urls.push(b.instagram);
+  if (b.facebook && /^https?:/.test(b.facebook)) urls.push(b.facebook);
+  if (urls.length === 0) return;
+  const key = urls.join('|');
+  if (_socialBioDone.has(key)) return;
+  _socialBioDone.add(key);
+  yieldTry('socialbio');
+  const need = !b.email || !b.phone || !b.website;
+  if (!need) return;
+
+  const apply = async (html: string, allowWebsite: boolean): Promise<boolean> => {
+    let touched = false;
+    if (html.length < 60) return touched;
+    // Phone: wa.me / api.whatsapp / t.me carry the canonical number
+    if (!b.phone) {
+      const wa = html.match(/(?:wa\.me\/|api\.whatsapp\.com\/send\?phone=|t\.me\/\+?)([0-9]{8,15})/i);
+      if (wa) {
+        const cc = getScanContext()?.countryCode;
+        const norm = normalizePhone('+' + wa[1], cc);
+        const d = norm.replace(/\D/g, '');
+        if (d.length >= 8 && d.length <= 15 && plausiblePhone('+' + wa[1])) { b.phone = norm; touched = true; }
+      }
+    }
+    // Run the module extractor (strict, Cloudflare/entity/JSON-LD aware)
+    if (!b.email || !b.phone) {
+      try { extractFromHtmlModule(html, b); } catch {}
+    }
+    // One-hop bio links
+    if (allowWebsite || !b.website) {
+      const seen = new Set<string>();
+      for (const m of html.matchAll(/https?:\/\/[^\s"'<>\\)]+/g)) {
+        let u = m[0].replace(/[.,;:!]+$/, '');
+        let host = '';
+        try { host = new URL(u).hostname.replace(/^www\./, ''); } catch { continue; }
+        if (seen.has(host) || seen.size >= 12) continue;
+        seen.add(host);
+        if (/instagram\.com|facebook\.com|fb\.com|fbcdn|cdninstagram|tiktok\.com|youtube\.com|youtu\.be|twitter\.com|x\.com|linkedin\.com|threads\.net|pinterest\.|t\.me|telegram\.me|wa\.me|whatsapp\.com|maps\.google|goo\.gl|google\.com|duckduckgo|yandex\.|mail\.ru|gstatic|w3\.org|schema\.org|apple\.com|microsoft\.com/i.test(host)) continue;
+        if (_BIO_LINK_HOSTS.test(host)) {
+          // Fetch the link hub and harvest its outbound links + contacts
+          const hub = html.match(new RegExp('https?://[^\\s"\'<>\\\\)]*' + host.replace(/\./g, '\\.'), 'i'));
+          if (hub) {
+            const hubHtml = await _fetchSocialText(hub[0]);
+            if (hubHtml) {
+              if (!b.email || !b.phone) { try { extractFromHtmlModule(hubHtml, b); touched = true; } catch {} }
+              if (!b.website) {
+                for (const hm of hubHtml.matchAll(/https?:\/\/[^\s"'<>\\)]+/g)) {
+                  const hu = hm[0].replace(/[.,;:!]+$/, '');
+                  let hhost = '';
+                  try { hhost = new URL(hu).hostname.replace(/^www\./, ''); } catch { continue; }
+                  if (_BIO_LINK_HOSTS.test(hhost) || /instagram|facebook|tiktok|youtube|twitter|x\.com|linkedin|t\.me|wa\.me|whatsapp/i.test(hhost)) continue;
+                  if (isLikelyBusinessWebsite(hu, b.name, hubHtml.slice(0, 400))) { b.website = hu; touched = true; break; }
+                }
+              }
+            }
+          }
+        } else if (!b.website && isLikelyBusinessWebsite(u, b.name, html.slice(0, 400))) {
+          b.website = u; touched = true;
+        }
+      }
+    }
+    return touched;
+  };
+
+  for (const u of urls.slice(0, 2)) {
+    const html = await _fetchSocialText(u);
+    if (html) await apply(html, true);
+  }
+}
+
 // ─── Enhanced Website Scraper (JSON-LD, OpenGraph, deep contact) ──
 // ─── WordPress REST API Scraper ────────────────────────────────
 // WordPress sites expose contact info via /wp-json/wp/v2/users and /wp-json/
@@ -3844,6 +3944,20 @@ async function probeDomains(b: Business): Promise<void> {
   if (translit !== b.name && translit !== nameEn) {
     slugs.push(asciiFold(translit).toLowerCase().replace(/[^a-z0-9]+/g, '').substring(0, 20));
   }
+  // v6.9.62: brand tokens — distinctive words only. "Kala Kitchen Tbilisi"
+  // probes kala.ge / kalakitchen.com, not just the useless full-slug
+  // kalakitchentilisi.ge. Generic words (restaurant, cafe, salon…) and
+  // city names are stripped; single letters dropped; max 3 tokens.
+  const _GENERIC = /^(restaurant|cafe|caf[eé]|bar|pub|hotel|hostel|salon|studio|shop|store|market|bakery|pharmacy|clinic|center|centre|spa|gym|fitness|club|the|and|or|of|da|de|del|la|le|el)$/i;
+  const rawTokens = asciiFold(b.name)
+    .split(/[^A-Za-z0-9]+/)
+    .map(w => w.toLowerCase())
+    .filter(w => w.length >= 3 && w.length <= 14 && !_GENERIC.test(w));
+  const cityWords = new Set((cityEn || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+  const brandTokens = Array.from(new Set(rawTokens)).filter(w => !cityWords.has(w)).slice(0, 3);
+  for (const tok of brandTokens) {
+    if (!slugs.includes(tok)) slugs.unshift(tok);
+  }
   // v6.9.57: country TLD FIRST — activaclub.es for a Valencia gym. The old
   // hardcoded list (.ge/.am/.ru/.tr/.fr/.de/.co) never tried the scan
   // country's own ccTLD, so outside the Caucasus the whole
@@ -3856,9 +3970,12 @@ async function probeDomains(b: Business): Promise<void> {
     '.io', '.co', '.eu',
     '.ge', '.am', '.ru', '.tr', '.fr', '.de',
   ];
+  let _probeBudget = 8; // v6.9.62: hard cap — brand tokens probe first (most likely), budget never explodes
   for (const slug of slugs) {
     if (slug.length < 3) continue;
     for (const tld of tlds) {
+      if (_probeBudget <= 0) return;
+      _probeBudget--;
       try {
         const domain = 'https://' + slug + tld;
         const r = await corsFetch(domain, {
@@ -5185,6 +5302,21 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           } catch {}
         }
 
+        // ═══ PHASE 6 (v6.9.62): social-bio mining — open the IG/FB pages we
+        // found and harvest bio emails/phones, wa.me numbers, and one-hop
+        // link-hub → real-website chains. Runs only when something is still
+        // missing; the strict extractors keep junk out.
+        if (b.facebook || b.instagram) {
+          if (!b.email || !b.phone || !b.website) {
+            try { await enrichFromSocialBio(b); } catch {}
+          }
+          // If a bio link revealed a website, the whole website→contact chain
+          // now runs on it (deep scrape → sitemap → WP API → vCard → MX).
+          if (b.website && (!b.email || !b.phone)) {
+            try { await scrapeWebsiteOnce(); } catch {}
+          }
+        }
+
         if (b.phone || b.email || b.website) enrichedCount++;
         // ── Live discovery feed: record finished business ──
         const fieldsFound = [b.email, b.phone, b.website, b.facebook || b.instagram].filter(Boolean).length;
@@ -5404,6 +5536,13 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             }
             if (b.email && b.phone) break;
           } catch {}
+        }
+        // v6.9.62: the shared bio miner adds what the loop above lacks —
+        // wa.me/WhatsApp numbers, one-hop link hubs (linktr.ee → the real
+        // site), and brand-token domain probes are all in there. Session-
+        // deduped, so businesses already mined in pass 1 are not refetched.
+        if (!b.email || !b.phone || !b.website) {
+          try { await enrichFromSocialBio(b); } catch {}
         }
       }));
       const afterCnt = batch5b.filter(x => x.email || x.phone).length;
@@ -7731,7 +7870,7 @@ __internals.extractFromHtml = extractFromHtmlModule;
 // mailto vs Cloudflare etc. Module-level so both scrape sites (deep crawler
 // and this module extractor) feed the same tally. Purely additive telemetry:
 // no extraction behavior changes, reset at every scan start.
-export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess';
+export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio';
 export interface ExtractionYieldEntry { found: number; tries: number; }
 export interface ExtractionYieldMap { [k: string]: ExtractionYieldEntry; }
 const _extractYield: ExtractionYieldMap = {};
@@ -7761,6 +7900,7 @@ export const _EXTRACT_LAYER_META: { key: ExtractionLayerKey; label: string; icon
   { key: 'meta',      label: 'Meta/OG',         icon: '🌐' },
   { key: 'vcard',     label: 'vCard',           icon: '📇' },
   { key: 'mxguess',   label: 'MX guess',        icon: '📮' },
+  { key: 'socialbio', label: 'Social bio',      icon: '📱' },
 ];
 export function getExtractionYield(): ExtractionYieldMap { return JSON.parse(JSON.stringify(_extractYield)); }
 
