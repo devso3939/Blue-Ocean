@@ -24,6 +24,7 @@ import {
   supplementProServices,
   getEngineHealthSnapshot,
   resetExtractionYield,
+  resetArmStats, getArmStats,
   type EngineHealthEntry,
   type VerificationResult,
   type EnrichmentProgress,
@@ -802,6 +803,8 @@ export default function App() {
     setScanAreaLabel(''); // v6.9.35: badge resets at the start of every run
     setOverpassRoute([]); resetOverpassRouteLog();
     resetExtractionYield(); // v6.9.60: per-layer yield counters start fresh each run
+    resetArmStats(); // v6.9.65: per-arm profiling starts fresh each run
+    (window as any).__boArmStats = getArmStats; // live readout for verification
     setEngineHealth(getEngineHealthSnapshot());
 
     try {
@@ -1052,6 +1055,8 @@ export default function App() {
     setScanAreaLabel(''); // v6.9.35: badge resets at the start of every run
     setOverpassRoute([]); resetOverpassRouteLog();
     resetExtractionYield(); // v6.9.60: per-layer yield counters start fresh each run
+    resetArmStats(); // v6.9.65: per-arm profiling starts fresh each run
+    (window as any).__boArmStats = getArmStats; // live readout for verification
     setEngineHealth(getEngineHealthSnapshot());
 
     try {

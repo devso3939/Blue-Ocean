@@ -2212,6 +2212,29 @@ export function getEngineHealthSnapshot(): EngineHealthEntry[] {
 
 export function resetEngineHealth(): void { _engineHealth.clear(); }
 
+// ─── v6.9.65: Per-arm profiling — measured yield-per-second per engine ──
+// The pass-1 batch fires 8 engine arms in parallel per business; arms that
+// consistently produce nothing while burning their full timeout are pure
+// waste (they hold no slot in Promise.all, but their timeouts pace the
+// batch and their fetches eat the network budget). This counter records
+// wall-time + fields-gained per arm so ordering decisions use data.
+export interface ArmStat { calls: number; ms: number; gains: number; skips: number; }
+const _armStats = new Map<string, ArmStat>();
+function armStat(id: string): ArmStat {
+  let s = _armStats.get(id);
+  if (!s) { s = { calls: 0, ms: 0, gains: 0, skips: 0 }; _armStats.set(id, s); }
+  return s;
+}
+function armNoteGain(id: string): void { armStat(id).gains++; }
+export function resetArmStats(): void { _armStats.clear(); }
+export function getArmStats(): { id: string; calls: number; ms: number; gains: number; skips: number; msPerCall: number; msPerGain: number | null }[] {
+  const rows: { id: string; calls: number; ms: number; gains: number; skips: number; msPerCall: number; msPerGain: number | null }[] = [];
+  for (const [id, s] of _armStats) {
+    rows.push({ id, calls: s.calls, ms: s.ms, gains: s.gains, skips: s.skips, msPerCall: s.calls ? Math.round(s.ms / s.calls) : 0, msPerGain: s.gains ? Math.round(s.ms / s.gains) : null });
+  }
+  return rows.sort((a, b) => (a.msPerGain ?? Infinity) - (b.msPerGain ?? Infinity));
+}
+
 // v6.9.45: combine several abort sources into one signal (no dependency on
 // AbortSignal.any availability in the TS lib).
 function anySignal(...signals: (AbortSignal | undefined | null)[]): AbortSignal {
@@ -5102,64 +5125,28 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         // of silently dropping the lane for the rest of the scan.
         const engineArm = async (id: string, label: string, fn: () => Promise<boolean>, fallback?: () => Promise<void>) => {
           if (!engineAvailable(id)) {
+            armStat(id).skips++;
             if (fallback) { try { await fallback(); } catch {} }
             return;
           }
+          // v6.9.65 profiling: wall-time + fields-gained per arm
+          const _armSigBefore = `${b.website || ''}|${b.phone || ''}|${b.email || ''}|${b.facebook || ''}|${b.instagram || ''}`;
+          const _t0 = Date.now();
           try {
             const ok = await fn();
+            armStat(id).calls++;
+            armStat(id).ms += Date.now() - _t0;
+            const _armSigAfter = `${b.website || ''}|${b.phone || ''}|${b.email || ''}|${b.facebook || ''}|${b.instagram || ''}`;
+            if (_armSigAfter !== _armSigBefore) armNoteGain(id);
             if (ok) engineNoteSuccess(id, label);
           } catch (e: any) {
+            armStat(id).calls++;
+            armStat(id).ms += Date.now() - _t0;
             if (e?.message === 'Cancelled') return;
             engineNoteFail(id, label, 'net', String(e?.message || '').slice(0, 80));
           }
         };
         await Promise.all([
-          // Brave API (free tier) → fallback: Mojeek HTML (keyless)
-          engineArm('brave', 'Brave', async () => {
-            // v6.9.12: stagger + gate re-check, same as the email arm —
-            // the 10-business batch fires this arm in parallel, so without
-            // a mid-wave failure to trip the surge guard all 10 429s print
-            // at once. Span 400ms×9 > the 2s timeout below.
-            if (bi > 0) await wait(400 * bi);
-            if (!braveOkToCall()) return false;
-            const bkey = _braveKey();
-            if (bkey) {
-              try {
-                const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=5`, {
-                  headers: { 'Accept': 'application/json', 'X-Subscription-Token': bkey },
-                  signal: AbortSignal.timeout(2000),
-                });
-                if (r.ok) {
-                  const data = await r.json();
-                  applyBraveResults(data.web?.results || [], data.knowledge_graph?.url);
-                  return true;
-                }
-                // v6.9.13: quota → rotate to next backup key (same business re-arms)
-                if (r.status === 402 || r.status === 429 || r.status === 401) {
-                  const next = _poolRotate('brave');
-                  engineNoteFail('brave', 'Brave', 'quota', next ? 'key exhausted — rotating to backup key' : 'backups exceeded');
-                } else {
-                  braveNoteFail(classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
-                }
-              } catch (e: any) {
-                if (e?.message !== 'Cancelled') braveNoteFail('net', String(e?.name === 'TimeoutError' ? 'timeout' : 'network error').slice(0, 60));
-              }
-            } else {
-              engineNoteFail('brave', 'Brave', 'quota', 'backups exceeded');
-            }
-            // v6.9.55: browser arm failed (rate limit / no key / network) →
-            // reroute THIS business through the server-side Brave proxy —
-            // a separate quota pool (Vault key), so the lane keeps yielding.
-            const srv = await braveSearchViaSupabase(decodeURIComponent(q));
-            if (srv && srv.length > 0) { applyBraveResults(srv); return true; }
-            return false;
-          }, async () => {
-            // v6.9.55: browser engine skipped (cooldown/quota from a previous
-            // wave) → the server-side proxy keeps this business's Brave lane
-            // alive instead of silently dropping it for the whole scan.
-            const srv = await braveSearchViaSupabase(decodeURIComponent(q));
-            if (srv && srv.length > 0) applyBraveResults(srv);
-          }),
           engineArm('mojeek', 'Mojeek', async () => {
             if (engineAvailable('brave') && _braveKey()) return false; // Brave is primary when healthy
             const r = await corsFetch('https://www.mojeek.com/search?q=' + q, {
@@ -5224,17 +5211,6 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             if (touched || b.website) markEngine(b, 'Bing');
             return true;
           }),
-          // DDG Lite
-          engineArm('ddglite', 'DDG Lite', async () => {
-            const spResults = await searchDDGLite(decodeURIComponent(q));
-            let touched = false;
-            for (const res of spResults) {
-              if (extractFromText((res.snippet || '') + ' ' + (res.title || ''), b)) touched = true;
-              if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('duckduckgo.com/lite') && isLikelyBusinessWebsite(res.url, b.name, (res.snippet || '') + ' ' + (res.title || ''))) b.website = res.url;
-            }
-            if (touched || b.website) markEngine(b, 'DDG Lite');
-            return true;
-          }),
           // Serper (Google SERP API — free tier, optional key)
           ...(_serperKey() ? [(async () => {
             if (!engineAvailable('serper')) return;
@@ -5252,6 +5228,78 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             if (before !== after) { markEngine(b, 'Tavily'); engineNoteSuccess('tavily', 'Tavily'); }
           })()] : []),
         ]);
+
+        // ═══ WAVE 2 (v6.9.65): measured low-yield arms — only for businesses
+        // the fast arms couldn't satisfy. Profiling a full Tbilisi Cafes run
+        // (535 businesses): Brave averaged 118s per field gained (35 min of
+        // cumulative fetch time for 18 gains, 4.2s stall per call), DDG Lite
+        // 89s per gain (1 gain in 535 calls). They never ran with the data
+        // they needed and paced every batch. Now they only fire when the
+        // business is still contact-thin after wave 1 — most businesses skip
+        // them entirely, so batches finish at wave-1 speed.
+        if (!hasSufficientData()) {
+          await Promise.all([
+          // DDG Lite (89s/gain measured) — cheap per call but near-zero yield
+          engineArm('ddglite', 'DDG Lite', async () => {
+            const spResults = await searchDDGLite(decodeURIComponent(q));
+            let touched = false;
+            for (const res of spResults) {
+              if (extractFromText((res.snippet || '') + ' ' + (res.title || ''), b)) touched = true;
+              if (!b.website && res.url && !_EXCLUDE.test(res.url) && !res.url.includes('duckduckgo.com/lite') && isLikelyBusinessWebsite(res.url, b.name, (res.snippet || '') + ' ' + (res.title || ''))) b.website = res.url;
+            }
+            if (touched || b.website) markEngine(b, 'DDG Lite');
+            return true;
+          }),
+          // Brave API (118s/gain measured — highest latency, lowest yield;
+          // full original arm moved here: key-pool rotation + server-side
+          // fallback, stagger burn no longer applies to satisfied businesses)
+          engineArm('brave', 'Brave', async () => {
+            // v6.9.12: stagger + gate re-check, same as the email arm —
+            // the 10-business batch fires this arm in parallel, so without
+            // a mid-wave failure to trip the surge guard all 10 429s print
+            // at once. Span 400ms×9 > the 2s timeout below.
+            if (bi > 0) await wait(400 * bi);
+            if (!braveOkToCall()) return false;
+            const bkey = _braveKey();
+            if (bkey) {
+              try {
+                const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=5`, {
+                  headers: { 'Accept': 'application/json', 'X-Subscription-Token': bkey },
+                  signal: AbortSignal.timeout(2000),
+                });
+                if (r.ok) {
+                  const data = await r.json();
+                  applyBraveResults(data.web?.results || [], data.knowledge_graph?.url);
+                  return true;
+                }
+                // v6.9.13: quota → rotate to next backup key (same business re-arms)
+                if (r.status === 402 || r.status === 429 || r.status === 401) {
+                  const next = _poolRotate('brave');
+                  engineNoteFail('brave', 'Brave', 'quota', next ? 'key exhausted — rotating to backup key' : 'backups exceeded');
+                } else {
+                  braveNoteFail(classifyEngineError(r.status, await r.text().catch(() => '')), `HTTP ${r.status}`);
+                }
+              } catch (e: any) {
+                if (e?.message !== 'Cancelled') braveNoteFail('net', String(e?.name === 'TimeoutError' ? 'timeout' : 'network error').slice(0, 60));
+              }
+            } else {
+              engineNoteFail('brave', 'Brave', 'quota', 'backups exceeded');
+            }
+            // v6.9.55: browser arm failed (rate limit / no key / network) →
+            // reroute THIS business through the server-side Brave proxy —
+            // a separate quota pool (Vault key), so the lane keeps yielding.
+            const srv = await braveSearchViaSupabase(decodeURIComponent(q));
+            if (srv && srv.length > 0) { applyBraveResults(srv); return true; }
+            return false;
+          }, async () => {
+            // v6.9.55: browser engine skipped (cooldown/quota from a previous
+            // wave) → the server-side proxy keeps this business's Brave lane
+            // alive instead of silently dropping it for the whole scan.
+            const srv = await braveSearchViaSupabase(decodeURIComponent(q));
+            if (srv && srv.length > 0) applyBraveResults(srv);
+          }),
+          ]);
+        }
 
         // ═══ PHASE 2: Scrape website ONCE ═══
         await scrapeWebsiteOnce();
