@@ -463,7 +463,7 @@ export default function App() {
   const [showAllOpps, setShowAllOpps] = useState(false);
   const [aiInsights, setAiInsights] = useState('');
   const [aiAnalysis, setAiAnalysis] = useState<AIAnalysis | null>(null);
-  const [selectedBiz, setSelectedBiz] = useState<{name:string;category:string;categoryLabel:string;color:string;phone:string;email:string;website:string;address:string;facebook:string;instagram:string;linkedin:string;youtube:string;tiktok:string;twitter:string;pinterest:string;rating:number;reviewCount:number;hours:string;lat:number;lon:number}|null>(null);
+  const [selectedBiz, setSelectedBiz] = useState<{name:string;category:string;categoryLabel:string;color:string;phone:string;email:string;website:string;address:string;facebook:string;instagram:string;linkedin:string;youtube:string;tiktok:string;twitter:string;pinterest:string;rating:number;reviewCount:number;hours:string;lat:number;lon:number;branches?:{url:string;title?:string;phone?:string;email?:string;address?:string}[]}|null>(null);
   const [enrichProgress, setEnrichProgress] = useState<EnrichmentProgress | null>(null);
   // v6.9.2: engine health (quota / fallback banners) + AI verification notes
   const [engineHealth, setEngineHealth] = useState<EngineHealthEntry[]>([]);
@@ -696,6 +696,7 @@ export default function App() {
             tiktok: p.tiktok || '', twitter: p.twitter || '', pinterest: p.pinterest || '',
             rating: p.rating || 0, reviewCount: p.reviewCount || 0, hours: p.hours || '',
             lat: coords[1], lon: coords[0],
+            branches: p.branches || [],
           };
           window.dispatchEvent(new CustomEvent('biz-click'));
         };
@@ -763,6 +764,7 @@ export default function App() {
         tiktok: b.tiktok || '',
         twitter: b.twitter || '', pinterest: b.pinterest || '',
         rating: b.rating || 0, reviewCount: b.reviewCount || 0, hours: b.hours || '',
+        branches: (b.branches || []).slice(0, 12),
       },
     }));
 
@@ -825,7 +827,8 @@ export default function App() {
       // always a scan-area bug (tiny admin boundary, missing city polygon),
       // not reality. Retry with progressively larger areas centered on the
       // city and keep whichever scan found MORE businesses — a genuinely
-      // small city just fails the threshold twice and keeps its honest      // (small) result. Real threshold: ~50 total; full mode must clear it.
+      // small city just fails the threshold twice and keeps its honest
+      // (small) result. Real threshold: ~50 total; full mode must clear it.
       const foundTotal = totalBusinessCount(biz);
       const HEAL_THRESHOLD = 50; // real cities (100k+) always clear this; villages legitimately don't
       // v6.9.35: badge state — starts as the base scan, updated if healing fires
@@ -2491,6 +2494,28 @@ export default function App() {
                         {selectedBiz.pinterest && <a href={selectedBiz.pinterest} target="_blank" className="text-red-400 hover:underline">Pin</a>}
                         <a href={`https://www.google.com/maps/search/?api=1&query=${selectedBiz.lat},${selectedBiz.lon}`} target="_blank" className="text-emerald-400 hover:underline ml-auto">📍 Maps</a>
                       </div>
+                      {selectedBiz.branches && selectedBiz.branches.length > 0 && (
+                        <details className="mt-1.5 group">
+                          <summary className="cursor-pointer select-none text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors">
+                            🏪 Branches ({selectedBiz.branches.length})
+                          </summary>
+                          <div className="mt-1 max-h-40 overflow-y-auto rounded-md border border-border/60 divide-y divide-border/40">
+                            {selectedBiz.branches.map((br, i) => (
+                              <div key={i} className="px-2 py-1">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="font-medium text-foreground/90 truncate text-[11px]">{br.title || new URL(br.url).pathname.slice(0, 40)}</span>
+                                  <a href={br.url} target="_blank" className="text-[9px] text-blue-400 hover:underline shrink-0">↗</a>
+                                </div>
+                                <div className="flex flex-wrap gap-x-3 text-[10px] text-muted-foreground">
+                                  {br.phone && <a href={'tel:' + br.phone} className="text-blue-400 hover:underline">📞 {br.phone}</a>}
+                                  {br.email && <a href={'mailto:' + br.email} className="text-blue-400 hover:underline truncate max-w-[150px]">✉️ {br.email}</a>}
+                                  {br.address && <span className="truncate max-w-[200px]">📍 {br.address}</span>}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      )}
                     </div>
                     <button onClick={() => setSelectedBiz(null)} className="text-muted-foreground hover:text-foreground flex-shrink-0">✕</button>
                   </div>
@@ -2508,6 +2533,23 @@ export default function App() {
                       {selectedBiz.email && <a href={'mailto:' + selectedBiz.email} className="text-blue-400 hover:underline truncate">✉️ {selectedBiz.email}</a>}
                       {selectedBiz.website && <a href={selectedBiz.website} target="_blank" className="text-blue-400 hover:underline truncate">🌐 {selectedBiz.website.replace(/^https?:\/\//, '').substring(0, 35)}</a>}
                     </div>
+                    {selectedBiz.branches && selectedBiz.branches.length > 0 && (
+                      <details className="mt-1 pl-4">
+                        <summary className="cursor-pointer select-none text-[11px] font-medium text-muted-foreground">🏪 Branches ({selectedBiz.branches.length})</summary>
+                        <div className="mt-1 max-h-36 overflow-y-auto rounded-md border border-border/60 divide-y divide-border/40">
+                          {selectedBiz.branches.map((br, i) => (
+                            <div key={i} className="px-2 py-1">
+                              <div className="text-[11px] font-medium text-foreground/90 truncate">{br.title || 'Branch'}</div>
+                              <div className="flex flex-wrap gap-x-3 text-[10px]">
+                                {br.phone && <a href={'tel:' + br.phone} className="text-blue-400 hover:underline">📞 {br.phone}</a>}
+                                {br.email && <a href={'mailto:' + br.email} className="text-blue-400 hover:underline truncate max-w-[150px]">✉️ {br.email}</a>}
+                                {br.address && <span className="text-muted-foreground truncate max-w-[180px]">📍 {br.address}</span>}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    )}
                     <div className="flex gap-2 text-[11px] pl-4 mt-0.5">
                       {selectedBiz.facebook && <a href={selectedBiz.facebook} target="_blank" className="text-blue-500 hover:underline">FB</a>}
                       {selectedBiz.instagram && <a href={selectedBiz.instagram} target="_blank" className="text-pink-400 hover:underline">IG</a>}

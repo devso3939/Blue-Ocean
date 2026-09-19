@@ -243,6 +243,40 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
         }
       }
 
+      // v6.9.68: per-branch contact capture — every successfully fetched
+      // non-homepage page contributes distinct phone/email/address as a
+      // branch row (deduped by URL; capped at 12 per business).
+      if (url !== b.website) {
+        try {
+          if (!b._branchSeen) b._branchSeen = new Set();
+          if (!b._branchSeen.has(url) && (b._branchSeen.size < 40)) {
+            b._branchSeen.add(url);
+            const titleM = full.match(/<title[^>]*>([\s\S]{2,120}?)<\/title>/i);
+            const title = titleM ? titleM[1].replace(/\s+/g, ' ').trim().slice(0, 80) : undefined;
+            let bPhone: string | undefined;
+            const telM = full.match(/href\s*=\s*["']tel:([^"']+)["']/i);
+            if (telM) { try { bPhone = decodeURIComponent(telM[1]).trim(); } catch { bPhone = telM[1].trim(); } }
+            if (bPhone && !plausiblePhone(bPhone)) bPhone = undefined;
+            let bEmail: string | undefined;
+            const emM = full.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+            if (emM && !EXCLUDE.test(emM[0]) && !_EMAIL_FILE_RE.test(emM[0])) bEmail = emM[0];
+            let bAddr: string | undefined;
+            const adrM = full.match(/"streetAddress"\s*:\s*"([^"]{5,120})"/);
+            if (adrM) bAddr = adrM[1];
+            if (bPhone || bEmail || bAddr) {
+              if (!b.branches) b.branches = [];
+              // v6.9.68: only keep DISTINCT rows — a row whose every value
+              // already exists (parent fields or earlier rows) is noise
+              const known = new Set([b.phone, b.email, b.address, ...b.branches.flatMap(x => [x.phone, x.email, x.address])]);
+              const novel = [bPhone, bEmail, bAddr].filter(v => v && !known.has(v));
+              if (novel.length > 0 && b.branches.length < 12) {
+                b.branches.push({ url, title, phone: bPhone, email: bEmail, address: bAddr });
+              }
+            }
+          }
+        } catch {}
+      }
+
       // 2. Open Graph meta tags
       if (!b.email || !b.phone) {
         yieldTry('meta');
@@ -917,6 +951,18 @@ export interface Business {
   pinterest: string;
   /** v6.9.48: found via the web-registry supplement (not OSM) — approximate pin */
   supplemented?: boolean;
+  /** v6.9.68: per-branch contacts harvested from crawled location/branch pages */
+  branches?: Branch[];
+  /** v6.9.68: internal dedup of branch-crawled URLs */
+  _branchSeen?: Set<string>;
+}
+
+export interface Branch {
+  url: string;        // location page where this data was found
+  title?: string;     // page <title> or best heading, for branch naming
+  phone?: string;
+  email?: string;
+  address?: string;
 }
 
 // ─── Enrichment Progress (real-time panel) ──────────────────────
