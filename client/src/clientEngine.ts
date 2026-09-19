@@ -80,10 +80,68 @@ function collectJsonLdEntities(node: unknown, out: Record<string, unknown>[], de
 // --- v6.9.50: HOISTED out of queryBusinesses (were nested by an earlier scripted patch,
 // invisible to supplementProServices; no closure dependencies, safe to hoist) ---
 
+// ─── v6.9.66: Octoparse-style contact-page discovery via link scoring ────
+// Octoparse's crawl model ("max link depth", "max pages per URL",
+// "stay within domain") follows the site's OWN navigation instead of
+// guessing URL slugs. We harvest internal links from the already-fetched
+// homepage, score them by multilingual contact relevance, and crawl the
+// top candidates — catches /contact-us/, /contacts/, /communication and
+// any non-standard contact URL the slug list never guesses.
+const _LINK_STRONG: [RegExp, number][] = [
+  [/contact|kontakt|контакт|კონტაქტ|kavshiri|contacto|contatt|联络|お問い合わせ|اتصل|связ/i, 5],
+  [/get[-_ ]?in[-_ ]?touch|reach[-_ ]?us|find[-_ ]?us|where[-_ ]?to[-_ ]?find/i, 4],
+  [/location|branch|filial|ფილიალ|офис|office|store[-_ ]?locator|showroom/i, 3],
+];
+const _LINK_SOFT: [RegExp, number][] = [
+  [/about|équipe|team|impressum|\binfo\b|ჩვენ\s*შესახებ|momkhmarebeli|nosotros|chi[-_ ]?siamo|quem[-_ ]?somos|hakk/i, 2],
+];
+const _LINK_URL_SIGNAL = /contact|kontakt|kavshiri|contacto|contatt|touch|reach|find-us|location|branch|filial|info|about|gverdzi|momkhmarebeli|tsmrunebi|მისამართ|კონტაქტ/i;
+const _LINK_SKIP = /^(mailto:|tel:|javascript:|data:)|\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)(\?|$)|facebook\.com|instagram\.com|twitter\.com|x\.com|youtube\.com|tiktok\.com|linkedin\.com|t\.me|wa\.me|whatsapp\.com|viber\.|google\.|apple\.com|wix|shopify|squarespace|webflow|wordpress\.(?:com|org)|schema\.org|cloudflare|youtu\.be/i;
+
+/** Score internal links of `html` by contact relevance; top 3 same-domain URLs. */
+export function scoreContactLinks(html: string, baseUrl: string): string[] {
+  try {
+    const base = new URL(baseUrl);
+    const host = base.hostname.replace(/^www\./, '');
+    const normKey = (u: URL) => u.origin + (u.pathname.replace(/\/+$/, '') || '');
+    const homeKey = normKey(base);
+    const seen = new Set<string>([homeKey]);
+    const scored: { url: string; score: number }[] = [];
+    for (const m of html.matchAll(/<a\b[^>]*href\s*=\s*["']([^"'#\s]+)["'][^>]*>([\s\S]{0,200}?)<\/a>/gi)) {
+      const href = m[1];
+      if (_LINK_SKIP.test(href)) continue;
+      const anchor = m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      let u: URL;
+      try { u = new URL(href, baseUrl); } catch { continue; }
+      if (u.protocol !== 'https:' && u.protocol !== 'http:') continue;
+      const uhost = u.hostname.replace(/^www\./, '');
+      if (uhost !== host && !uhost.endsWith('.' + host)) continue; // stay within domain
+      const key = normKey(u);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      let decodedPath = u.pathname;
+      try { decodedPath = decodeURIComponent(u.pathname); } catch { /* malformed */ }
+      const hay = (anchor + ' ' + u.pathname + ' ' + decodedPath).slice(0, 300);
+      let score = 0;
+      for (const [rx, w] of _LINK_STRONG) if (rx.test(hay)) score += w;
+      for (const [rx, w] of _LINK_SOFT) if (rx.test(hay)) score += w;
+      if (hay.length <= 90 && _LINK_URL_SIGNAL.test(hay)) score += 1; // short nav link with slug signal
+      if (score >= 3) scored.push({ url: u.toString(), score });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, 3).map(s => s.url);
+  } catch { return []; }
+}
+
 async function enrichFromWebsiteDeep(b: Business): Promise<void> {
   if (!b.website) return;
   const EXCLUDE = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com/i;
   const JUNK = /example\.com|wixpress|sentry|googleapis|google\.com|gstatic|cloudflare|schema\.org|privacy|terms|cookie/i;
+
+  // v6.9.66: homepage HTML stashed for link-discovery scoring
+  let homeHtml = '';
+  const crawled = new Set<string>();
+  const normUrl = (u: string) => (u.replace(/\/+$/, '') || '/');
 
   async function deepScrape(url: string): Promise<boolean> {
     // Contact-fill snapshot: did this fetch change any field?
@@ -98,6 +156,7 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
       if (!r.ok) return false;
       const html = await r.text();
       const full = html.substring(0, 80000);
+      homeHtml = full;
 
       // 1. JSON-LD structured data extraction (schema.org/LocalBusiness)
       if (!b.phone || !b.email || !b.website) {
@@ -292,7 +351,27 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
   }
 
   // Scrape main page
+  crawled.add(normUrl(b.website));
   await deepScrape(b.website);
+
+  // v6.9.66: Octoparse-style link-discovery crawl — the site's own nav
+  // beats slug guessing. Crawl top-scored internal pages (max 3 fetches).
+  if (!b.email || !b.phone || !b.facebook || !b.instagram) {
+    const baseHome = b.website.replace(/\/+$/, '');
+    if (!hostIsOpen(baseHome)) {
+      const discovered = scoreContactLinks(homeHtml, b.website);
+      let misses = 0;
+      for (const url of discovered) {
+        if (b.email && b.phone && b.facebook) break;
+        if (hostIsOpen(baseHome)) break;
+        crawled.add(normUrl(url));
+        yieldTry('linkcrawl');
+        const touched = await deepScrape(url);
+        if (touched) yieldBump('linkcrawl');
+        else { misses++; if (misses >= 2) break; } // nav guess was off — stop early
+      }
+    }
+  }
 
   // Scrape contact/about pages if still missing data
   if (!b.email || !b.phone || !b.facebook || !b.instagram) {
@@ -305,6 +384,7 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
     let deadPaths = 0; // consecutive probes that yielded nothing
     for (const path of paths) {
       if (b.email && b.phone && b.facebook) break;
+      if (crawled.has(normUrl(base + path))) continue; // v6.9.66: already fetched via discovery
       // Host went network-dead mid-loop: bail out (circuit breaker)
       if (hostIsOpen(base)) break;
       const touched = await deepScrape(base + path);
@@ -8012,7 +8092,7 @@ __internals.extractFromHtml = extractFromHtmlModule;
 // mailto vs Cloudflare etc. Module-level so both scrape sites (deep crawler
 // and this module extractor) feed the same tally. Purely additive telemetry:
 // no extraction behavior changes, reset at every scan start.
-export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig';
+export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl';
 export interface ExtractionYieldEntry { found: number; tries: number; }
 export interface ExtractionYieldMap { [k: string]: ExtractionYieldEntry; }
 const _extractYield: ExtractionYieldMap = {};
@@ -8045,6 +8125,7 @@ export const _EXTRACT_LAYER_META: { key: ExtractionLayerKey; label: string; icon
   { key: 'socialbio', label: 'Social bio',      icon: '📱' },
   { key: 'svfetch',   label: 'Server fetch',    icon: '🖥️' },
   { key: 'snippetdig', label: 'Snippet dig',    icon: '⛏️' },
+  { key: 'linkcrawl',  label: 'Link crawl',    icon: '🕸️' },
 ];
 export function getExtractionYield(): ExtractionYieldMap { return JSON.parse(JSON.stringify(_extractYield)); }
 
