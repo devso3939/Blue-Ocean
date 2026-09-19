@@ -133,6 +133,44 @@ export function scoreContactLinks(html: string, baseUrl: string): string[] {
   } catch { return []; }
 }
 
+const _LINK_DEEP2: [RegExp, number][] = [
+  [/branch|filial|филиал|ფილიალ|location|офис|office|showroom|store[-_ ]?locator|outlet|სალონი/i, 3],
+  [/team|команда|გუნდი|our[-_ ]?stores|our[-_ ]?offices/i, 2],
+];
+
+/** v6.9.67 depth-2: branch/location/team sub-pages linked from a discovered page. */
+export function pickDeeperLinks(html: string, baseUrl: string): string[] {
+  try {
+    const base = new URL(baseUrl);
+    const host = base.hostname.replace(/^www\./, '');
+    const selfPath = base.pathname.replace(/\/+$/, '') || '/';
+    const seen = new Set<string>();
+    const scored: { url: string; score: number }[] = [];
+    for (const m of html.matchAll(/<a[^>]*href\s*=\s*["']([^"'#\s]+)["'][^>]*>([\s\S]{0,200}?)<\/a>/gi)) {
+      const href = m[1];
+      if (_LINK_SKIP.test(href)) continue;
+      let u: URL;
+      try { u = new URL(href, baseUrl); } catch { continue; }
+      if (u.protocol !== 'https:' && u.protocol !== 'http:') continue;
+      const uhost = u.hostname.replace(/^www\./, '');
+      if (uhost !== host && !uhost.endsWith('.' + host)) continue;
+      const path = u.pathname.replace(/\/+$/, '') || '/';
+      if (path === selfPath) continue; // never re-crawl the page we are on
+      if (seen.has(u.origin + path)) continue;
+      seen.add(u.origin + path);
+      let decodedPath = u.pathname;
+      try { decodedPath = decodeURIComponent(u.pathname); } catch { /* malformed */ }
+      const anchor = m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      const hay = (anchor + ' ' + u.pathname + ' ' + decodedPath).slice(0, 300);
+      let score = 0;
+      for (const [rx, w] of _LINK_DEEP2) if (rx.test(hay)) score += w;
+      if (score >= 2) scored.push({ url: u.toString(), score });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, 2).map(s => s.url);
+  } catch { return []; }
+}
+
 async function enrichFromWebsiteDeep(b: Business): Promise<void> {
   if (!b.website) return;
   const EXCLUDE = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com/i;
@@ -140,6 +178,7 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
 
   // v6.9.66: homepage HTML stashed for link-discovery scoring
   let homeHtml = '';
+  let lastPageOk = ''; // v6.9.67: URL whose HTML homeHtml currently holds
   const crawled = new Set<string>();
   const normUrl = (u: string) => (u.replace(/\/+$/, '') || '/');
 
@@ -157,6 +196,7 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
       const html = await r.text();
       const full = html.substring(0, 80000);
       homeHtml = full;
+      lastPageOk = url;
 
       // 1. JSON-LD structured data extraction (schema.org/LocalBusiness)
       if (!b.phone || !b.email || !b.website) {
@@ -361,6 +401,7 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
     if (!hostIsOpen(baseHome)) {
       const discovered = scoreContactLinks(homeHtml, b.website);
       let misses = 0;
+      let deep2 = 2; // v6.9.67: depth-2 fetch budget per business
       for (const url of discovered) {
         if (b.email && b.phone && b.facebook) break;
         if (hostIsOpen(baseHome)) break;
@@ -369,6 +410,18 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
         const touched = await deepScrape(url);
         if (touched) yieldBump('linkcrawl');
         else { misses++; if (misses >= 2) break; } // nav guess was off — stop early
+        // v6.9.67: one hop deeper — branch/location/team sub-pages
+        // (lastPageOk===url guarantees homeHtml is THIS page's markup)
+        if (lastPageOk === url && !(b.email && b.phone && b.facebook)) {
+          for (const u2 of pickDeeperLinks(homeHtml, url)) {
+            if (deep2 <= 0 || (b.email && b.phone && b.facebook) || hostIsOpen(baseHome)) break;
+            if (crawled.has(normUrl(u2))) continue;
+            crawled.add(normUrl(u2));
+            deep2--;
+            yieldTry('linkcrawl');
+            if (await deepScrape(u2)) { yieldBump('linkcrawl'); break; } // branch data found
+          }
+        }
       }
     }
   }
