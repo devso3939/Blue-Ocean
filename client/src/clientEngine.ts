@@ -194,6 +194,9 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
       const r = await corsFetch(url, { signal: AbortSignal.timeout(5000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
       if (!r.ok) return false;
       const html = await r.text();
+      // v6.9.69: Cloudflare challenge page — mark the host and bail. The
+      // server lane's Wayback rescue handles this host from the next fetch.
+      if (isCfChallenge(html)) { _cfHosts.add(urlHostOf(url)); return false; }
       const full = html.substring(0, 80000);
       homeHtml = full;
       lastPageOk = url;
@@ -2489,7 +2492,7 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   //    keyless traffic hard (429 / connection resets) — track consecutive
   //    failures and skip it for 5 minutes after 3, instead of re-failing
   //    (and printing a console error) on every single proxied request.
-  if (_corsshFails < 3 || Date.now() - _corsshLastFail > 300_000) {
+  if ((_corsshFails < 3 || Date.now() - _corsshLastFail > 300_000) && !_cfHosts.has(urlHostOf(url))) {
     try {
       const r = await fetch('https://cors.sh/' + url, { headers, signal: anySignal(callerSignal, chainCap, AbortSignal.timeout(5000)) });
       if (r.ok) { hostRecordSuccess(url); _corsshFails = 0; return r; }
@@ -2505,7 +2508,7 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   // extraction; works from real browser sessions). v6.9.9: failure memory —
   // when Jina refuses (401/429) or times out repeatedly, skip it for 5 min
   // instead of printing one console error per proxied request.
-  if (_jinaFails < 3 || Date.now() - _jinaLastFail > 300_000) {
+  if ((_jinaFails < 3 || Date.now() - _jinaLastFail > 300_000) && !_cfHosts.has(urlHostOf(url))) {
     try {
       const r = await fetch('https://r.jina.ai/' + url, { headers, signal: anySignal(callerSignal, chainCap, AbortSignal.timeout(12000)) });
       if (r.ok) {
@@ -2526,7 +2529,7 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   // per wave; now only ONE in-flight request exists and the rest reuse its
   // outcome (success clones the payload, failure skips the arm).
   if (callerSignal?.aborted) throw new Error('Cancelled');
-  if (_alloFails < 3 || Date.now() - _alloLastFail > 300_000) {
+  if ((_alloFails < 3 || Date.now() - _alloLastFail > 300_000) && !_cfHosts.has(urlHostOf(url))) {
     if (_alloInFlight) {
       const ok = await _alloInFlight.catch(() => false);
       if (ok) return new Response('', { status: 501, statusText: 'allorigins single-flight: refetch needed' });
@@ -2940,7 +2943,7 @@ async function nominatimViaProxy(path: string, params: Record<string, string>, t
 // last arm of corsFetch and the fallback for every search-engine lane.
 let _srvFetchDisabledUntil = 0;
 
-async function pageFetchViaServer(url: string, timeoutMs = 30000): Promise<string | null> {
+async function serverFetchRaw(url: string, timeoutMs = 30000): Promise<string | null> {
   if (Date.now() < _srvFetchDisabledUntil) return null;
   try {
     const start = await supabaseRpc<{ rid?: number; error?: string }>('rpc_fetch_start', { p_url: url }, 15000);
@@ -2952,7 +2955,9 @@ async function pageFetchViaServer(url: string, timeoutMs = 30000): Promise<strin
       if (i > 0) await abortableWait(2000);
       const poll = await supabaseRpc<{ state: string; text?: string; status?: number; error?: string }>('rpc_fetch_poll', { p_rid: rid }, 15000);
       if (!poll) return null;
-      if (poll.state === 'done' && poll.text) return poll.text;
+      // v6.9.69: only real 2xx bodies count — 503/403 error pages from the
+      // target (or from a rescue archive) must not flow downstream as HTML.
+      if (poll.state === 'done' && poll.text && (poll.status === undefined || (poll.status >= 200 && poll.status < 300))) return poll.text;
       if (poll.state === 'failed') return null;
     }
     return null;
@@ -2960,6 +2965,58 @@ async function pageFetchViaServer(url: string, timeoutMs = 30000): Promise<strin
     _srvFetchDisabledUntil = Date.now() + PROXY_COOLDOWN_MS;
     return null;
   }
+}
+
+// ─── v6.9.69: Cloudflare-challenge / dead-origin rescue (Wayback arm) ──
+// Chain sites (aversi.ge-class) sit behind Cloudflare challenges or have
+// dead origins: every normal arm returns a "Just a moment..." page or
+// nothing. web.archive.org snapshots carry the real page — the availability
+// check is ~1s, the snapshot fetch runs through our own server lane (no
+// browser, no CORS, separate IP pool).
+const _cfHosts = new Set<string>();   // hosts that served a challenge page
+let _wbFails = 0;
+let _wbLastFail = 0;
+function isCfChallenge(text: string | null | undefined): boolean {
+  if (!text) return false;
+  const head = text.slice(0, 3000).toLowerCase();
+  return head.includes('just a moment') || head.includes('challenge-platform')
+    || head.includes('__cf_chl') || head.includes('cf-chl')
+    || head.includes('attention required') || head.includes('ddos-guard');
+}
+function urlHostOf(u: string): string { try { return new URL(u).host; } catch { return ''; } }
+
+async function waybackFetch(url: string, timeoutMs = 25000): Promise<string | null> {
+  if (_wbFails >= 3 && Date.now() - _wbLastFail < 300_000) return null;
+  try {
+    const availRaw = await serverFetchRaw('https://archive.org/wayback/available?url=' + encodeURIComponent(url) + '&timestamp=2025', 12000);
+    if (!availRaw) return null;
+    let snapUrl = '';
+    try {
+      const avail = JSON.parse(availRaw) as { archived_snapshots?: { closest?: { available?: boolean; url?: string } } };
+      if (avail.archived_snapshots?.closest?.available && avail.archived_snapshots.closest.url) snapUrl = avail.archived_snapshots.closest.url;
+    } catch { return null; }
+    if (!snapUrl) return null;
+    const html = await serverFetchRaw(snapUrl, timeoutMs);
+    if (html && html.length > 500 && !isCfChallenge(html) && !html.includes('Temporarily Offline')) { _wbFails = 0; yieldBump('wayback'); return html; }
+    _wbFails++; _wbLastFail = Date.now();
+    return null;
+  } catch { _wbFails++; _wbLastFail = Date.now(); return null; }
+}
+
+async function pageFetchViaServer(url: string, timeoutMs = 30000): Promise<string | null> {
+  const host = urlHostOf(url);
+  // Known-challenged host: skip the pointless direct attempt, Wayback-first.
+  if (_cfHosts.has(host)) {
+    const wb = await waybackFetch(url, timeoutMs);
+    if (wb) return wb;
+  }
+  const direct = await serverFetchRaw(url, timeoutMs);
+  if (direct && !isCfChallenge(direct)) { _cfHosts.delete(host); return direct; }
+  // Challenge page (or empty) — mark the host and rescue via Wayback.
+  if (isCfChallenge(direct)) _cfHosts.add(host);
+  const wb = await waybackFetch(url, timeoutMs);
+  if (wb) return wb;
+  return direct; // challenge text is harmless downstream — extractors find nothing
 }
 
 // Bing via the server lane: fetch the search HTML from Supabase and run the
@@ -8191,7 +8248,7 @@ __internals.extractFromHtml = extractFromHtmlModule;
 // mailto vs Cloudflare etc. Module-level so both scrape sites (deep crawler
 // and this module extractor) feed the same tally. Purely additive telemetry:
 // no extraction behavior changes, reset at every scan start.
-export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl';
+export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl' | 'wayback';
 export interface ExtractionYieldEntry { found: number; tries: number; }
 export interface ExtractionYieldMap { [k: string]: ExtractionYieldEntry; }
 const _extractYield: ExtractionYieldMap = {};
@@ -8225,6 +8282,7 @@ export const _EXTRACT_LAYER_META: { key: ExtractionLayerKey; label: string; icon
   { key: 'svfetch',   label: 'Server fetch',    icon: '🖥️' },
   { key: 'snippetdig', label: 'Snippet dig',    icon: '⛏️' },
   { key: 'linkcrawl',  label: 'Link crawl',    icon: '🕸️' },
+  { key: 'wayback',    label: 'Wayback',       icon: '🏛️' },
 ];
 export function getExtractionYield(): ExtractionYieldMap { return JSON.parse(JSON.stringify(_extractYield)); }
 
