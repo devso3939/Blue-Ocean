@@ -1,0 +1,14 @@
+# Blue Ocean - Render blueprint
+# Creates the headless-browser render lane as a free web service.
+services:
+  - type: web
+    name: blue-ocean-render
+    runtime: docker
+    dockerfilePath: ./render-service/Dockerfile
+    dockerContext: ./render-service
+    plan: free
+    region: fra1
+    branch: main
+    autoDeploy: false
+    numInstances: 1
+    healthCheckPath: /health
