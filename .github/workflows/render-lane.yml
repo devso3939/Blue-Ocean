@@ -7,12 +7,12 @@
 #   dom/<sha1(url)>.html
 #   meta/<sha1(url)>.json
 #
-# The client/Supabase layer:
-#   1. dispatches repository_dispatch (type: render-lane) with client_payload.url
-#   2. polls the raw URL of meta/<sha>.json until status turns "done"
-#   3. fetches dom/<sha>.html
+# Dispatch flow (client/Supabase layer):
+#   1. POST repository_dispatch (type: render-lane) with client_payload.url
+#   2. poll raw meta/<sha>.json until status == "done"
+#   3. fetch raw dom/<sha>.html
 #
-# Rate control: rendered entries older than 7 days are re-rendered on demand.
+# Entries older than 7 days are re-rendered on demand.
 
 name: render-lane
 
@@ -37,6 +37,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Check out scripts
+        uses: actions/checkout@v4
+
       - name: Resolve target URL
         id: target
         env:
@@ -53,59 +56,41 @@ jobs:
           echo "url=$U" >> "$GITHUB_OUTPUT"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Check fresh cache first (skip render if < 7 days old)
+      - name: Serve from cache if younger than 7 days
         id: cache
         run: |
           SHA="${{ steps.target.outputs.sha }}"
           META_URL="https://raw.githubusercontent.com/${{ github.repository }}/render-cache/meta/${SHA}.json"
-          curl -s -o /tmp/old_meta.json --max-time 15 "$META_URL" || true
-          FRESH=$(python3 - <<'EOF'
-import datetime, json, pathlib
-fresh = "no"
-try:
-    m = json.loads(pathlib.Path("/tmp/old_meta.json").read_text())
-    ts = datetime.datetime.fromisoformat(m["finished_at"].replace("Z", "+00:00"))
-    age = datetime.datetime.now(datetime.timezone.utc) - ts
-    if age < datetime.timedelta(days=7) and m.get("status") == "done":
-        fresh = "yes"
-except Exception:
-    pass
-print(fresh)
-EOF
-)
+          HTTP=$(curl -s -o /tmp/old_meta.json -w "%{http_code}" --max-time 15 "$META_URL" || echo 000)
+          FRESH=no
+          if [ "$HTTP" = "200" ]; then
+            FRESH=$(python3 -c "import json,datetime,pathlib;m=json.loads(pathlib.Path('/tmp/old_meta.json').read_text());ts=datetime.datetime.fromisoformat(m['finished_at'].replace('Z','+00:00'));print('yes' if datetime.datetime.now(datetime.timezone.utc)-ts < datetime.timedelta(days=7) and m.get('status')=='done' else 'no')" 2>/dev/null || echo no)
+          fi
           echo "fresh=$FRESH" >> "$GITHUB_OUTPUT"
 
-      - name: Short-circuit when fresh cache exists
-        if: steps.cache.outputs.fresh == 'yes'
-        run: |
-          echo "Fresh cache hit - nothing to do."
-          echo "CACHE_HIT=true" >> "$GITHUB_ENV"
-
       - name: Install Playwright + Chromium
-        if: env.CACHE_HIT != 'true'
+        if: steps.cache.outputs.fresh != 'yes'
         run: |
           pip install playwright==1.49.1
           playwright install chromium --with-deps
 
       - name: Render URL in headless Chromium
-        if: env.CACHE_HIT != 'true'
-        id: render
+        if: steps.cache.outputs.fresh != 'yes'
         env:
           TARGET_URL: ${{ steps.target.outputs.url }}
-        run: |
-          python scripts/render_lane.py
-          echo "challenged=$(python3 -c "import json;print(json.load(open('/tmp/meta.json')).get('challenged'))")" >> "$GITHUB_OUTPUT"
-          echo "bytes=$(python3 -c "import json;print(json.load(open('/tmp/meta.json')).get('bytes'))")" >> "$GITHUB_OUTPUT"
+        run: python scripts/render_lane.py
 
       - name: Commit rendered DOM to render-cache branch
-        if: env.CACHE_HIT != 'true'
+        if: steps.cache.outputs.fresh != 'yes'
+        env:
+          SHA: ${{ steps.target.outputs.sha }}
+          URL: ${{ steps.target.outputs.url }}
         run: |
-          SHA="${{ steps.target.outputs.sha }}"
-          URL="${{ steps.target.outputs.url }}"
           git config --global user.name  "render-lane bot"
           git config --global user.email "render-lane@users.noreply.github.com"
-          git clone --depth 1 --branch render-cache "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" rc 2>/dev/null || {
-            git clone --depth 1 "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" rc
+          TOK="https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          if ! git ls-remote --exit-code --heads "$TOK" render-cache >/dev/null 2>&1; then
+            git clone --depth 1 "$TOK" rc
             cd rc
             git checkout --orphan render-cache
             git rm -rf . 2>/dev/null || true
@@ -113,28 +98,20 @@ EOF
             echo "# render-cache: rendered DOMs keyed by sha1(url)" > README.md
             git add -A
             git commit -m "init render-cache"
+            git push origin render-cache
             cd ..
-          }
+            rm -rf rc
+          fi
+          git clone --depth 1 --branch render-cache "$TOK" rc
           cd rc
-          git pull --depth 1 origin render-cache 2>/dev/null || true
           mkdir -p dom meta
-          python3 - "$URL" <<'EOF'
-import datetime, json, pathlib, sys
-url = sys.argv[1]
-meta = json.loads(pathlib.Path("/tmp/meta.json").read_text())
-meta.update({
-    "url": url,
-    "status": "done",
-    "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
-})
-pathlib.Path("/tmp/meta.json").write_text(json.dumps(meta, indent=2))
-EOF
-          cp /tmp/dom.html "dom/${SHA}.html"
-          cp /tmp/meta.json "meta/${SHA}.json"
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          jq --arg u "$URL" --arg t "$NOW" '. + {url:$u, status:"done", finished_at:$t}' /tmp/meta.json > meta/${SHA}.json
+          cp /tmp/dom.html dom/${SHA}.html
           git add -A
           git commit -m "render: ${URL}" || echo "Nothing to commit (identical DOM)"
           git push origin render-cache
 
-      - name: Mark done (cache-hit path)
-        if: env.CACHE_HIT == 'true'
-        run: echo "Served from cache."
+      - name: Cache hit
+        if: steps.cache.outputs.fresh == 'yes'
+        run: echo "Fresh render already in cache - served without re-rendering."
