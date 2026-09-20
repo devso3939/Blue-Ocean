@@ -35,6 +35,27 @@ eq('availability: no snapshot', !!(NOPE as any).archived_snapshots?.closest?.url
 const host = (() => { try { return new URL('https://www.aversi.ge/ka/contact/').host; } catch { return ''; } })();
 eq('host extraction', host, 'www.aversi.ge');
 
+// 4b. Render lane: urlscan search response — pick the passed (200) scan
+const SEARCH = { results: [
+  { _id: '019ff674-6d16-72de-a315-598a1d2eea76', page: { status: 200 } },
+  { _id: '019fa1c9-07c9-722f-8c2e-6d588fae1939', page: { status: 200 } },
+  { _id: '01a017b8-670b-74c0-bb26-6c5b978e132e', page: { status: 403 } },
+] };
+const passed = (SEARCH.results as Array<{ _id?: string; page?: { status?: number } }>).filter(r => !!r._id && r.page?.status === 200);
+eq('render: passed-scan picked first', passed[0]?._id, '019ff674-6d16-72de-a315-598a1d2eea76');
+eq('render: blocked scan excluded', passed.length, 2);
+const EMPTY = { results: [] };
+eq('render: empty index handled', ((EMPTY.results as Array<{ page?: { status?: number } }>).filter(r => r.page?.status === 200)).length, 0);
+
+// 4c. Submit response carries the scan uuid
+const SUB = { uuid: '01a08da9-3be1-762d-81bb-f78541dd7e1b' };
+eq('render: submit uuid extracted', (SUB as { uuid?: string }).uuid, '01a08da9-3be1-762d-81bb-f78541dd7e1b');
+
+// 4d. Render chip registered
+const rnd = _EXTRACT_LAYER_META.find(m => m.key === 'render');
+eq('render layer registered', !!rnd, true);
+eq('render icon', rnd?.icon, '🎭');
+
 // 5. Snapshot fetch quality gate: real snapshot HTML passes, challenge text fails
 const SNAP_HTML = '<html><head><title>Aversi — აფთიაქების ქსელი</title></head><body><a href="/ka/contact">კონტაქტი</a> +995 322 55 05 05 info@aversi.ge</body></html>';
 eq('snapshot HTML passes gate', SNAP_HTML.length > 500 || SNAP_HTML.length > 0, true);

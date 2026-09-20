@@ -2943,26 +2943,86 @@ async function nominatimViaProxy(path: string, params: Record<string, string>, t
 // last arm of corsFetch and the fallback for every search-engine lane.
 let _srvFetchDisabledUntil = 0;
 
+// Shared poll loop: collects an rpc_fetch_start/rpc_urlscan_* submission
+// via rpc_fetch_poll in separate transactions. Returns only 2xx bodies.
+async function pollServerFetch(rid: number, timeoutMs: number): Promise<{ text: string; status?: number } | null> {
+  const maxPolls = Math.max(4, Math.ceil(timeoutMs / 2000));
+  for (let i = 0; i < maxPolls; i++) {
+    if (isCancelled()) return null;
+    if (i > 0) await abortableWait(2000);
+    const poll = await supabaseRpc<{ state: string; text?: string; status?: number; error?: string }>('rpc_fetch_poll', { p_rid: rid }, 15000);
+    if (!poll) return null;
+    // v6.9.69: only real 2xx bodies count — 503/403 error pages from the
+    // target (or from a rescue archive) must not flow downstream as HTML.
+    if (poll.state === 'done' && poll.text && (poll.status === undefined || (poll.status >= 200 && poll.status < 300))) return { text: poll.text, status: poll.status };
+    if (poll.state === 'failed') return null;
+  }
+  return null;
+}
+
 async function serverFetchRaw(url: string, timeoutMs = 30000): Promise<string | null> {
   if (Date.now() < _srvFetchDisabledUntil) return null;
   try {
     const start = await supabaseRpc<{ rid?: number; error?: string }>('rpc_fetch_start', { p_url: url }, 15000);
     if (!start?.rid) return null;
-    const rid = start.rid;
-    const maxPolls = Math.max(4, Math.ceil(timeoutMs / 2000));
-    for (let i = 0; i < maxPolls; i++) {
-      if (isCancelled()) return null;
-      if (i > 0) await abortableWait(2000);
-      const poll = await supabaseRpc<{ state: string; text?: string; status?: number; error?: string }>('rpc_fetch_poll', { p_rid: rid }, 15000);
-      if (!poll) return null;
-      // v6.9.69: only real 2xx bodies count — 503/403 error pages from the
-      // target (or from a rescue archive) must not flow downstream as HTML.
-      if (poll.state === 'done' && poll.text && (poll.status === undefined || (poll.status >= 200 && poll.status < 300))) return poll.text;
-      if (poll.state === 'failed') return null;
+    const res = await pollServerFetch(start.rid, timeoutMs);
+    return res?.text ?? null;
+  } catch {
+    _srvFetchDisabledUntil = Date.now() + PROXY_COOLDOWN_MS;
+    return null;
+  }
+}
+
+// ─── v6.9.70: Headless render lane (urlscan.io, key in Vault) ──────
+// CF-challenged chain sites defeat every plain fetch arm. urlscan.io runs
+// a REAL headless browser: its scan passes Cloudflare challenges and the
+// rendered DOM is retrievable afterwards. Runs server-side (migration 014)
+// with the API key in Vault — never in the bundle. Free tier ≈ 50 scans/h,
+// so the public scan index (search = free) is reused before a fresh submit.
+let _renderDisabledUntil = 0;
+const _renderCache = new Map<string, string>();
+
+async function renderFetchViaServer(url: string, timeoutMs = 45000): Promise<string | null> {
+  if (Date.now() < _renderDisabledUntil) return null;
+  const cached = _renderCache.get(url);
+  if (cached) return cached;
+  yieldTry('render');
+  try {
+    // 1) Reuse: urlscan's public index for a scan of this exact URL whose
+    //    real browser got HTTP 200 (i.e. the challenge was passed).
+    let uuid = '';
+    const searchRaw = await serverFetchRaw('https://urlscan.io/api/v1/search/?q=page.url%3A%22' + encodeURIComponent(url) + '%22&size=10', 15000);
+    if (searchRaw) {
+      try {
+        const results = (JSON.parse(searchRaw) as { results?: Array<{ _id?: string; page?: { status?: number } }> }).results || [];
+        const passed = results.filter(r => !!r._id && r.page?.status === 200);
+        if (passed.length > 0) uuid = passed[0]._id!;
+      } catch { /* search unavailable — fall through to submit */ }
+    }
+    // 2) Submit fresh (the only path that consumes quota).
+    if (!uuid) {
+      const sub = await supabaseRpc<{ rid?: number; error?: string }>('rpc_urlscan_submit', { p_url: url }, 15000);
+      if (!sub?.rid || sub.error) return null;
+      const subRes = await pollServerFetch(sub.rid, 20000);
+      if (!subRes?.text) return null;
+      try { uuid = (JSON.parse(subRes.text) as { uuid?: string }).uuid || ''; } catch { return null; }
+      if (!uuid) return null;
+      // The scan is queued; its DOM materializes seconds later.
+      await abortableWait(8000);
+    }
+    // 3) Rendered DOM through the keyed server RPC.
+    const dom = await supabaseRpc<{ rid?: number; error?: string }>('rpc_urlscan_dom', { p_uuid: uuid }, 15000);
+    if (!dom?.rid || dom.error) return null;
+    const domRes = await pollServerFetch(dom.rid, timeoutMs);
+    const domText = domRes?.text ?? null;
+    if (domText && domText.length > 500 && !isCfChallenge(domText)) {
+      _renderCache.set(url, domText);
+      yieldBump('render');
+      return domText;
     }
     return null;
   } catch {
-    _srvFetchDisabledUntil = Date.now() + PROXY_COOLDOWN_MS;
+    _renderDisabledUntil = Date.now() + 300_000;
     return null;
   }
 }
@@ -3005,17 +3065,25 @@ async function waybackFetch(url: string, timeoutMs = 25000): Promise<string | nu
 
 async function pageFetchViaServer(url: string, timeoutMs = 30000): Promise<string | null> {
   const host = urlHostOf(url);
-  // Known-challenged host: skip the pointless direct attempt, Wayback-first.
+  // Known-challenged host: skip the pointless direct attempt, Wayback-first,
+  // then the headless render lane (v6.9.70) for archive-miss URLs.
   if (_cfHosts.has(host)) {
     const wb = await waybackFetch(url, timeoutMs);
     if (wb) return wb;
+    const rendered = await renderFetchViaServer(url, timeoutMs);
+    if (rendered) return rendered;
   }
   const direct = await serverFetchRaw(url, timeoutMs);
   if (direct && !isCfChallenge(direct)) { _cfHosts.delete(host); return direct; }
-  // Challenge page (or empty) — mark the host and rescue via Wayback.
+  // Challenge page (or empty) — mark the host and rescue: Wayback first,
+  // then a real headless-browser render as the final arm.
   if (isCfChallenge(direct)) _cfHosts.add(host);
   const wb = await waybackFetch(url, timeoutMs);
   if (wb) return wb;
+  if (isCfChallenge(direct)) {
+    const rendered = await renderFetchViaServer(url, timeoutMs);
+    if (rendered) return rendered;
+  }
   return direct; // challenge text is harmless downstream — extractors find nothing
 }
 
@@ -8248,7 +8316,7 @@ __internals.extractFromHtml = extractFromHtmlModule;
 // mailto vs Cloudflare etc. Module-level so both scrape sites (deep crawler
 // and this module extractor) feed the same tally. Purely additive telemetry:
 // no extraction behavior changes, reset at every scan start.
-export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl' | 'wayback';
+export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl' | 'wayback' | 'render';
 export interface ExtractionYieldEntry { found: number; tries: number; }
 export interface ExtractionYieldMap { [k: string]: ExtractionYieldEntry; }
 const _extractYield: ExtractionYieldMap = {};
@@ -8283,6 +8351,7 @@ export const _EXTRACT_LAYER_META: { key: ExtractionLayerKey; label: string; icon
   { key: 'snippetdig', label: 'Snippet dig',    icon: '⛏️' },
   { key: 'linkcrawl',  label: 'Link crawl',    icon: '🕸️' },
   { key: 'wayback',    label: 'Wayback',       icon: '🏛️' },
+  { key: 'render',     label: 'Render',        icon: '🎭' },
 ];
 export function getExtractionYield(): ExtractionYieldMap { return JSON.parse(JSON.stringify(_extractYield)); }
 
