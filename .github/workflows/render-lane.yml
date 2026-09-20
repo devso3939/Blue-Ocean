@@ -64,7 +64,7 @@ jobs:
           HTTP=$(curl -s -o /tmp/old_meta.json -w "%{http_code}" --max-time 15 "$META_URL" || echo 000)
           FRESH=no
           if [ "$HTTP" = "200" ]; then
-            FRESH=$(python3 -c "import json,datetime,pathlib;m=json.loads(pathlib.Path('/tmp/old_meta.json').read_text());ts=datetime.datetime.fromisoformat(m['finished_at'].replace('Z','+00:00'));print('yes' if datetime.datetime.now(datetime.timezone.utc)-ts < datetime.timedelta(days=7) and m.get('status')=='done' else 'no')" 2>/dev/null || echo no)
+            FRESH=$(python3 -c "import json,datetime,pathlib;m=json.loads(pathlib.Path('/tmp/old_meta.json').read_text());ts=datetime.datetime.fromisoformat(m['finished_at'].replace('Z','+00:00'));print('yes' if datetime.datetime.now(datetime.timezone.utc)-ts < datetime.timedelta(days=7) and m.get('status')=='done' and m.get('challenged') is not True else 'no')" 2>/dev/null || echo no)
           fi
           echo "fresh=$FRESH" >> "$GITHUB_OUTPUT"
 
