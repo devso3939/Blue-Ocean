@@ -1,0 +1,140 @@
+# Blue Ocean - render lane (Cloudflare-challenged site fetcher)
+#
+# Renders a URL in a REAL headless Chromium on GitHub's free public-repo
+# runners so Cloudflare's JS challenge is defeated. The rendered DOM is
+# committed to the `render-cache` branch:
+#
+#   dom/<sha1(url)>.html
+#   meta/<sha1(url)>.json
+#
+# The client/Supabase layer:
+#   1. dispatches repository_dispatch (type: render-lane) with client_payload.url
+#   2. polls the raw URL of meta/<sha>.json until status turns "done"
+#   3. fetches dom/<sha>.html
+#
+# Rate control: rendered entries older than 7 days are re-rendered on demand.
+
+name: render-lane
+
+on:
+  repository_dispatch:
+    types: [render-lane]
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "URL to render (https only)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: render-lane
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Resolve target URL
+        id: target
+        env:
+          DISPATCH_URL: ${{ github.event.client_payload.url }}
+          INPUT_URL: ${{ github.event.inputs.url }}
+        run: |
+          U="${DISPATCH_URL:-$INPUT_URL}"
+          if [ -z "$U" ]; then echo "No URL provided"; exit 1; fi
+          case "$U" in
+            https://*) ;;
+            *) echo "Only https URLs allowed"; exit 1 ;;
+          esac
+          SHA=$(printf '%s' "$U" | sha1sum | cut -d' ' -f1)
+          echo "url=$U" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Check fresh cache first (skip render if < 7 days old)
+        id: cache
+        run: |
+          SHA="${{ steps.target.outputs.sha }}"
+          META_URL="https://raw.githubusercontent.com/${{ github.repository }}/render-cache/meta/${SHA}.json"
+          curl -s -o /tmp/old_meta.json --max-time 15 "$META_URL" || true
+          FRESH=$(python3 - <<'EOF'
+import datetime, json, pathlib
+fresh = "no"
+try:
+    m = json.loads(pathlib.Path("/tmp/old_meta.json").read_text())
+    ts = datetime.datetime.fromisoformat(m["finished_at"].replace("Z", "+00:00"))
+    age = datetime.datetime.now(datetime.timezone.utc) - ts
+    if age < datetime.timedelta(days=7) and m.get("status") == "done":
+        fresh = "yes"
+except Exception:
+    pass
+print(fresh)
+EOF
+)
+          echo "fresh=$FRESH" >> "$GITHUB_OUTPUT"
+
+      - name: Short-circuit when fresh cache exists
+        if: steps.cache.outputs.fresh == 'yes'
+        run: |
+          echo "Fresh cache hit - nothing to do."
+          echo "CACHE_HIT=true" >> "$GITHUB_ENV"
+
+      - name: Install Playwright + Chromium
+        if: env.CACHE_HIT != 'true'
+        run: |
+          pip install playwright==1.49.1
+          playwright install chromium --with-deps
+
+      - name: Render URL in headless Chromium
+        if: env.CACHE_HIT != 'true'
+        id: render
+        env:
+          TARGET_URL: ${{ steps.target.outputs.url }}
+        run: |
+          python scripts/render_lane.py
+          echo "challenged=$(python3 -c "import json;print(json.load(open('/tmp/meta.json')).get('challenged'))")" >> "$GITHUB_OUTPUT"
+          echo "bytes=$(python3 -c "import json;print(json.load(open('/tmp/meta.json')).get('bytes'))")" >> "$GITHUB_OUTPUT"
+
+      - name: Commit rendered DOM to render-cache branch
+        if: env.CACHE_HIT != 'true'
+        run: |
+          SHA="${{ steps.target.outputs.sha }}"
+          URL="${{ steps.target.outputs.url }}"
+          git config --global user.name  "render-lane bot"
+          git config --global user.email "render-lane@users.noreply.github.com"
+          git clone --depth 1 --branch render-cache "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" rc 2>/dev/null || {
+            git clone --depth 1 "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" rc
+            cd rc
+            git checkout --orphan render-cache
+            git rm -rf . 2>/dev/null || true
+            mkdir -p dom meta
+            echo "# render-cache: rendered DOMs keyed by sha1(url)" > README.md
+            git add -A
+            git commit -m "init render-cache"
+            cd ..
+          }
+          cd rc
+          git pull --depth 1 origin render-cache 2>/dev/null || true
+          mkdir -p dom meta
+          python3 - "$URL" <<'EOF'
+import datetime, json, pathlib, sys
+url = sys.argv[1]
+meta = json.loads(pathlib.Path("/tmp/meta.json").read_text())
+meta.update({
+    "url": url,
+    "status": "done",
+    "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+})
+pathlib.Path("/tmp/meta.json").write_text(json.dumps(meta, indent=2))
+EOF
+          cp /tmp/dom.html "dom/${SHA}.html"
+          cp /tmp/meta.json "meta/${SHA}.json"
+          git add -A
+          git commit -m "render: ${URL}" || echo "Nothing to commit (identical DOM)"
+          git push origin render-cache
+
+      - name: Mark done (cache-hit path)
+        if: env.CACHE_HIT == 'true'
+        run: echo "Served from cache."
