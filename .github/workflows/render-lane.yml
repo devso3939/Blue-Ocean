@@ -68,17 +68,19 @@ jobs:
           fi
           echo "fresh=$FRESH" >> "$GITHUB_OUTPUT"
 
-      - name: Install Playwright + Chromium
+      - name: Install Xvfb + Playwright + Chromium
         if: steps.cache.outputs.fresh != 'yes'
         run: |
-          pip install playwright==1.49.1
+          sudo apt-get update -y
+          sudo apt-get install -y xvfb
+          pip install playwright==1.49.1 playwright-stealth==2.0.0
           playwright install chromium --with-deps
 
       - name: Render URL in headless Chromium
         if: steps.cache.outputs.fresh != 'yes'
         env:
           TARGET_URL: ${{ steps.target.outputs.url }}
-        run: python scripts/render_lane.py
+        run: xvfb-run -a python scripts/render_lane.py
 
       - name: Commit rendered DOM to render-cache branch
         if: steps.cache.outputs.fresh != 'yes'
@@ -106,8 +108,8 @@ jobs:
           cd rc
           mkdir -p dom meta
           NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          jq --arg u "$URL" --arg t "$NOW" '. + {url:$u, status:"done", finished_at:$t}' /tmp/meta.json > meta/${SHA}.json
-          cp /tmp/dom.html dom/${SHA}.html
+          ST=$(python3 -c "import json,sys;m=json.load(open('/tmp/meta.json'));s='challenge' if m.get('challenged') else 'done';m.update(url=sys.argv[1],status=s,finished_at=sys.argv[2]);json.dump(m,open(sys.argv[3],'w'),indent=2);print(s)" "$URL" "$NOW" "meta/${SHA}.json")
+          if [ "$ST" = "done" ]; then cp /tmp/dom.html dom/${SHA}.html; fi
           git add -A
           git commit -m "render: ${URL}" || echo "Nothing to commit (identical DOM)"
           git push origin render-cache
