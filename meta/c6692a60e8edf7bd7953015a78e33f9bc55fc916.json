@@ -1,8 +1,9 @@
 {
   "url": "https://www.aversi.ge/",
-  "ts": "2026-09-20T23:29:50Z",
+  "ts": "2026-09-20T23:36:45Z",
+  "engine": "chromium",
   "challenged": true,
-  "bytes": 28737,
+  "bytes": 28758,
   "status": "challenge",
-  "finished_at": "2026-09-20T23:31:26Z"
+  "finished_at": "2026-09-20T23:39:50Z"
 }
