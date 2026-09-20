@@ -3048,6 +3048,18 @@ function urlHostOf(u: string): string { try { return new URL(u).host; } catch { 
 async function waybackFetch(url: string, timeoutMs = 25000): Promise<string | null> {
   if (_wbFails >= 3 && Date.now() - _wbLastFail < 300_000) return null;
   try {
+    // v6.9.71: direct timestamped-original form FIRST (web.archive.org
+    // redirects to the closest snapshot). Proven on aversi.ge: this form
+    // returns the real archived HTML — no Wayback toolbar, no dependency
+    // on the availability API (whose index is shard-inconsistent) — but
+    // only when polled patiently (~10-60s from datacenter IPs; the poll
+    // helper's 2s cadence handles that). Availability-API form stays as
+    // the second arm for exactness.
+    const directForm = 'https://web.archive.org/web/2025id_/' + url.replace(/^https?:\/\//, '');
+    const direct = await serverFetchRaw(directForm, timeoutMs);
+    if (direct && direct.length > 500 && !isCfChallenge(direct) && !direct.includes('Temporarily Offline') && !direct.includes('Wayback Machine has not archived')) {
+      _wbFails = 0; yieldBump('wayback'); return direct;
+    }
     const availRaw = await serverFetchRaw('https://archive.org/wayback/available?url=' + encodeURIComponent(url) + '&timestamp=2025', 12000);
     if (!availRaw) return null;
     let snapUrl = '';
