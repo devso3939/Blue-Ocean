@@ -3075,6 +3075,86 @@ async function waybackFetch(url: string, timeoutMs = 25000): Promise<string | nu
   } catch { _wbFails++; _wbLastFail = Date.now(); return null; }
 }
 
+// ─── v6.9.72: GitHub Actions render arm (our own headless lane) ─────
+// Dispatches the URL to our render-lane workflow (repository_dispatch;
+// PAT lives in Vault, only rpc_render_dispatch touches it). The workflow
+// renders in a real headed Camoufox/Chromium and commits the result to
+// the render-cache branch: meta/<sha1(url)>.json + dom/<sha1(url)>.html.
+// raw.githubusercontent serves CORS *, so the browser polls those files
+// DIRECTLY — no server hop, no key, and the DOM persists across sessions
+// (a git branch is a free 7-day-fresh CDN).
+const _ghRawFails = { n: 0, at: 0 };       // raw.githubusercontent outage memory
+const _renderRuns = new Map<string, number>();  // sha → last dispatch time
+function ghRawOk(): boolean {
+  return !(_ghRawFails.n >= 3 && Date.now() - _ghRawFails.at < 300_000);
+}
+async function ghRawFetch(path: string, timeoutMs: number): Promise<string | null> {
+  try {
+    const res = await fetch('https://raw.githubusercontent.com/devso3939/Blue-Ocean/render-cache/' + path, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return null;
+    const text = await res.text();
+    _ghRawFails.n = 0;
+    return text;
+  } catch { _ghRawFails.n++; _ghRawFails.at = Date.now(); return null; }
+}
+async function renderSha1(url: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(url));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function renderFetchViaActions(url: string, timeoutMs = 30000): Promise<string | null> {
+  if (!ghRawOk()) return null;
+  const cached = _renderCache.get(url);
+  if (cached) return cached;
+  yieldTry('render');
+  let sha = '';
+  try { sha = await renderSha1(url); } catch { return null; }
+  interface RenderMeta { status?: string; finished_at?: string }
+  const FRESH_MS = 7 * 24 * 3600 * 1000;
+  const parseMeta = async (): Promise<RenderMeta | null> => {
+    const raw = await ghRawFetch('meta/' + sha + '.json', 12000);
+    try { return raw ? JSON.parse(raw) as RenderMeta : null; } catch { return null; }
+  };
+  // 1) Serve a fresh passing render from the cache branch (any prior run,
+  //    any session — this is why the lane pays for itself).
+  let meta = await parseMeta();
+  if (meta?.status === 'done' && meta.finished_at && Date.now() - Date.parse(meta.finished_at) < FRESH_MS) {
+    const dom = await ghRawFetch('dom/' + sha + '.html', 20000);
+    if (dom && dom.length > 500 && !isCfChallenge(dom)) { _renderCache.set(url, dom); yieldBump('render'); return dom; }
+  }
+  if ((meta?.status === 'done' || meta?.status === 'challenge') && meta.finished_at && Date.now() - Date.parse(meta.finished_at) < FRESH_MS) {
+    return null; // known outcome this week (challenge included) — don't burn a run
+  }
+  // 2) Fresh dispatch — one per URL per session (run takes 2-5 min; the
+  //    DOM lands on the branch for every future attempt).
+  if (_renderRuns.has(sha) && Date.now() - _renderRuns.get(sha)! < 10 * 60_000) return null;
+  const disp = await supabaseRpc<{ rid?: number; sha?: string; error?: string }>('rpc_render_dispatch', { p_url: url }, 15000);
+  if (!disp || disp.error || !disp.sha) return null;
+  _renderRuns.set(disp.sha, Date.now());
+  // 3) Short window for a near-complete run to land (full cold runs exceed
+  //    any reasonable page-fetch timeout; they simply serve NEXT attempt).
+  const waitUntil = Date.now() + Math.min(Math.max(timeoutMs, 20_000), 45_000);
+  while (Date.now() < waitUntil) {
+    await abortableWait(6000);
+    meta = await parseMeta();
+    if (meta?.status === 'done') {
+      const dom = await ghRawFetch('dom/' + sha + '.html', 20000);
+      if (dom && dom.length > 500 && !isCfChallenge(dom)) { _renderCache.set(url, dom); yieldBump('render'); return dom; }
+      return null;
+    }
+    if (meta?.status === 'challenge') return null;
+  }
+  return null;
+}
+
+// CF rescue renderer: our own Actions lane first (free, persistent cache),
+// urlscan (dormant until its Vault key lands) as the backup.
+async function renderRescue(url: string, timeoutMs = 30000): Promise<string | null> {
+  const acted = await renderFetchViaActions(url, timeoutMs);
+  if (acted) return acted;
+  return renderFetchViaServer(url, timeoutMs);
+}
+
 async function pageFetchViaServer(url: string, timeoutMs = 30000): Promise<string | null> {
   const host = urlHostOf(url);
   // Known-challenged host: skip the pointless direct attempt, Wayback-first,
@@ -3082,7 +3162,7 @@ async function pageFetchViaServer(url: string, timeoutMs = 30000): Promise<strin
   if (_cfHosts.has(host)) {
     const wb = await waybackFetch(url, timeoutMs);
     if (wb) return wb;
-    const rendered = await renderFetchViaServer(url, timeoutMs);
+    const rendered = await renderRescue(url, timeoutMs);
     if (rendered) return rendered;
   }
   const direct = await serverFetchRaw(url, timeoutMs);
@@ -3093,7 +3173,7 @@ async function pageFetchViaServer(url: string, timeoutMs = 30000): Promise<strin
   const wb = await waybackFetch(url, timeoutMs);
   if (wb) return wb;
   if (isCfChallenge(direct)) {
-    const rendered = await renderFetchViaServer(url, timeoutMs);
+    const rendered = await renderRescue(url, timeoutMs);
     if (rendered) return rendered;
   }
   return direct; // challenge text is harmless downstream — extractors find nothing
