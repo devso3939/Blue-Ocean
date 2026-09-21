@@ -33,6 +33,7 @@ import {
   addBackupKeys, keyPoolStatus,
   getOverpassRouteLog, resetOverpassRouteLog,
   type OverpassRouteEvent,
+  onRenderHarvest, type RenderHarvestStats,
 } from './clientEngine';
 import CompareView from './CompareView';
 import CountryView from './CountryView';
@@ -475,6 +476,10 @@ export default function App() {
   // used — e.g. "Scanned: Tbilisi" or "Scanned: Tbilisi +2× area". Makes
   // every self-healing attempt visible instead of hidden in a note line.
   const [scanAreaLabel, setScanAreaLabel] = useState('');
+  // v6.9.74: render-harvest outcome — chip in the results header whenever
+  // the harvest pass ran (even with 0 hits, so its contribution is visible).
+  const [harvestStats, setHarvestStats] = useState<RenderHarvestStats | null>(null);
+  useEffect(() => onRenderHarvest(setHarvestStats), []);
   // v6.9.13: backup API-key manager (Settings panel)
   const [showSettings, setShowSettings] = useState(false);
   const [bkInputs, setBkInputs] = useState<Record<string, string>>({});
@@ -806,6 +811,7 @@ export default function App() {
     setOverpassRoute([]); resetOverpassRouteLog();
     resetExtractionYield(); // v6.9.60: per-layer yield counters start fresh each run
     resetArmStats(); // v6.9.65: per-arm profiling starts fresh each run
+    setHarvestStats(null); // v6.9.74: harvest chip is per-run, never stale
     (window as any).__boArmStats = getArmStats; // live readout for verification
     setEngineHealth(getEngineHealthSnapshot());
 
@@ -1059,6 +1065,7 @@ export default function App() {
     setOverpassRoute([]); resetOverpassRouteLog();
     resetExtractionYield(); // v6.9.60: per-layer yield counters start fresh each run
     resetArmStats(); // v6.9.65: per-arm profiling starts fresh each run
+    setHarvestStats(null); // v6.9.74: harvest chip is per-run, never stale
     (window as any).__boArmStats = getArmStats; // live readout for verification
     setEngineHealth(getEngineHealthSnapshot());
 
@@ -2448,6 +2455,19 @@ export default function App() {
                         : 'border-border text-muted-foreground')}
                   >
                     📍 {scanAreaLabel}
+                  </span>
+                )}
+                {harvestStats && (
+                  <span
+                    title={harvestStats.sites > 0
+                      ? `${harvestStats.sites} Cloudflare-protected site(s) rendered by the headless lane, ${harvestStats.contacts} contact fields extracted into matching businesses`
+                      : 'Harvest pass ran, but no Cloudflare-protected site yielded a passing render this scan'}
+                    className={"text-[10px] font-medium px-2 py-0.5 rounded-full border " +
+                      (harvestStats.sites > 0
+                        ? 'border-violet-400/40 bg-violet-400/10 text-violet-300'
+                        : 'border-border text-muted-foreground/70')}
+                  >
+                    🎭 Render harvest: {harvestStats.sites} site{harvestStats.sites === 1 ? '' : 's'} · {harvestStats.contacts} contact{harvestStats.contacts === 1 ? '' : 's'}
                   </span>
                 )}
               </h3>

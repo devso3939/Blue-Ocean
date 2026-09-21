@@ -3164,6 +3164,20 @@ async function renderRescue(url: string, timeoutMs = 30000): Promise<string | nu
 // detection time (not at need time) means the DOM is warm on render-cache
 // exactly when the enrichment harvest pass looks for it.
 const _renderQueued = new Set<string>();
+
+// v6.9.74: harvest outcome surfaced to the UI — the results header shows
+// '🎭 Render harvest: N sites · M contacts' whenever the pass ran.
+export interface RenderHarvestStats { sites: number; contacts: number; ranAt: number; }
+let _harvestStats: RenderHarvestStats | null = null;
+const _harvestListeners = new Set<(s: RenderHarvestStats | null) => void>();
+export function onRenderHarvest(fn: (s: RenderHarvestStats | null) => void): () => void {
+  _harvestListeners.add(fn);
+  return () => { _harvestListeners.delete(fn); };
+}
+function emitHarvest(s: RenderHarvestStats | null): void {
+  _harvestStats = s;
+  for (const fn of _harvestListeners) { try { fn(s); } catch { /* listener error never breaks the scan */ } }
+}
 function prefetchRenderDispatch(url: string): void {
   if (_renderQueued.has(url) || !ghRawOk()) return;
   _renderQueued.add(url);
@@ -6236,6 +6250,10 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   if (_renderQueued.size > 0 && ghRawOk() && !isCancelled()) {
     _ep.activePass = 'Render harvest (warm CF DOMs)'; _ep.passNumber = 7; bumpPercent(99); emitEP();
     let harvestHits = 0;
+    let contactsGained = 0;
+    const contactFieldCount = (x: Business) =>
+      (x.phone ? 1 : 0) + (x.email ? 1 : 0) + (x.website ? 1 : 0) +
+      (x.facebook ? 1 : 0) + (x.instagram ? 1 : 0) + (x.linkedin ? 1 : 0);
     for (const q of Array.from(_renderQueued)) {
       if (isCancelled()) break;
       if (_renderCache.has(q)) continue;
@@ -6251,13 +6269,20 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         _renderCache.set(q, dom);
         for (const arr of results.values()) {
           for (const b of arr) {
-            try { if (b.website && new URL(b.website).host === qhost) extractFromHtml(dom, b); } catch { /* skip */ }
+            try {
+              if (b.website && new URL(b.website).host === qhost) {
+                const before = contactFieldCount(b);
+                extractFromHtml(dom, b);
+                contactsGained += Math.max(0, contactFieldCount(b) - before);
+              }
+            } catch { /* skip */ }
           }
         }
         harvestHits++;
       } catch { continue; }
     }
-    if (harvestHits > 0) onProgress?.(99, `Render harvest: ${harvestHits} Cloudflare-walled site(s) yielded contacts`);
+    emitHarvest({ sites: harvestHits, contacts: contactsGained, ranAt: Date.now() });
+    if (harvestHits > 0) onProgress?.(99, `Render harvest: ${harvestHits} Cloudflare-walled site(s), +${contactsGained} contacts`);
   }
 
   // ── v6.9.37: final VALIDATION pass — every stored contact is checked ──
