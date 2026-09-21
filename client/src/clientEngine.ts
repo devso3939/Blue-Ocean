@@ -3176,6 +3176,7 @@ export function onRenderHarvest(fn: (s: RenderHarvestStats | null) => void): () 
 }
 function emitHarvest(s: RenderHarvestStats | null): void {
   _harvestStats = s;
+  try { (window as unknown as { __boHarvest?: RenderHarvestStats | null }).__boHarvest = s; } catch { /* non-browser */ }
   for (const fn of _harvestListeners) { try { fn(s); } catch { /* listener error never breaks the scan */ } }
 }
 function prefetchRenderDispatch(url: string): void {
@@ -6247,42 +6248,51 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   // for those DOMs and extracts their contacts, turning lane latency
   // into free parallelism. Runs BEFORE validation so harvested contacts
   // go through the same strict scrub as everything else.
-  if (_renderQueued.size > 0 && ghRawOk() && !isCancelled()) {
-    _ep.activePass = 'Render harvest (warm CF DOMs)'; _ep.passNumber = 7; bumpPercent(99); emitEP();
+  if (_renderQueued.size > 0) {
     let harvestHits = 0;
     let contactsGained = 0;
     const contactFieldCount = (x: Business) =>
       (x.phone ? 1 : 0) + (x.email ? 1 : 0) + (x.website ? 1 : 0) +
       (x.facebook ? 1 : 0) + (x.instagram ? 1 : 0) + (x.linkedin ? 1 : 0);
-    for (const q of Array.from(_renderQueued)) {
-      if (isCancelled()) break;
-      if (_renderCache.has(q)) continue;
-      let qhost = ''; try { qhost = new URL(q).host; } catch { continue; }
-      let sha = ''; try { sha = await renderSha1(q); } catch { continue; }
-      const metaRaw = await ghRawFetch('meta/' + sha + '.json', 10000);
-      if (!metaRaw) continue;
-      try {
-        const m = JSON.parse(metaRaw) as { status?: string; finished_at?: string };
-        if (m.status !== 'done') continue;
-        const dom = await ghRawFetch('dom/' + sha + '.html', 15000);
-        if (!dom || dom.length <= 500 || isCfChallenge(dom)) continue;
-        _renderCache.set(q, dom);
-        for (const arr of results.values()) {
-          for (const b of arr) {
-            try {
-              if (b.website && new URL(b.website).host === qhost) {
-                const before = contactFieldCount(b);
-                extractFromHtml(dom, b);
-                contactsGained += Math.max(0, contactFieldCount(b) - before);
+    // v6.9.75: the pass emits its stats UNCONDITIONALLY when sites were
+    // queued — a transient raw.githubusercontent outage (ghRawOk false)
+    // or a cancel must still surface as '0 sites · 0 contacts' instead of
+    // vanishing (the v6.9.74 bug: emit sat inside the gate, so a blocked
+    // pass was invisible and the chip never appeared).
+    try {
+      if (ghRawOk() && !isCancelled()) {
+        _ep.activePass = 'Render harvest (warm CF DOMs)'; _ep.passNumber = 7; bumpPercent(99); emitEP();
+        for (const q of Array.from(_renderQueued)) {
+          if (isCancelled()) break;
+          if (_renderCache.has(q)) continue;
+          let qhost = ''; try { qhost = new URL(q).host; } catch { continue; }
+          let sha = ''; try { sha = await renderSha1(q); } catch { continue; }
+          const metaRaw = await ghRawFetch('meta/' + sha + '.json', 10000);
+          if (!metaRaw) continue;
+          try {
+            const m = JSON.parse(metaRaw) as { status?: string; finished_at?: string };
+            if (m.status !== 'done') continue;
+            const dom = await ghRawFetch('dom/' + sha + '.html', 15000);
+            if (!dom || dom.length <= 500 || isCfChallenge(dom)) continue;
+            _renderCache.set(q, dom);
+            for (const arr of results.values()) {
+              for (const b of arr) {
+                try {
+                  if (b.website && new URL(b.website).host === qhost) {
+                    const before = contactFieldCount(b);
+                    extractFromHtml(dom, b);
+                    contactsGained += Math.max(0, contactFieldCount(b) - before);
+                  }
+                } catch { /* skip */ }
               }
-            } catch { /* skip */ }
-          }
+            }
+            harvestHits++;
+          } catch { continue; }
         }
-        harvestHits++;
-      } catch { continue; }
-    }
+        if (harvestHits > 0) onProgress?.(99, `Render harvest: ${harvestHits} Cloudflare-walled site(s), +${contactsGained} contacts`);
+      }
+    } catch { /* never let harvest mechanics break result delivery */ }
     emitHarvest({ sites: harvestHits, contacts: contactsGained, ranAt: Date.now() });
-    if (harvestHits > 0) onProgress?.(99, `Render harvest: ${harvestHits} Cloudflare-walled site(s), +${contactsGained} contacts`);
   }
 
   // ── v6.9.37: final VALIDATION pass — every stored contact is checked ──
