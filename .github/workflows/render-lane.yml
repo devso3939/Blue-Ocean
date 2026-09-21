@@ -68,14 +68,27 @@ jobs:
           fi
           echo "fresh=$FRESH" >> "$GITHUB_OUTPUT"
 
+      - name: Restore browser toolchain cache
+        id: toolchain
+        if: steps.cache.outputs.fresh != 'yes'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/.cache/camoufox
+            ~/.cache/pip
+          key: render-toolchain-v1-${{ runner.os }}-pw1491
+
       - name: Install Xvfb + Playwright + Chromium
         if: steps.cache.outputs.fresh != 'yes'
         run: |
           sudo apt-get update -y
           sudo apt-get install -y xvfb
           pip install playwright==1.49.1 playwright-stealth==2.0.0 "camoufox[geoip]"
-          playwright install chromium --with-deps
-          python -m camoufox fetch
+          if [ "${{ steps.toolchain.outputs.cache-hit }}" != "true" ]; then
+            playwright install chromium --with-deps
+            python -m camoufox fetch
+          fi
 
       - name: Render URL in headless Chromium
         if: steps.cache.outputs.fresh != 'yes'

@@ -3126,11 +3126,15 @@ async function renderFetchViaActions(url: string, timeoutMs = 30000): Promise<st
     return null; // known outcome this week (challenge included) — don't burn a run
   }
   // 2) Fresh dispatch — one per URL per session (run takes 2-5 min; the
-  //    DOM lands on the branch for every future attempt).
-  if (_renderRuns.has(sha) && Date.now() - _renderRuns.get(sha)! < 10 * 60_000) return null;
-  const disp = await supabaseRpc<{ rid?: number; sha?: string; error?: string }>('rpc_render_dispatch', { p_url: url }, 15000);
-  if (!disp || disp.error || !disp.sha) return null;
-  _renderRuns.set(disp.sha, Date.now());
+  //    DOM lands on the branch for every future attempt). If a dispatch is
+  //    ALREADY in flight (prefetch fired it at challenge-detection time),
+  //    skip re-dispatching and go straight to polling for it.
+  const inFlight = _renderRuns.has(sha) && Date.now() - _renderRuns.get(sha)! < 10 * 60_000;
+  if (!inFlight) {
+    const disp = await supabaseRpc<{ rid?: number; sha?: string; error?: string }>('rpc_render_dispatch', { p_url: url }, 15000);
+    if (!disp || disp.error || !disp.sha) return null;
+    _renderRuns.set(disp.sha, Date.now());
+  }
   // 3) Short window for a near-complete run to land (full cold runs exceed
   //    any reasonable page-fetch timeout; they simply serve NEXT attempt).
   const waitUntil = Date.now() + Math.min(Math.max(timeoutMs, 20_000), 45_000);
@@ -3155,6 +3159,34 @@ async function renderRescue(url: string, timeoutMs = 30000): Promise<string | nu
   return renderFetchViaServer(url, timeoutMs);
 }
 
+// ── v6.9.73: PREFETCH — dispatch a render the instant a CF wall appears ──
+// The lane's runs take 2-5 minutes. Firing the dispatch at challenge-
+// detection time (not at need time) means the DOM is warm on render-cache
+// exactly when the enrichment harvest pass looks for it.
+const _renderQueued = new Set<string>();
+function prefetchRenderDispatch(url: string): void {
+  if (_renderQueued.has(url) || !ghRawOk()) return;
+  _renderQueued.add(url);
+  void (async () => {
+    try {
+      let sha = '';
+      try { sha = await renderSha1(url); } catch { return; }
+      // Skip dispatch when a usable verdict is already cached this week.
+      const metaRaw = await ghRawFetch('meta/' + sha + '.json', 8000);
+      if (metaRaw) {
+        try {
+          const m = JSON.parse(metaRaw) as { status?: string; finished_at?: string };
+          const fresh = !!m.finished_at && Date.now() - Date.parse(m.finished_at) < 7 * 24 * 3600 * 1000;
+          if (fresh && (m.status === 'done' || m.status === 'challenge')) return;
+        } catch { /* dispatch anyway */ }
+      }
+      if (_renderRuns.has(sha) && Date.now() - _renderRuns.get(sha)! < 10 * 60_000) return;
+      const disp = await supabaseRpc<{ rid?: number; sha?: string; error?: string }>('rpc_render_dispatch', { p_url: url }, 15000);
+      if (disp?.sha) _renderRuns.set(disp.sha, Date.now());
+    } catch { /* silent — prefetch is best-effort */ }
+  })();
+}
+
 async function pageFetchViaServer(url: string, timeoutMs = 30000): Promise<string | null> {
   const host = urlHostOf(url);
   // Known-challenged host: skip the pointless direct attempt, Wayback-first,
@@ -3169,7 +3201,7 @@ async function pageFetchViaServer(url: string, timeoutMs = 30000): Promise<strin
   if (direct && !isCfChallenge(direct)) { _cfHosts.delete(host); return direct; }
   // Challenge page (or empty) — mark the host and rescue: Wayback first,
   // then a real headless-browser render as the final arm.
-  if (isCfChallenge(direct)) _cfHosts.add(host);
+  if (isCfChallenge(direct)) { _cfHosts.add(host); prefetchRenderDispatch(url); }
   const wb = await waybackFetch(url, timeoutMs);
   if (wb) return wb;
   if (isCfChallenge(direct)) {
@@ -6193,6 +6225,40 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   onProgress?.(97, Date.now() >= laneDeadline
     ? 'Lane budget reached — shipping contacts found so far…'
     : 'All enrichment lanes complete…');
+
+  // ── v6.9.73: RENDER HARVEST — collect warm Actions-lane DOMs ─────
+  // CF-challenged sites were dispatched a render the moment their wall
+  // appeared (prefetchRenderDispatch). Runs complete in 2-5 min — right
+  // about when the main passes finish — so this pass polls render-cache
+  // for those DOMs and extracts their contacts, turning lane latency
+  // into free parallelism. Runs BEFORE validation so harvested contacts
+  // go through the same strict scrub as everything else.
+  if (_renderQueued.size > 0 && ghRawOk() && !isCancelled()) {
+    _ep.activePass = 'Render harvest (warm CF DOMs)'; _ep.passNumber = 7; bumpPercent(99); emitEP();
+    let harvestHits = 0;
+    for (const q of Array.from(_renderQueued)) {
+      if (isCancelled()) break;
+      if (_renderCache.has(q)) continue;
+      let qhost = ''; try { qhost = new URL(q).host; } catch { continue; }
+      let sha = ''; try { sha = await renderSha1(q); } catch { continue; }
+      const metaRaw = await ghRawFetch('meta/' + sha + '.json', 10000);
+      if (!metaRaw) continue;
+      try {
+        const m = JSON.parse(metaRaw) as { status?: string; finished_at?: string };
+        if (m.status !== 'done') continue;
+        const dom = await ghRawFetch('dom/' + sha + '.html', 15000);
+        if (!dom || dom.length <= 500 || isCfChallenge(dom)) continue;
+        _renderCache.set(q, dom);
+        for (const arr of results.values()) {
+          for (const b of arr) {
+            try { if (b.website && new URL(b.website).host === qhost) extractFromHtml(dom, b); } catch { /* skip */ }
+          }
+        }
+        harvestHits++;
+      } catch { continue; }
+    }
+    if (harvestHits > 0) onProgress?.(99, `Render harvest: ${harvestHits} Cloudflare-walled site(s) yielded contacts`);
+  }
 
   // ── v6.9.37: final VALIDATION pass — every stored contact is checked ──
   // Extraction layers are permissive (they'd rather keep a suspect value
