@@ -6662,7 +6662,21 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   if (_renderQueued.size > 0 && _harvSites.n < _renderQueued.size) {
     // Only re-run when some queued renders are still uncollected — a
     // fully-harvested queue means the early pass already got everything.
-    await runHarvest('late');
+    // v6.9.85: GRACE WINDOW — measured miss: renders dispatched during
+    // Pass R finished ~3 min AFTER the run's late poll (psp.ge/kiabi 15:58
+    // vs poll 15:55), so same-run collection lost them. Now the late phase
+    // polls every 30s for up to 4 minutes, collecting each DOM the moment
+    // it lands, and bails early the instant the queue is fully harvested.
+    if (!isCancelled()) {
+      const _graceUntil = Date.now() + 4 * 60_000;
+      while (Date.now() < _graceUntil && !isCancelled() && _harvSites.n < _renderQueued.size) {
+        await runHarvest('late');
+        if (_harvSites.n >= _renderQueued.size) break;
+        const pending = _renderQueued.size - _harvSites.n;
+        onProgress?.(98, `Render lane grace: waiting for ${pending} in-flight render(s)…`);
+        await abortableWait(30_000);
+      }
+    }
     emitHarvest({ sites: _harvSites.n, contacts: _harvSites.c, ranAt: Date.now() });
   }
 
