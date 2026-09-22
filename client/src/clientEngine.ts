@@ -4359,6 +4359,42 @@ async function searchDDGLite(query: string): Promise<{title: string; url: string
   }
 }
 
+// v6.9.81: DDG **html** endpoint as the retry-ladder second engine. Measured
+// on a 536-business Cafes run the pass-1 html-DDG arm yielded 9 fields in 40
+// calls (129s) — the best efficiency of ANY engine (Bing 1/16s) — while
+// lite.duckduckgo (searchDDGLite) sat health-gated dead the whole pass. The
+// ladder's 'ddg' slot now uses this parser instead.
+async function searchDDGHtml(query: string): Promise<{ title: string; url: string; snippet: string }[]> {
+  if (!engineAvailable('ddg')) return [];
+  try {
+    const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + query, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!r.ok) { engineNoteFail('ddg', 'DuckDuckGo', classifyEngineError(r.status), `HTTP ${r.status}`); return []; }
+    const html = await r.text();
+    if (!html || html.length < 200) { engineNoteFail('ddg', 'DuckDuckGo', 'net', 'empty response (blocked)'); return []; }
+    if (/anomaly|challenge|captcha|blocked/i.test(html)) { engineNoteFail('ddg', 'DuckDuckGo', 'challenge', 'challenge page'); return []; }
+    const out: { title: string; url: string; snippet: string }[] = [];
+    // Result anchors: href="//duckduckgo.com/l/?uddg=<enc>&rut=…" or direct https
+    for (const m of html.matchAll(/<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)) {
+      let u = m[1];
+      const dec = u.match(/[?&]uddg=([^&]+)/);
+      if (dec) { try { u = decodeURIComponent(dec[1]); } catch { continue; } }
+      if (u.startsWith('//')) u = 'https:' + u;
+      if (!/^https?:\/\//i.test(u) || /duckduckgo\.com/i.test(u)) continue;
+      out.push({ url: u, title: m[2].replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').trim(), snippet: '' });
+    }
+    const snips = [...html.matchAll(/<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi)].map(m2 => m2[1].replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').trim());
+    for (let i = 0; i < Math.min(out.length, snips.length); i++) out[i].snippet = snips[i];
+    if (out.length > 0) engineNoteSuccess('ddg', 'DuckDuckGo');
+    return out.slice(0, 8);
+  } catch (e: any) {
+    if (e?.message !== 'Cancelled') engineNoteFail('ddg', 'DuckDuckGo', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : e?.message || 'network error').slice(0, 60));
+    return [];
+  }
+}
+
 // Wikidata SPARQL lookup: free, keyless, CORS-native. Finds official email/
 // phone/website for NOTABLE businesses (chains, hotels, landmarks). Queries
 // are serialized (anonymous limit: 1 concurrent).
@@ -5600,7 +5636,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               headers: { 'User-Agent': 'Mozilla/5.0' },
               signal: AbortSignal.timeout(5000),
             });
-            if (!r.ok) return false;
+            if (!r.ok) { engineNoteFail('mojeek', 'Mojeek', classifyEngineError(r.status), `HTTP ${r.status}`); return false; }
             const html = await r.text();
             if (!/<ul class="results"/i.test(html) && /captcha|challenge|verify/i.test(html)) {
               engineNoteFail('mojeek', 'Mojeek', 'challenge', 'challenge page');
@@ -6353,6 +6389,36 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     // pass (measured: brave 689s / 0 gains on a 536-business Cafes run).
     const _rEngCalls: Record<string, number> = {};
     const _rEngGains: Record<string, number> = {};
+    // v6.9.81: per-origin contact-URL discovery (WP REST + sitemap.xml).
+    // Cached per scan — a chain site is probed once, every branch reuses it.
+    const _rContactUrls = new Map<string, string[]>();
+    const discoverContactUrls = async (origin: string): Promise<string[]> => {
+      const hit = _rContactUrls.get(origin);
+      if (hit) return hit;
+      const found: string[] = [];
+      try {
+        const r = await corsFetch(origin + '/wp-json/wp/v2/pages?search=contact&per_page=3&_fields=link', { signal: AbortSignal.timeout(4500), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
+        if (r.ok) {
+          const arr: Array<{ link?: string }> = JSON.parse(await r.text());
+          for (const p of (Array.isArray(arr) ? arr : [])) if (p?.link) found.push(p.link);
+        }
+      } catch { /* not WP / blocked */ }
+      if (found.length < 2) {
+        try {
+          const r2 = await corsFetch(origin + '/sitemap.xml', { signal: AbortSignal.timeout(4500), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
+          if (r2.ok) {
+            const xml = await r2.text();
+            for (const m of xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)) {
+              if (/contact|kontakt|контакт|iletisim|about|filial|branch|location/i.test(m[1]) && !/\.pdf$/i.test(m[1])) found.push(m[1]);
+              if (found.length >= 4) break;
+            }
+          }
+        } catch { /* no sitemap */ }
+      }
+      const out = found.slice(0, 4);
+      _rContactUrls.set(origin, out);
+      return out;
+    };
     const complete = (b: Business) => !!(b.website && b.email && b.phone);
     const rnavPaths = (b: Business): string[] => {
       if (!b.website) return [];
@@ -6368,11 +6434,37 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         '"' + base + '" ' + cityQ + ' contact email',
         '"' + base + '" ' + cityQ + ' phone',
         '"' + base + '" site:facebook.com OR site:instagram.com',
+        // v6.9.81: 4th shape — generic contact-details query. Bing-only
+        // (the ladder slices secondary engines to 3 queries to bound time).
+        '"' + base + '" ' + cityQ + ' contact details address',
       ];
     };
     const rAttempt = async (b: Business): Promise<boolean> => {
-      // 1) NAV — crawl deeper/multilingual contact paths on the own site
+      // 1) NAV — crawl deeper/multilingual contact paths on the own site.
+      //    v6.9.81: BEFORE guessing static paths, discover REAL contact URLs
+      //    via WordPress REST (pages?search=contact) and sitemap.xml <loc> —
+      //    multilingual sites name pages /ka/kontakti, /filialebi/ etc. that
+      //    no static slug list covers. Cached per-origin so branch-heavy
+      //    scans probe each site once.
       if (b.website && (!b.email || !b.phone)) {
+        let _origin = '';
+        try { _origin = new URL(b.website).origin; } catch { _origin = ''; }
+        if (_origin && !_cfHosts.has(urlHostOf(_origin))) {
+          const discovered = await discoverContactUrls(_origin);
+          for (const u of discovered) {
+            if (isCancelled()) break;
+            try {
+              const r = await corsFetch(u, { signal: AbortSignal.timeout(5000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
+              if (r.ok) {
+                const html = await r.text();
+                if (!isCfChallenge(html) && html.length > 500) extractFromHtml(html, b);
+              }
+            } catch { /* next discovered url */ }
+            if (b.email && b.phone) break;
+          }
+          if (b.email && b.phone) { yieldTry('rcms'); yieldBump('rcms'); return true; }
+          if (discovered.length > 0) { yieldTry('rcms'); if (b.email || b.phone) yieldBump('rcms'); }
+        }
         for (const u of rnavPaths(b).slice(0, 8)) {
           if (isCancelled()) break;
           if (_cfHosts.has(urlHostOf(u))) break;
@@ -6402,12 +6494,14 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           if ((_rEngCalls[eng] || 0) >= 15 && (_rEngGains[eng] || 0) === 0) continue;
           _rEngCalls[eng] = (_rEngCalls[eng] || 0) + 1;
           const pre = { e: b.email, p: b.phone, w: b.website };
-          for (const q of rsearchQueries(b)) {
+          // v6.9.81: Bing (the proven workhorse) gets the 4th query shape;
+          // secondary engines keep 3 to bound wall time.
+          for (const q of (eng === 'bing' ? rsearchQueries(b) : rsearchQueries(b).slice(0, 3))) {
             if (isCancelled()) break;
             let rs: Array<{ title: string; url: string; description?: string; snippet?: string }> = [];
             try {
               if (eng === 'bing') rs = await searchBing(q);
-              else if (eng === 'ddg') rs = await searchDDGLite(q);
+              else if (eng === 'ddg') rs = await searchDDGHtml(q);
               else if (eng === 'brave') rs = (await braveSearchViaSupabase(q)) || [];
             } catch {}
             if (rs.length === 0) continue;
@@ -8698,7 +8792,7 @@ __internals.extractFromHtml = extractFromHtmlModule;
 // mailto vs Cloudflare etc. Module-level so both scrape sites (deep crawler
 // and this module extractor) feed the same tally. Purely additive telemetry:
 // no extraction behavior changes, reset at every scan start.
-export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl' | 'wayback' | 'render' | 'rnav' | 'rsearch' | 'rbing' | 'rsocial' | 'rinfer';
+export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl' | 'wayback' | 'render' | 'rnav' | 'rsearch' | 'rbing' | 'rsocial' | 'rinfer' | 'rcms';
 export interface ExtractionYieldEntry { found: number; tries: number; }
 export interface ExtractionYieldMap { [k: string]: ExtractionYieldEntry; }
 const _extractYield: ExtractionYieldMap = {};
@@ -8732,6 +8826,7 @@ export const _EXTRACT_LAYER_META: { key: ExtractionLayerKey; label: string; icon
   { key: 'svfetch',   label: 'Server fetch',    icon: '🖥️' },
   { key: 'snippetdig', label: 'Snippet dig',    icon: '⛏️' },
   { key: 'rnav',     label: 'Retry nav',       icon: '🔁' },
+  { key: 'rcms',     label: 'CMS/sitemap',     icon: '🗂️' },
   { key: 'rsearch',  label: 'Retry search',    icon: '🔎' },
   { key: 'rbing',    label: 'Retry Bing',      icon: '🅱️' },
   { key: 'rsocial',  label: 'Retry social',  icon: '📱' },

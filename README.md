@@ -233,6 +233,22 @@ All dependencies are installed with a single `npm install` command inside the `c
 | `autoprefixer` | Latest | Browser compatibility prefixes |
 | `gh-pages` | Latest | Deploy to GitHub Pages |
 
+### Local Preview Server (production build)
+
+After `npm run build`, serve the production bundle locally exactly like the
+deployed site (path prefix `/Blue-Ocean/`):
+
+```bash
+cd client
+cp -r dist/* serve_root/          # sync the fresh build
+cp -r dist/* serve_root/Blue-Ocean/ 2>/dev/null || true
+python serve_prod.py              # → http://127.0.0.1:3199/Blue-Ocean/
+```
+
+`serve_prod.py` serves `client/serve_root/` on port **3199** with no-store
+caching, so every browser refresh picks up the newest build. If a tooling
+restart kills it, just re-run the last command — nothing else to restore.
+
 ### External APIs (No Setup Needed)
 
 The app fetches data from free public APIs automatically. The live site on GitHub Pages uses the **client** app; the **frontend** app uses the Supabase backend.
