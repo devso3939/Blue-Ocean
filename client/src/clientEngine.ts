@@ -6323,12 +6323,16 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   // for those DOMs and extracts their contacts, turning lane latency
   // into free parallelism. Runs BEFORE validation so harvested contacts
   // go through the same strict scrub as everything else.
-  if (_renderQueued.size > 0) {
-    let harvestHits = 0;
-    let contactsGained = 0;
-    const contactFieldCount = (x: Business) =>
-      (x.phone ? 1 : 0) + (x.email ? 1 : 0) + (x.website ? 1 : 0) +
-      (x.facebook ? 1 : 0) + (x.instagram ? 1 : 0) + (x.linkedin ? 1 : 0);
+  // v6.9.84: the harvest body is extracted into runHarvest so the SAME
+  // collection logic runs TWICE — once after the lanes (warm CF DOMs from
+  // the prefetch) and once after Pass R (phone-recovery /contact renders
+  // dispatched mid-ladder, whose GH runs land during the ladder). Stats
+  // accumulate across both phases; emitHarvest carries the totals.
+  const _harvSites = { n: 0, c: 0 };
+  const contactFieldCount = (x: Business) =>
+    (x.phone ? 1 : 0) + (x.email ? 1 : 0) + (x.website ? 1 : 0) +
+    (x.facebook ? 1 : 0) + (x.instagram ? 1 : 0) + (x.linkedin ? 1 : 0);
+  const runHarvest = async (label: string): Promise<void> => {
     // v6.9.75: the pass emits its stats UNCONDITIONALLY when sites were
     // queued — a transient raw.githubusercontent outage (ghRawOk false)
     // or a cancel must still surface as '0 sites · 0 contacts' instead of
@@ -6336,7 +6340,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     // pass was invisible and the chip never appeared).
     try {
       if (ghRawOk() && !isCancelled()) {
-        _ep.activePass = 'Render harvest (warm CF DOMs)'; _ep.passNumber = 7; bumpPercent(99); emitEP();
+        _ep.activePass = 'Render harvest (' + label + ')'; _ep.passNumber = 7; bumpPercent(99); emitEP();
         for (const q of Array.from(_renderQueued)) {
           if (isCancelled()) break;
           if (_renderCache.has(q)) continue;
@@ -6360,18 +6364,21 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                   if (bhost && bhost === qhost.replace(/^www\./, '')) {
                     const before = contactFieldCount(b);
                     extractFromHtml(dom, b);
-                    contactsGained += Math.max(0, contactFieldCount(b) - before);
+                    _harvSites.c += Math.max(0, contactFieldCount(b) - before);
                   }
                 } catch { /* skip */ }
               }
             }
-            harvestHits++;
+            _harvSites.n++;
           } catch { continue; }
         }
-        if (harvestHits > 0) onProgress?.(99, `Render harvest: ${harvestHits} rendered site(s), +${contactsGained} contacts`);
+        if (_harvSites.n > 0) onProgress?.(99, `Render harvest (${label}): ${_harvSites.n} rendered site(s), +${_harvSites.c} contacts`);
       }
     } catch { /* never let harvest mechanics break result delivery */ }
-    emitHarvest({ sites: harvestHits, contacts: contactsGained, ranAt: Date.now() });
+  };
+  if (_renderQueued.size > 0) {
+    await runHarvest('warm CF DOMs');
+    emitHarvest({ sites: _harvSites.n, contacts: _harvSites.c, ranAt: Date.now() });
   }
 
   // ── v6.9.78: PASS R (RELENTLESS) — the assurance ladder ─────────────
@@ -6466,7 +6473,26 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         '"' + base + '" ' + cityQ + ' contact details address',
       ];
     };
+    // v6.9.84: phone-recovery host dedup — one /contact render per host
+    const _phoneNeedyDispatched = new Set<string>();
     const rAttempt = async (b: Business): Promise<boolean> => {
+      // 0) PHONE-RECOVERY DISPATCH — v6.9.84. A business with a website and
+      // an email (the email proves the site is theirs) but no phone very
+      // likely keeps its switchboard number on a page the static fetch
+      // can't read (JS-hydrated, CF-protected, or bot-blocked). Dispatch a
+      // headless render of the site's /contact page — deduped per host and
+      // budget-capped by the dispatcher — so the LATE harvest (after this
+      // ladder) collects warm DOMs for every branch of the same chain.
+      if (b.website && b.email && !b.phone) {
+        try {
+          const o = new URL(b.website).origin;
+          const h = urlHostOf(o);
+          if (!_phoneNeedyDispatched.has(h)) {
+            _phoneNeedyDispatched.add(h);
+            prefetchRenderDispatch(o + '/contact');
+          }
+        } catch { /* malformed website — skip */ }
+      }
       // 1) NAV — crawl deeper/multilingual contact paths on the own site.
       //    v6.9.81: BEFORE guessing static paths, discover REAL contact URLs
       //    via WordPress REST (pages?search=contact) and sitemap.xml <loc> —
@@ -6626,6 +6652,18 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       }
       onProgress?.(98, 'Pass R done: ' + rFills + ' businesses completed by the retry ladder');
     }
+  }
+
+  // v6.9.84: LATE HARVEST — Pass R dispatched phone-recovery /contact
+  // renders mid-ladder; GH Actions runs land during the ladder, so collect
+  // whatever finished BEFORE validation (harvested contacts pass the same
+  // strict scrub). Totals accumulate with the early phase; the chip shows
+  // the run's combined render-lane contribution.
+  if (_renderQueued.size > 0 && _harvSites.n < _renderQueued.size) {
+    // Only re-run when some queued renders are still uncollected — a
+    // fully-harvested queue means the early pass already got everything.
+    await runHarvest('late');
+    emitHarvest({ sites: _harvSites.n, contacts: _harvSites.c, ranAt: Date.now() });
   }
 
   // ── v6.9.37: final VALIDATION pass — every stored contact is checked ──
