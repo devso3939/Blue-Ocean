@@ -1,0 +1,11 @@
+{
+  "url": "https://www.cleanhouse.ge/contact",
+  "ts": "2026-09-22T17:14:54Z",
+  "goto_error": "Page.goto: net::ERR_CERT_COMMON_NAME_INVALID at https://www.cleanhouse.ge/contact\nCall log:\n  - navigating to \"https://www.cleanhouse.ge/contact\", waiting until \"domcontentloaded\"\n",
+  "camoufox_error": "Page.content: Unable to retrieve content because the page is navigating and changing the content.",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 152254,
+  "status": "done",
+  "finished_at": "2026-09-22T17:15:06Z"
+}
