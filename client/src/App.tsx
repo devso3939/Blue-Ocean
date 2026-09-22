@@ -36,6 +36,7 @@ import {
   onRenderHarvest, type RenderHarvestStats,
   fetchCoverageRecent, type CoverageHistoryRow,
 } from './clientEngine';
+import { saveRun, listRuns, deleteRuns, clearRuns, historyStats, type RunRecord } from './runHistory';
 import CompareView from './CompareView';
 import CountryView from './CountryView';
 
@@ -411,6 +412,140 @@ function CoverageDashboard({ onBack }: { onBack: () => void }) {
   );
 }
 
+// ── v6.9.88: History view — every completed run, searchable/sortable, ─
+// click-to-restore into the exact post-run results screen. Selection →
+// delete marked runs; heavy-store banner suggests cleanup.
+function HistoryView({ onBack, onRestore, heavy, onCleanup }: {
+  onBack: () => void;
+  onRestore: (r: RunRecord) => void;
+  heavy: boolean;
+  onCleanup: (ids: string[]) => void;
+}) {
+  const [runs, setRuns] = useState<RunRecord[]>(() => listRuns());
+  const [q, setQ] = useState('');
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const [sortCol, setSortCol] = useState<'ts' | 'city' | 'biz' | 'cov'>('ts');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [stats, setStats] = useState(() => historyStats());
+  const refresh = () => { setRuns(listRuns()); setStats(historyStats()); };
+  const toggle = (id: string) => setSel(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const arrow = (col: string) => sortCol !== col ? '↕' : (sortDir === 'asc' ? '↑' : '↓');
+  const sortBy = (col: typeof sortCol) => { if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc'); else { setSortCol(col); setSortDir('desc'); } };
+  const rows = runs
+    .filter(r => !q || `${r.city.name} ${r.city.country} ${r.category || 'all'} ${r.kind} ${r.version}`.toLowerCase().includes(q.toLowerCase()))
+    .sort((a, b) => {
+      const m = sortDir === 'asc' ? 1 : -1;
+      if (sortCol === 'ts') return (a.ts - b.ts) * m;
+      if (sortCol === 'city') return a.city.name.localeCompare(b.city.name) * m;
+      if (sortCol === 'biz') return (a.stats.bizCount - b.stats.bizCount) * m;
+      return (a.stats.anyContactPct - b.stats.anyContactPct) * m;
+    });
+  const fmtAgo = (t: number) => { const d = Date.now() - t; if (d < 60e3) return 'just now'; if (d < 3600e3) return `${Math.floor(d / 60e3)}m ago`; if (d < 86400e3) return `${Math.floor(d / 3600e3)}h ago`; return `${Math.floor(d / 86400e3)}d ago`; };
+  const fmtKb = (b: number) => b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} MB` : `${Math.round(b / 1024)} KB`;
+  return (
+    <div className="min-h-screen bg-background">
+      <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md">
+        <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4">
+          <div className="flex items-center gap-2">
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-amber-500 via-orange-500 to-rose-500 text-white">
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+            </div>
+            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· History</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v{APP_VERSION}</span></span>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              value={q}
+              onChange={e => setQ(e.target.value)}
+              placeholder="Search city, country, category…"
+              className="w-44 sm:w-64 rounded-lg border border-border bg-card px-3 py-1.5 text-xs outline-none focus:border-primary/60"
+            />
+            <button onClick={onBack} className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-border text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all">← Back</button>
+          </div>
+        </div>
+      </header>
+      <main className="mx-auto max-w-7xl px-4 py-6">
+        {(heavy || stats.heavy) && (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-400/90">
+            <span>⚠ History is getting heavy ({stats.count} runs · {fmtKb(stats.bytes)} on this device) — old runs slow down saving. Consider cleaning up.</span>
+            <span className="flex gap-2">
+              <button
+                onClick={() => { if (sel.size > 0 && confirm(`Delete ${sel.size} marked run(s)?`)) { onCleanup([...sel]); setSel(new Set()); refresh(); } }}
+                disabled={sel.size === 0}
+                className="rounded-lg border border-red-500/40 px-3 py-1.5 font-semibold text-red-400/90 hover:text-red-300 disabled:opacity-40"
+              >🗑 Delete marked ({sel.size})</button>
+              <button
+                onClick={() => { if (confirm('Clear the FULL run history? This cannot be undone.')) { onCleanup(listRuns().map(r => r.id)); setSel(new Set()); refresh(); } }}
+                className="rounded-lg border border-red-500/40 px-3 py-1.5 font-semibold text-red-400/90 hover:text-red-300"
+              >Clear all</button>
+            </span>
+          </div>
+        )}
+        {!heavy && !stats.heavy && sel.size > 0 && (
+          <div className="mb-4 flex items-center justify-between rounded-xl border border-border bg-card p-3 text-xs">
+            <span className="text-muted-foreground">{sel.size} selected · {fmtKb(stats.bytes)} total</span>
+            <span className="flex gap-2">
+              <button onClick={() => { if (confirm(`Delete ${sel.size} marked run(s)?`)) { onCleanup([...sel]); setSel(new Set()); refresh(); } }} className="rounded-lg border border-red-500/40 px-3 py-1.5 font-semibold text-red-400/90 hover:text-red-300">🗑 Delete marked ({sel.size})</button>
+              <button onClick={() => setSel(new Set())} className="rounded-lg border border-border px-3 py-1.5 text-muted-foreground hover:text-foreground">Deselect</button>
+            </span>
+          </div>
+        )}
+        {rows.length === 0 ? (
+          <div className="rounded-xl border border-border bg-card p-10 text-center">
+            <div className="text-3xl">🕓</div>
+            <h2 className="mt-3 text-lg font-bold">No runs in history yet</h2>
+            <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
+              Every completed Analyze Industry or Discover Opportunities run is captured here automatically. Click any run to reopen its full results — map, table, opportunities and AI analysis.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-hidden rounded-xl border border-border bg-card">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-border bg-muted/30 text-xs uppercase tracking-wide text-muted-foreground">
+                  <tr>
+                    <th className="w-8 px-3 py-2.5"><input type="checkbox" checked={sel.size > 0 && sel.size === rows.length} onChange={e => setSel(e.target.checked ? new Set(rows.map(r => r.id)) : new Set())} className="accent-primary" /></th>
+                    <th className="cursor-pointer px-4 py-2.5 font-medium" onClick={() => sortBy('city')}>City · Scope {arrow('city')}</th>
+                    <th className="cursor-pointer px-4 py-2.5 font-medium" onClick={() => sortBy('ts')}>When {arrow('ts')}</th>
+                    <th className="cursor-pointer px-4 py-2.5 font-medium" onClick={() => sortBy('biz')}>Biz {arrow('biz')}</th>
+                    <th className="cursor-pointer px-4 py-2.5 font-medium" onClick={() => sortBy('cov')}>Coverage {arrow('cov')}</th>
+                    <th className="px-4 py-2.5 font-medium">Version</th>
+                    <th className="px-4 py-2.5"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map(r => (
+                    <tr key={r.id} className={`border-b border-border/50 last:border-0 ${sel.has(r.id) ? 'bg-primary/5' : ''}`}>
+                      <td className="px-3 py-2.5"><input type="checkbox" checked={sel.has(r.id)} onChange={() => toggle(r.id)} className="accent-primary" /></td>
+                      <td className="px-4 py-2.5">
+                        <button onClick={() => onRestore(r)} className="text-left font-semibold text-primary hover:underline" title="Open this run's full results">
+                          {r.city.name} · {r.kind === 'analyze' ? getCategoryLabel(r.category || '') : 'All categories'}
+                        </button>
+                        <div className="text-[10px] text-muted-foreground">{r.city.country} · {r.kind === 'analyze' ? 'Analyze Industry' : 'Discover Opportunities'}</div>
+                      </td>
+                      <td className="px-4 py-2.5 text-xs text-muted-foreground">{fmtAgo(r.ts)}</td>
+                      <td className="px-4 py-2.5 tabular-nums">{fmtNum(r.stats.bizCount)}</td>
+                      <td className="px-4 py-2.5">
+                        <span className={`font-bold tabular-nums ${r.stats.anyContactPct >= 80 ? 'text-emerald-400' : r.stats.anyContactPct >= 40 ? 'text-amber-400' : 'text-red-400'}`}>{r.stats.anyContactPct}%</span>
+                      </td>
+                      <td className="px-4 py-2.5 font-mono text-[10px] text-muted-foreground">v{r.version}</td>
+                      <td className="px-4 py-2.5 text-right">
+                        <button onClick={() => onRestore(r)} className="rounded-lg border border-primary/40 px-2.5 py-1 text-xs font-semibold text-primary hover:bg-primary/10">Open ↗</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+        <p className="mt-3 text-xs text-muted-foreground">
+          Runs are stored on this device. Deleting marked runs or clearing all frees space — the app warns when history grows heavy.
+        </p>
+      </main>
+    </div>
+  );
+}
+
 const COUNTRIES = [
   { name: 'Georgia', code: 'GE' }, { name: 'Armenia', code: 'AM' },
   { name: 'Azerbaijan', code: 'AZ' }, { name: 'Turkey', code: 'TR' },
@@ -501,7 +636,10 @@ const CAT_COLORS: Record<string, string> = {
 import { APP_VERSION } from './version'; // v6.9.29: shared stamp — visible on every view
 
 export default function App() {
-  const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country' | 'coverage'>('analysis');
+  const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country' | 'coverage' | 'history'>('analysis');
+  // v6.9.88: History state — heavy-store banner + selected record for the detail view
+  const [historyHeavy, setHistoryHeavy] = useState(false);
+  const [restoredRun, setRestoredRun] = useState<RunRecord | null>(null);
   const [selectedCountry, setSelectedCountry] = useState('');
   const [cityQuery, setCityQuery] = useState('');
   const [cityResults, setCityResults] = useState<CityResult[]>([]);
@@ -1106,8 +1244,36 @@ export default function App() {
       // background task) until the whole pipeline finishes.
       setLoading(false);
       setLoadingStage('');
+      // v6.9.88: capture the completed run into History (best-effort).
+      captureRun('discover');
     }
   }, [selectedCity]);
+
+  // v6.9.88: snapshot the current post-run state into History. Called in
+  // the finally of both flows — businesses Map → array form, opportunities,
+  // demand signals, AI analysis, badges. Failures never break the run.
+  const captureRun = (kind: 'analyze' | 'discover') => {
+    try {
+      if (!selectedCity || businesses.size === 0) return;
+      const bizArr: [string, Business[]][] = Array.from(businesses.entries()).map(([k, arr]) => [k, arr]);
+      const cnt = (pred: (b: Business) => boolean) => bizArr.reduce((s, [, arr]) => s + arr.filter(pred).length, 0);
+      const tot = bizArr.reduce((s, [, arr]) => s + arr.length, 0);
+      saveRun({
+        id: `${kind}-${selectedCity.name}-${selectedCategory || 'all'}-${Date.now()}`,
+        kind, ts: Date.now(), version: APP_VERSION,
+        city: { name: selectedCity.name, country: selectedCity.country, countryCode: selectedCity.countryCode, lat: selectedCity.lat, lon: selectedCity.lon, population: selectedCity.population, bbox: selectedCity.bbox },
+        category: kind === 'analyze' ? selectedCategory : null,
+        selectedOppCategory: kind === 'analyze' ? selectedCategory : (selectedOppCategory || null),
+        businesses: bizArr,
+        opportunities: opportunities as unknown[],
+        demandSignals: Array.from(demandSignals.entries()),
+        aiInsights, aiAnalysis: aiAnalysis as unknown | null,
+        scanAreaLabel, rescanNote,
+        stats: { bizCount: tot, anyContactPct: tot ? Math.round(100 * cnt(b => !!(b.phone || b.email || b.website)) / tot) : 0 },
+      });
+      setHistoryHeavy(historyStats().heavy);
+    } catch { /* history must never break the run */ }
+  };
 
   // Analyze single industry
   const startAnalyze = useCallback(async () => {
@@ -1286,6 +1452,8 @@ export default function App() {
       setLoadingStage('');
       abortRef.current = null;
       setCancelSignal(null);
+      // v6.9.88: capture the completed run into History (best-effort).
+      captureRun('analyze');
     }
   }, [selectedCity, selectedCategory]);
 
@@ -1491,6 +1659,35 @@ export default function App() {
     return <CoverageDashboard onBack={() => setViewMode('analysis')} />;
   }
 
+  if (viewMode === 'history') {
+    return <HistoryView
+      onBack={() => setViewMode('analysis')}
+      heavy={historyHeavy}
+      onCleanup={(ids) => { deleteRuns(ids); setHistoryHeavy(historyStats().heavy); }}
+      onRestore={(r) => {
+        // Restore the exact post-run state: city, category, businesses,
+        // opportunities, signals, AI, badges — then show the results view.
+        try {
+          setSelectedCity({ name: r.city.name, country: r.city.country, countryCode: r.city.countryCode, lat: r.city.lat, lon: r.city.lon, population: r.city.population, populationSource: undefined, bbox: r.city.bbox });
+          setBusinesses(new Map(r.businesses as [string, Business[]][]));
+          setOpportunities(r.opportunities as OpportunityResult[]);
+          setDemandSignals(new Map(r.demandSignals as [string, DemandSignal][]));
+          setAiInsights(r.aiInsights);
+          setAiAnalysis(r.aiAnalysis as AIAnalysis | null);
+          setSelectedOppCategory(r.selectedOppCategory);
+          if (r.kind === 'analyze' && r.category) setSelectedCategory(r.category);
+          setScanAreaLabel(r.scanAreaLabel);
+          setRescanNote(r.rescanNote);
+          setEnrichProgress(null);
+          setLoading(false);
+          setError('');
+          setRestoredRun(r);
+          setViewMode('analysis');
+        } catch { /* corrupt record — ignore */ }
+      }}
+    />;
+  }
+
   if (viewMode === 'country') {
     return (
       <div className="min-h-screen bg-background">
@@ -1558,6 +1755,13 @@ export default function App() {
                 className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-emerald-500/40 text-emerald-400/90 hover:text-emerald-300 hover:border-emerald-500/60 transition-all"
               >
                 📊 Coverage
+              </button>
+              <button
+                onClick={() => setViewMode('history')}
+                title="Every completed run — click one to reopen its full results"
+                className={`rounded-lg px-3 py-1.5 text-xs font-semibold border transition-all ${historyHeavy ? 'border-amber-500/50 text-amber-400' : 'border-border text-muted-foreground hover:text-foreground hover:border-amber-500/50'}`}
+              >
+                🕓 History{historyHeavy ? ' ⚠' : ''}
               </button>
               <button
                 onClick={() => { setShowSettings(s => !s); refreshBkStatus(); }}
