@@ -1,6 +1,6 @@
 {
   "name": "blue-ocean-client",
-  "version": "6.9.85",
+  "version": "6.9.86",
   "private": true,
   "type": "module",
   "scripts": {

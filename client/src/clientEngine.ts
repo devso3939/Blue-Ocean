@@ -14,6 +14,7 @@
 import { parsePhoneNumberFromString, AsYouType } from 'libphonenumber-js';
 // Native-language scan context (country → language/ccTLD/category terms)
 import { setScanContext, getScanContext, buildScanContext, categoryInNative, countryTld, contactTermsNative, type ScanContext } from './lang';
+import { APP_VERSION } from './version';
 async function scrapeWordPressAPI(b: Business): Promise<void> {
   if (!b.website || (b.email && b.phone)) return;
   const base = b.website.replace(/\/$/, '');
@@ -6709,6 +6710,31 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       onProgress?.(99, `Validated — purged ${purgedEmails} junk emails, ${purgedPhones} bad phones, normalized ${fixedPhones}`);
     }
   }
+
+  // v6.9.86: persist the run's measured coverage to Supabase — the
+  // compounding effect (warm render cache, engine learnings) becomes a
+  // durable trend per city+category instead of a moment in the console.
+  // Fire-and-forget: persistence must never delay or break result delivery.
+  try {
+    const ctxC = getScanContext();
+    if (ctxC && allBizList.length > 0) {
+      const cnt = (pred: (b: Business) => boolean) => allBizList.filter(pred).length;
+      void supabaseRpc<{ id: number }>('rpc_coverage_report', {
+        p_country: ctxC.countryName || '',
+        p_city: ctxC.cityEn || ctxC.cityNative || '',
+        p_category: categoryFilter || 'all',
+        p_businesses: allBizList.length,
+        p_phones: cnt(b => !!b.phone),
+        p_emails: cnt(b => !!b.email),
+        p_websites: cnt(b => !!b.website),
+        p_socials: cnt(b => !!(b.facebook || b.instagram || b.linkedin)),
+        p_full_trio: cnt(b => !!(b.phone && b.email && b.website)),
+        p_render_sites: _harvSites.n,
+        p_render_contacts: _harvSites.c,
+        p_app_version: APP_VERSION,
+      }, 15000).catch(() => { /* best effort */ });
+    }
+  } catch { /* never block delivery */ }
 
   _ep.activePass = 'Complete'; _ep.percent = 100;
   _ep.engines.forEach(e => { if (e.status === 'active') e.status = 'done'; });
