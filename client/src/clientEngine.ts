@@ -197,6 +197,11 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
       // v6.9.69: Cloudflare challenge page — mark the host and bail. The
       // server lane's Wayback rescue handles this host from the next fetch.
       if (isCfChallenge(html)) { _cfHosts.add(urlHostOf(url)); return false; }
+      // v6.9.82: SPA shell on the business's OWN site — dispatch a headless
+      // render (deduped, budget-capped); the harvest collects the warm DOM
+      // before validation. This is the phone bottleneck fix: phones live
+      // behind JS hydration far more often than emails do.
+      if (!b.phone && isSpaShell(html)) prefetchRenderDispatch(url);
       const full = html.substring(0, 80000);
       homeHtml = full;
       lastPageOk = url;
@@ -3159,6 +3164,24 @@ async function renderRescue(url: string, timeoutMs = 30000): Promise<string | nu
   return renderFetchViaServer(url, timeoutMs);
 }
 
+// v6.9.82: SPA-shell heuristic — a page that returns 200 but carries almost
+// no static content (React/Next/Vue/Angular app shells). Contact data only
+// exists after JS hydration, so static extraction finds nothing and search
+// snippets don't carry it either — the headless render lane is the only way
+// in. Kept deliberately conservative: small HTML, near-zero visible text,
+// plus an explicit framework marker.
+function isSpaShell(html: string): boolean {
+  if (!html || html.length < 200 || html.length > 60000) return false;
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (text.length > 250) return false;
+  return /\b(id="root"|id="app"|id="__next"|id="q-app"|data-reactroot|ng-app|ng-version|__NUXT__|__nuxt)\b/i.test(html);
+}
+
 // ── v6.9.73: PREFETCH — dispatch a render the instant a CF wall appears ──
 // The lane's runs take 2-5 minutes. Firing the dispatch at challenge-
 // detection time (not at need time) means the DOM is warm on render-cache
@@ -3183,9 +3206,13 @@ function emitHarvest(s: RenderHarvestStats | null): void {
 // (throttles, caching and dedup all apply) — for testing the harvest on
 // datasets with no naturally-walled sites.
 try { (window as unknown as { __boQueueRender?: (u: string) => boolean }).__boQueueRender = (u: string) => { prefetchRenderDispatch(u); return true; }; } catch { /* non-browser */ }
+let _renderDispatches = 0; // v6.9.82: per-scan budget — headless minutes are finite
+const RENDER_DISPATCH_BUDGET = 40;
 function prefetchRenderDispatch(url: string): void {
   if (_renderQueued.has(url) || !ghRawOk()) return;
+  if (_renderDispatches >= RENDER_DISPATCH_BUDGET) return;
   _renderQueued.add(url);
+  _renderDispatches++;
   void (async () => {
     try {
       let sha = '';
@@ -6341,7 +6368,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             harvestHits++;
           } catch { continue; }
         }
-        if (harvestHits > 0) onProgress?.(99, `Render harvest: ${harvestHits} Cloudflare-walled site(s), +${contactsGained} contacts`);
+        if (harvestHits > 0) onProgress?.(99, `Render harvest: ${harvestHits} rendered site(s), +${contactsGained} contacts`);
       }
     } catch { /* never let harvest mechanics break result delivery */ }
     emitHarvest({ sites: harvestHits, contacts: contactsGained, ranAt: Date.now() });
@@ -6458,6 +6485,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               if (r.ok) {
                 const html = await r.text();
                 if (!isCfChallenge(html) && html.length > 500) extractFromHtml(html, b);
+                if (!b.phone && isSpaShell(html)) prefetchRenderDispatch(u);
               }
             } catch { /* next discovered url */ }
             if (b.email && b.phone) break;
@@ -6474,6 +6502,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             const html = await r.text();
             if (isCfChallenge(html)) { _cfHosts.add(urlHostOf(u)); break; }
             if (html.length > 500) extractFromHtml(html, b);
+            if (!b.phone && isSpaShell(html)) prefetchRenderDispatch(u);
             if (b.email && b.phone) break;
           } catch { /* next path */ }
         }
@@ -6514,6 +6543,9 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                 if (rr.ok) {
                   const pageHtml = await rr.text();
                   if (!isCfChallenge(pageHtml) && pageHtml.length > 500) extractFromHtml(pageHtml, b);
+                  // Only render own-site shells — a followed search result on
+                  // a third-party SPA is not worth headless minutes.
+                  if (!b.phone && isSpaShell(pageHtml)) { try { if (urlHostOf(r.url) === urlHostOf(b.website)) prefetchRenderDispatch(r.url); } catch {} }
                 }
               } catch { /* next result */ }
               if (complete(b)) break;
@@ -6540,6 +6572,24 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       // when the business HAS a website but the nav ladder found nothing.
       if (b.website && (!b.email || !b.phone)) {
         try { await waybackContacts(b); } catch {}
+      }
+      // 3b2) WAYBACK contact page — v6.9.82 phone-first arm. The homepage
+      // snapshot rarely carries the switchboard number; the /contact one
+      // does. Fires for phone-only-needy businesses whose email proves the
+      // site is theirs. Bounded: one availability call + one snapshot fetch.
+      if (b.website && !b.phone && b.email) {
+        try {
+          const cUrl = b.website.replace(/\/+$/, '') + '/contact';
+          const av = await fetch('https://archive.org/wayback/available?url=' + encodeURIComponent(cUrl), { signal: AbortSignal.timeout(8000) });
+          if (av.ok) {
+            const j = await av.json();
+            const snap = j?.archived_snapshots?.closest?.url;
+            if (snap && j.archived_snapshots.closest.available) {
+              const r = await corsFetch(snap, { signal: AbortSignal.timeout(12000) });
+              if (r.ok) { const html = await r.text(); if (html.length > 200) extractFromHtmlModule(html, b); }
+            }
+          }
+        } catch { /* best effort */ }
       }
       // 4) INFER — cross-field inference that never ran elsewhere
       if (!b.email && b.website) { try { await guessEmailFromDomain(b); } catch {} }
