@@ -3179,6 +3179,10 @@ function emitHarvest(s: RenderHarvestStats | null): void {
   try { (window as unknown as { __boHarvest?: RenderHarvestStats | null }).__boHarvest = s; } catch { /* non-browser */ }
   for (const fn of _harvestListeners) { try { fn(s); } catch { /* listener error never breaks the scan */ } }
 }
+// v6.9.76 debug hook: seed the render queue through the REAL prefetch path
+// (throttles, caching and dedup all apply) — for testing the harvest on
+// datasets with no naturally-walled sites.
+try { (window as unknown as { __boQueueRender?: (u: string) => boolean }).__boQueueRender = (u: string) => { prefetchRenderDispatch(u); return true; }; } catch { /* non-browser */ }
 function prefetchRenderDispatch(url: string): void {
   if (_renderQueued.has(url) || !ghRawOk()) return;
   _renderQueued.add(url);
@@ -6226,16 +6230,24 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
 
   const waveA = [lane2GIS, laneSocial, laneGooglePlaces, laneVerify];
   const waveB = [laneYandex, laneDeepCrawl];
+  // v6.9.76: hard deadline race — a single hung fetch (dead site, no socket
+  // timeout) previously blocked Promise.all past the budget forever, which
+  // froze the pipeline before harvest + validation could run. The race
+  // guarantees the lane phase ALWAYS settles by laneDeadline.
+  const waveWithDeadline = (promises: Promise<void>[]) => Promise.race([
+    Promise.all(promises),
+    new Promise<void>(res => setTimeout(res, Math.max(1000, laneDeadline - Date.now())))
+  ]);
   const activeLanes =
     (allBizList.some(b => !b.phone && !b.email && !b.website) ? 2 : 0) +
     (allBizList.some(b => b.website && (!b.email || !b.phone)) ? 2 : 0) +
     (allBizList.some(b => (b.facebook || b.instagram) && (!b.email || !b.phone || !b.website)) ? 1 : 0) +
     (allBizList.some(b => !b.phone && !b.email && !b.website && !b.facebook) ? 1 : 0);
   _ep.activePass = `Passes 2–5 in parallel (${activeLanes} lanes)`; _ep.passNumber = 2; bumpPercent(91); emitEP();
-  await Promise.all(waveA.map(fn => fn().catch(() => {})));
+  await waveWithDeadline(waveA.map(fn => fn().catch(() => {})));
   if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
   onProgress?.(96, 'Wave A done — Yandex + deep-crawl lanes…');
-  await Promise.all(waveB.map(fn => fn().catch(() => {})));
+  await waveWithDeadline(waveB.map(fn => fn().catch(() => {})));
   if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
   onProgress?.(97, Date.now() >= laneDeadline
     ? 'Lane budget reached — shipping contacts found so far…'
@@ -6278,7 +6290,11 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             for (const arr of results.values()) {
               for (const b of arr) {
                 try {
-                  if (b.website && new URL(b.website).host === qhost) {
+                  // v6.9.77: www-normalized host match — businesses tagged with
+                  // www.tbcbank.ge must match a render of tbcbank.ge (and
+                  // vice versa); exact-host comparison zeroed the harvest.
+                  const bhost = b.website ? new URL(b.website).host.replace(/^www\./, '') : '';
+                  if (bhost && bhost === qhost.replace(/^www\./, '')) {
                     const before = contactFieldCount(b);
                     extractFromHtml(dom, b);
                     contactsGained += Math.max(0, contactFieldCount(b) - before);
@@ -6293,6 +6309,179 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       }
     } catch { /* never let harvest mechanics break result delivery */ }
     emitHarvest({ sites: harvestHits, contacts: contactsGained, ranAt: Date.now() });
+  }
+
+  // ── v6.9.78: PASS R (RELENTLESS) — the assurance ladder ─────────────
+  // v6.9.79: ADAPTIVE retry-engine order. Pass-1 arms keep per-engine
+  // stats (getArmStats): calls, wall-ms, fields gained. Engines that
+  // burned their timeouts for zero gains sink to the end of the retry
+  // order; engines with proven gains lead. Measured on one Cafes run:
+  // bing 23 gains / 708s vs ddg-lite 0 gains / 494 calls — the ladder
+  // must not re-fire dead arms first. Falls back to a sane default when
+  // no stats exist yet (small scans, first run).
+  const _RETRY_DEFAULT: string[] = ['bing', 'ddg', 'brave'];
+  const _retryEngineOrder = (): string[] => {
+    try {
+      const rows = getArmStats().filter(r2 => ['bing', 'brave', 'ddg', 'ddglite'].includes(r2.id) && r2.calls >= 8);
+      if (rows.length === 0) return _RETRY_DEFAULT;
+      const eff = new Map<string, number>();
+      for (const r2 of rows) {
+        const id = r2.id === 'ddglite' ? 'ddg' : r2.id;
+        const e = r2.gains / Math.max(1, r2.ms / 1000);
+        eff.set(id, Math.max(eff.get(id) ?? 0, e));
+      }
+      return [...eff.entries()].sort((a, b2) => b2[1] - a[1]).map(x => x[0]);
+    } catch { return _RETRY_DEFAULT; }
+  };
+
+  // For every business still missing website/email/phone, run a SECOND
+  // chain of distinct methods. Earlier passes visit each business once
+  // (site deep-scrape, one contact-page crawl, one social-bio fetch); a
+  // single empty visit (SPA shell, wrong path guess, transient failure)
+  // meant the field stayed empty forever. Pass R re-attempts with
+  // DIFFERENT methods and runs BEFORE validation so everything passes
+  // through the same strict scrub as every other contact.
+  {
+    _ep.activePass = 'Pass R: relentless retry ladder'; _ep.passNumber = 7; _ep.percent = 97; emitEP();
+    const nativeContact = getScanContext() ? contactTermsNative() : '';
+    const nativeCity = getScanContext()?.cityNative || '';
+    const nativeCityEn = getScanContext()?.cityEn || '';
+    const R_BATCH = 8;
+    let rFills = 0;
+    // v6.9.80: per-run ladder tallies. An engine that keeps getting tried
+    // but never gains a field is pure wall-clock waste for the rest of the
+    // pass (measured: brave 689s / 0 gains on a 536-business Cafes run).
+    const _rEngCalls: Record<string, number> = {};
+    const _rEngGains: Record<string, number> = {};
+    const complete = (b: Business) => !!(b.website && b.email && b.phone);
+    const rnavPaths = (b: Business): string[] => {
+      if (!b.website) return [];
+      let base = '';
+      try { base = new URL(b.website).origin; } catch { return []; }
+      const paths = ['/contact', '/contact-us', '/contacts', '/contact.html', '/kontakt', '/kontakti', '/kontaktai', '/контакти', '/контакты', '/iletisim', '/contacto', '/contato', '/kontak', '/contact.php', '/pages/contact', nativeContact ? '/' + nativeContact.toLowerCase().replace(/\s+/g, '-') : '', nativeContact ? '/' + nativeContact : '', '/about', '/about-us', '/branches', '/filials', '/locations'];
+      return paths.filter(Boolean).map(p2 => base + p2);
+    };
+    const rsearchQueries = (b: Business): string[] => {
+      const base = b.name.replace(/"/g, '');
+      const cityQ = nativeCity || nativeCityEn;
+      return [
+        '"' + base + '" ' + cityQ + ' contact email',
+        '"' + base + '" ' + cityQ + ' phone',
+        '"' + base + '" site:facebook.com OR site:instagram.com',
+      ];
+    };
+    const rAttempt = async (b: Business): Promise<boolean> => {
+      // 1) NAV — crawl deeper/multilingual contact paths on the own site
+      if (b.website && (!b.email || !b.phone)) {
+        for (const u of rnavPaths(b).slice(0, 8)) {
+          if (isCancelled()) break;
+          if (_cfHosts.has(urlHostOf(u))) break;
+          try {
+            const r = await corsFetch(u, { signal: AbortSignal.timeout(5000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
+            if (!r.ok) continue;
+            const html = await r.text();
+            if (isCfChallenge(html)) { _cfHosts.add(urlHostOf(u)); break; }
+            if (html.length > 500) extractFromHtml(html, b);
+            if (b.email && b.phone) break;
+          } catch { /* next path */ }
+        }
+        yieldTry('rnav'); yieldBump('rnav');
+        if (complete(b)) return true;
+      }
+      // 2) SEARCH — ADAPTIVE multi-engine ladder in measured-yield order:
+      // the pass-1 arm stats decide who leads (v6.9.79). Each engine gets
+      // its own fresh queries + result-page follows; stop when complete.
+      if ((!b.website || !b.email || !b.phone) && b.name) {
+        const engOrder = _retryEngineOrder();
+        yieldTry('rsearch');
+        let anyEngineHit = false;
+        for (const eng of engOrder) {
+          if (isCancelled()) break;
+          // In-ladder cutoff: ≥15 ladder attempts with ZERO gains → engine
+          // is dead for this run; skip it instead of burning its timeout.
+          if ((_rEngCalls[eng] || 0) >= 15 && (_rEngGains[eng] || 0) === 0) continue;
+          _rEngCalls[eng] = (_rEngCalls[eng] || 0) + 1;
+          const pre = { e: b.email, p: b.phone, w: b.website };
+          for (const q of rsearchQueries(b)) {
+            if (isCancelled()) break;
+            let rs: Array<{ title: string; url: string; description?: string; snippet?: string }> = [];
+            try {
+              if (eng === 'bing') rs = await searchBing(q);
+              else if (eng === 'ddg') rs = await searchDDGLite(q);
+              else if (eng === 'brave') rs = (await braveSearchViaSupabase(q)) || [];
+            } catch {}
+            if (rs.length === 0) continue;
+            for (const r of rs.slice(0, 4)) {
+              if (r.description || r.snippet) extractFromText((r.title || '') + ' ' + (r.description || r.snippet || ''), b);
+              const host = urlHostOf(r.url).replace(/^www\./, '');
+              if (!host || /facebook|instagram|twitter|x\.com|tiktok|youtube|pinterest|linkedin|google|duckduckgo|yandex|wikipedia/i.test(host)) continue;
+              try {
+                const rr = await corsFetch(r.url, { signal: AbortSignal.timeout(5000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
+                if (rr.ok) {
+                  const pageHtml = await rr.text();
+                  if (!isCfChallenge(pageHtml) && pageHtml.length > 500) extractFromHtml(pageHtml, b);
+                }
+              } catch { /* next result */ }
+              if (complete(b)) break;
+            }
+            if (complete(b)) break;
+          }
+          const engineHit = !!(b.email && b.email !== pre.e) || !!(b.phone && b.phone !== pre.p) || !!(b.website && b.website !== pre.w);
+          if (eng === 'bing' && engineHit) yieldBump('rbing');
+          if (engineHit) { _rEngGains[eng] = (_rEngGains[eng] || 0) + 1; anyEngineHit = true; }
+          if (complete(b)) { yieldBump('rsearch'); return true; }
+          // Engine produced nothing → next engine in the adaptive order.
+        }
+        if (anyEngineHit) yieldBump('rsearch');
+      }
+      // 3) SOCIAL — one fresh bio re-fetch (early pass already used its try)
+      if ((b.facebook || b.instagram) && !complete(b)) {
+        _socialBioDone.clear();
+        try { await enrichFromSocialBio(b); } catch {}
+        yieldTry('rsocial'); yieldBump('rsocial');
+        if (complete(b)) return true;
+      }
+      // 3b) WAYBACK — businesses whose own site is dead/slow still had a
+      // website with contacts once; archived snapshots carry it. Only fires
+      // when the business HAS a website but the nav ladder found nothing.
+      if (b.website && (!b.email || !b.phone)) {
+        try { await waybackContacts(b); } catch {}
+      }
+      // 4) INFER — cross-field inference that never ran elsewhere
+      if (!b.email && b.website) { try { await guessEmailFromDomain(b); } catch {} }
+      if (!b.website && (b.facebook || b.instagram)) {
+        try {
+          const m = (b.instagram || b.facebook || '').match(/(?:instagram\.com|facebook\.com)\/([A-Za-z0-9_.-]{3,30})/i);
+          const slug = m && m[1];
+          if (slug && !/^(p|reel|explore|pages|groups)$/i.test(slug)) {
+            const cand = 'https://' + slug.replace(/[^a-z0-9.-]/gi, '') + '.com';
+            const r2 = await corsFetch(cand, { signal: AbortSignal.timeout(4000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
+            if (r2.ok) {
+              const candHtml = await r2.text();
+              if (!isCfChallenge(candHtml) && isLikelyBusinessWebsite(cand, b.name) && candHtml.length > 800) b.website = cand;
+            }
+          }
+        } catch {}
+      }
+      yieldTry('rinfer'); yieldBump('rinfer');
+      return complete(b);
+    };
+    const needy = allBizList.filter(b => !complete(b));
+    if (needy.length > 0) {
+      onProgress?.(97, 'Pass R: ' + needy.length + ' businesses need a second chain…');
+      for (let i = 0; i < needy.length; i += R_BATCH) {
+        if (isCancelled()) break;
+        const batch = needy.slice(i, i + R_BATCH);
+        const got = await Promise.all(batch.map(b => rAttempt(b).catch(() => false)));
+        rFills += got.filter(Boolean).length;
+        if ((i / R_BATCH) % 4 === 0) {
+          onProgress?.(97, 'Pass R: ' + Math.min(i + R_BATCH, needy.length) + '/' + needy.length + ' retried, ' + rFills + ' completed');
+          emitEP();
+        }
+        await abortableWait(400);
+      }
+      onProgress?.(98, 'Pass R done: ' + rFills + ' businesses completed by the retry ladder');
+    }
   }
 
   // ── v6.9.37: final VALIDATION pass — every stored contact is checked ──
@@ -8509,7 +8698,7 @@ __internals.extractFromHtml = extractFromHtmlModule;
 // mailto vs Cloudflare etc. Module-level so both scrape sites (deep crawler
 // and this module extractor) feed the same tally. Purely additive telemetry:
 // no extraction behavior changes, reset at every scan start.
-export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl' | 'wayback' | 'render';
+export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl' | 'wayback' | 'render' | 'rnav' | 'rsearch' | 'rbing' | 'rsocial' | 'rinfer';
 export interface ExtractionYieldEntry { found: number; tries: number; }
 export interface ExtractionYieldMap { [k: string]: ExtractionYieldEntry; }
 const _extractYield: ExtractionYieldMap = {};
@@ -8542,6 +8731,11 @@ export const _EXTRACT_LAYER_META: { key: ExtractionLayerKey; label: string; icon
   { key: 'socialbio', label: 'Social bio',      icon: '📱' },
   { key: 'svfetch',   label: 'Server fetch',    icon: '🖥️' },
   { key: 'snippetdig', label: 'Snippet dig',    icon: '⛏️' },
+  { key: 'rnav',     label: 'Retry nav',       icon: '🔁' },
+  { key: 'rsearch',  label: 'Retry search',    icon: '🔎' },
+  { key: 'rbing',    label: 'Retry Bing',      icon: '🅱️' },
+  { key: 'rsocial',  label: 'Retry social',  icon: '📱' },
+  { key: 'rinfer',   label: 'Inference',       icon: '🧠' },
   { key: 'linkcrawl',  label: 'Link crawl',    icon: '🕸️' },
   { key: 'wayback',    label: 'Wayback',       icon: '🏛️' },
   { key: 'render',     label: 'Render',        icon: '🎭' },
