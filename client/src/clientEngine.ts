@@ -8801,6 +8801,11 @@ function plausiblePhone(p: string, strict = true): boolean {
 // Junk emails: asset files and placeholder addresses that regexes pick up
 const _EMAIL_FILE_RE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
 const _EMAIL_JUNK_RE = /example\.com|noreply|no-reply|donotreply|wixpress|sentry\.io|cloudflare|privacy|abuse@|postmaster@/i;
+// v6.9.83: platform/infrastructure domains that scraped pages reference but
+// no small business owns. A cafe whose email reads info@duckduckgo.co got it
+// from a followed search-result page — poison. Search engines, CDNs, CMS
+// hosts and app stores can never be the SMTP domain of a local business.
+const _EMAIL_PLATFORM_RE = /(duckduckgo|bing|google|yahoo|microsoft|outlook|hotmail|gmail|icloud|proton|yandex|mail\.ru|zoho|fastmail|startpage|mojeek|brave|ecosia|qwant|search|cloudfront|akamai|amazonaws|azureedge|wix|shopify|squarespace|webflow|godaddy|namecheap|hostinger|siteground|bluehost|wordpress)\.(com|co|io|net|org|ge|ru|de|fr)$/i;
 
 // v6.9.37: structural email validation for the final data-quality pass.
 // Checks the stored email still looks like a real address after every
@@ -8828,6 +8833,10 @@ export function plausibleEmail(e: string): boolean {
   if (/^\d{5,}$/.test(local)) return false;
   // Junk senders/roles that regexes commonly harvest from footers
   if (_EMAIL_JUNK_RE.test(v)) return false;
+  // v6.9.83: search-engine / platform / CDN domains — the most common
+  // cross-contamination when followed result pages carry the engine's own
+  // footer emails.
+  if (_EMAIL_PLATFORM_RE.test(domain)) return false;
   return true;
 }
 
