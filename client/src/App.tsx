@@ -1252,23 +1252,30 @@ export default function App() {
   // v6.9.88: snapshot the current post-run state into History. Called in
   // the finally of both flows — businesses Map → array form, opportunities,
   // demand signals, AI analysis, badges. Failures never break the run.
+  // v6.9.88: always-fresh state mirror for captureRun (stale-closure fix)
+  const captureStateRef = useRef({ city: selectedCity, businesses, opportunities, demandSignals, aiInsights, aiAnalysis, selectedOppCategory, scanAreaLabel, rescanNote });
+  useEffect(() => { captureStateRef.current = { city: selectedCity, businesses, opportunities, demandSignals, aiInsights, aiAnalysis, selectedOppCategory, scanAreaLabel, rescanNote }; });
   const captureRun = (kind: 'analyze' | 'discover') => {
     try {
-      if (!selectedCity || businesses.size === 0) return;
-      const bizArr: [string, Business[]][] = Array.from(businesses.entries()).map(([k, arr]) => [k, arr]);
+      // Read the LATEST state via ref — the flow's useCallback pinned this
+      // closure at run start, when `businesses` was still empty (the stale-
+      // closure bug that silently skipped every capture on the first try).
+      const S = captureStateRef.current;
+      if (!S.city || S.businesses.size === 0) return;
+      const bizArr: [string, Business[]][] = Array.from(S.businesses.entries()).map(([k, arr]) => [k, arr]);
       const cnt = (pred: (b: Business) => boolean) => bizArr.reduce((s, [, arr]) => s + arr.filter(pred).length, 0);
       const tot = bizArr.reduce((s, [, arr]) => s + arr.length, 0);
       saveRun({
-        id: `${kind}-${selectedCity.name}-${selectedCategory || 'all'}-${Date.now()}`,
+        id: `${kind}-${S.city.name}-${(kind === 'analyze' ? selectedCategory : S.selectedOppCategory) || 'all'}-${Date.now()}`,
         kind, ts: Date.now(), version: APP_VERSION,
-        city: { name: selectedCity.name, country: selectedCity.country, countryCode: selectedCity.countryCode, lat: selectedCity.lat, lon: selectedCity.lon, population: selectedCity.population, bbox: selectedCity.bbox },
+        city: { name: S.city.name, country: S.city.country, countryCode: S.city.countryCode, lat: S.city.lat, lon: S.city.lon, population: S.city.population, bbox: S.city.bbox },
         category: kind === 'analyze' ? selectedCategory : null,
-        selectedOppCategory: kind === 'analyze' ? selectedCategory : (selectedOppCategory || null),
+        selectedOppCategory: kind === 'analyze' ? selectedCategory : (S.selectedOppCategory || null),
         businesses: bizArr,
-        opportunities: opportunities as unknown[],
-        demandSignals: Array.from(demandSignals.entries()),
-        aiInsights, aiAnalysis: aiAnalysis as unknown | null,
-        scanAreaLabel, rescanNote,
+        opportunities: S.opportunities as unknown[],
+        demandSignals: Array.from(S.demandSignals.entries()),
+        aiInsights: S.aiInsights, aiAnalysis: S.aiAnalysis as unknown | null,
+        scanAreaLabel: S.scanAreaLabel, rescanNote: S.rescanNote,
         stats: { bizCount: tot, anyContactPct: tot ? Math.round(100 * cnt(b => !!(b.phone || b.email || b.website)) / tot) : 0 },
       });
       setHistoryHeavy(historyStats().heavy);
