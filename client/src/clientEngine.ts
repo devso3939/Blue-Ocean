@@ -3198,6 +3198,22 @@ export function onRenderHarvest(fn: (s: RenderHarvestStats | null) => void): () 
   _harvestListeners.add(fn);
   return () => { _harvestListeners.delete(fn); };
 }
+
+// v6.9.87: coverage-history reader for the dashboard — latest persisted
+// run snapshots across all cities/categories, straight from Supabase.
+export interface CoverageHistoryRow {
+  id: number; country: string; city: string; category: string;
+  businesses: number; phones: number; emails: number; websites: number;
+  socials: number; full_trio: number; any_contact_pct: number;
+  phone_pct: number; email_pct: number; website_pct: number;
+  render_sites: number; render_contacts: number; app_version: string;
+  created_at: string;
+}
+export async function fetchCoverageRecent(limit = 50): Promise<CoverageHistoryRow[] | null> {
+  try {
+    return await supabaseRpc<CoverageHistoryRow[]>('rpc_coverage_recent', { p_limit: limit }, 15000);
+  } catch { return null; }
+}
 function emitHarvest(s: RenderHarvestStats | null): void {
   _harvestStats = s;
   try { (window as unknown as { __boHarvest?: RenderHarvestStats | null }).__boHarvest = s; } catch { /* non-browser */ }

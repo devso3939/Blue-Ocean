@@ -34,6 +34,7 @@ import {
   getOverpassRouteLog, resetOverpassRouteLog,
   type OverpassRouteEvent,
   onRenderHarvest, type RenderHarvestStats,
+  fetchCoverageRecent, type CoverageHistoryRow,
 } from './clientEngine';
 import CompareView from './CompareView';
 import CountryView from './CountryView';
@@ -171,12 +172,21 @@ function MiniBar({ v, n, cls }: { v: number; n: number; cls: string }) {
 function CoverageDashboard({ onBack }: { onBack: () => void }) {
   const [entries, setEntries] = useState<[string, CoverageSnapshot][]>([]);
   const [tick, setTick] = useState(0);
+  // v6.9.87: server-persisted run history (Supabase bo.coverage_history)
+  const [serverRows, setServerRows] = useState<CoverageHistoryRow[] | null>(null);
+  const [serverErr, setServerErr] = useState(false);
   useEffect(() => {
     const load = () => setEntries(Object.entries(loadCoverageBaselines()));
     load();
     const iv = setInterval(load, 2000); // live-updates while enrichment runs elsewhere
     return () => clearInterval(iv);
   }, [tick]);
+  // v6.9.87: fetch the persisted run trend (all cities/categories)
+  useEffect(() => {
+    let dead = false;
+    fetchCoverageRecent(80).then(rows => { if (!dead) { setServerRows(rows); setServerErr(rows === null); } }).catch(() => { if (!dead) setServerErr(true); });
+    return () => { dead = true; };
+  }, []);
   const rows = entries
     .map(([k, s]) => ({ k, s }))
     .sort((a, b) => a.s.p - b.s.p || (b.s.n ?? 0) - (a.s.n ?? 0)); // neediest first
@@ -288,6 +298,60 @@ function CoverageDashboard({ onBack }: { onBack: () => void }) {
                 <div className="text-3xl font-extrabold text-emerald-400">{fully}<span className="text-base text-muted-foreground">/{rows.length}</span></div>
               </div>
             </div>
+            {serverRows !== null && serverRows.length > 0 && (() => {
+              // v6.9.87: server-persisted run history — grouped sparkline per
+              // city+category showing the compounding effect across versions.
+              const groups = new Map<string, CoverageHistoryRow[]>();
+              for (const r of serverRows) {
+                const gk = `${r.country}|${r.city}|${r.category}`;
+                const g = groups.get(gk);
+                if (g) g.push(r); else groups.set(gk, [r]);
+              }
+              const fmtT = (iso: string) => { const d = Date.now() - Date.parse(iso); if (d < 3600e3) return `${Math.max(1, Math.floor(d / 60e3))}m ago`; if (d < 86400e3) return `${Math.floor(d / 3600e3)}h ago`; return `${Math.floor(d / 86400e3)}d ago`; };
+              return (
+                <div className="mt-5 rounded-xl border border-border bg-card p-4">
+                  <div className="flex items-baseline justify-between">
+                    <h3 className="text-sm font-bold">📈 Run history (server-persisted)</h3>
+                    <span className="text-[10px] text-muted-foreground">{serverRows.length} runs · every run makes the next better</span>
+                  </div>
+                  <div className="mt-3 space-y-2.5">
+                    {[...groups.entries()].map(([gk, g]) => {
+                      const ordered = [...g].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+                      const first = ordered[0]; const last = ordered[ordered.length - 1];
+                      const lift = last.any_contact_pct - first.any_contact_pct;
+                      const maxPct = Math.max(...ordered.map(r => r.any_contact_pct), 100);
+                      const W = 220, H = 34;
+                      const pts = ordered.map((r, i) => `${(i / Math.max(1, ordered.length - 1)) * W},${H - (r.any_contact_pct / maxPct) * H}`).join(' ');
+                      const [country, city, cat] = gk.split('|');
+                      return (
+                        <div key={gk} className="flex flex-wrap items-center gap-3 rounded-lg border border-border/60 px-3 py-2">
+                          <div className="min-w-40">
+                            <div className="text-xs font-semibold">{city} · {cat}</div>
+                            <div className="text-[10px] text-muted-foreground">{country} · {ordered.length} runs · latest {fmtT(last.created_at)}</div>
+                          </div>
+                          <svg width={W} height={H} className="shrink-0">
+                            <polyline points={pts} fill="none" stroke="rgb(52, 211, 153)" strokeWidth="2" strokeLinejoin="round" />
+                            {ordered.map((r, i) => <circle key={i} cx={(i / Math.max(1, ordered.length - 1)) * W} cy={H - (r.any_contact_pct / maxPct) * H} r="2.5" fill={r.render_sites > 0 ? 'rgb(167, 139, 250)' : 'rgb(52, 211, 153)'} />)}
+                          </svg>
+                          <div className="flex flex-1 flex-wrap items-center gap-x-4 gap-y-0.5 text-[11px] tabular-nums">
+                            <span className="font-bold text-emerald-400">{Math.round(last.any_contact_pct)}%</span>
+                            {lift > 0 && <span className="text-emerald-400/80">+{Math.round(lift)} pp over {ordered.length - 1} run{ordered.length > 2 ? 's' : ''}</span>}
+                            <span className="text-muted-foreground">{last.businesses} biz</span>
+                            {last.render_contacts > 0 && <span className="text-violet-400">🎭 +{last.render_contacts} via render</span>}
+                            <span className="font-mono text-[10px] text-muted-foreground/70">v{last.app_version}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
+            {serverErr && (
+              <div className="mt-5 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-400/90">
+                ⚠ Server run history unavailable (offline or Supabase unreachable) — showing on-device history below.
+              </div>
+            )}
             <div className="mt-5 overflow-hidden rounded-xl border border-border bg-card">
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm">

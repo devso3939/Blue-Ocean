@@ -107,3 +107,11 @@ create or replace function public.rpc_coverage_trend(
 $$ select * from bo.rpc_coverage_trend(p_country, p_city, p_category, p_limit); $$;
 
 grant execute on function public.rpc_coverage_trend(text, text, text, int) to anon;
+
+-- ── v6.9.87 addendum: dashboard read helper ────────────────────────
+-- Latest runs across ALL cities/categories for the Coverage dashboard.
+create or replace function public.rpc_coverage_recent(p_limit int default 50)
+returns setof bo.coverage_history language sql stable security definer set search_path = bo as
+$$ select * from bo.coverage_history order by created_at desc limit least(greatest(p_limit, 1), 200); $$;
+
+grant execute on function public.rpc_coverage_recent(int) to anon;
