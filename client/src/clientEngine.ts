@@ -3230,13 +3230,16 @@ export async function archiveRunToServer(rec: {
   [k: string]: unknown;
 }): Promise<boolean> {
   try {
-    const res = await supabaseRpc<{ rid?: string }>('rpc_run_archive_upsert', {
+    // v6.9.92b: PostgREST returns a scalar-text RPC response as the bare JSON
+    // string "ok" (not {rid:"ok"}) — accept both shapes or a false negative
+    // marks a successful upload as failed.
+    const res = await supabaseRpc<string | { rid?: string }>('rpc_run_archive_upsert', {
       p_run_id: rec.id, p_kind: rec.kind, p_ts: new Date(rec.ts).toISOString(),
       p_version: rec.version, p_country: rec.city.country, p_city: rec.city.name,
       p_category: rec.category, p_biz_count: rec.stats.bizCount,
       p_any_contact_pct: rec.stats.anyContactPct, p_payload: rec,
     }, 20000);
-    return res?.rid === 'ok';
+    return res === 'ok' || (res as { rid?: string })?.rid === 'ok';
   } catch { return false; }
 }
 export async function listServerRuns(limit = 100): Promise<RunArchiveMeta[] | null> {
