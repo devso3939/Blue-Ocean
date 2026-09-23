@@ -174,7 +174,7 @@ export function pickDeeperLinks(html: string, baseUrl: string): string[] {
 
 async function enrichFromWebsiteDeep(b: Business): Promise<void> {
   if (!b.website) return;
-  const EXCLUDE = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com/i;
+  const EXCLUDE = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|schema\.org|w3\.org|duckduckgo\.com|bing\.com/i;
   const JUNK = /example\.com|wixpress|sentry|googleapis|google\.com|gstatic|cloudflare|schema\.org|w3\.org|ogp\.me|privacy|terms|cookie/i;
 
   // v6.9.66: homepage HTML stashed for link-discovery scoring
@@ -6787,6 +6787,8 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     _ep.activePass = 'Validating contacts'; _ep.passNumber = 6; _ep.percent = 98; emitEP();
     const cc = getScanContext()?.countryCode;
     let purgedEmails = 0, purgedPhones = 0, fixedPhones = 0;
+    let purgedWebsites = 0;
+    const SITE_JUNK = /schema\.org|w3\.org|ogp\.me|duckduckgo\.com|bing\.com|google\.[a-z.]+|ecosia\.org|startpage\.com|qwant\.com|brave\.com|mojeek\.com/i;
     for (const arr of results.values()) {
       for (const b of arr) {
         if (b.email && !plausibleEmail(b.email)) { b.email = ''; purgedEmails++; }
@@ -6799,10 +6801,20 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             b.phone = norm; fixedPhones++;
           }
         }
+        // v6.9.95: master website gate — template/standard-host and search-
+        // engine domains are never a local business's own site (the JSON-LD
+        // boilerplate of half the web references schema.org/Place). Also
+        // normalizes malformed phone clusters like "26.611.61753" (site-
+        // wide template IDs, same value on unrelated businesses).
+        if (b.website && SITE_JUNK.test(b.website)) { b.website = ''; purgedWebsites++; }
+        if (b.phone && !b.phone.startsWith('+')) {
+          const dotRuns = b.phone.match(/^\d{1,3}(\.\d{3}){2,}\d*$/);
+          if (dotRuns) { b.phone = ''; purgedPhones++; }
+        }
       }
     }
-    if (purgedEmails + purgedPhones > 0) {
-      onProgress?.(99, `Validated — purged ${purgedEmails} junk emails, ${purgedPhones} bad phones, normalized ${fixedPhones}`);
+    if (purgedEmails + purgedPhones + purgedWebsites > 0) {
+      onProgress?.(99, `Validated — purged ${purgedEmails} junk emails, ${purgedPhones} bad phones, ${purgedWebsites} template websites, normalized ${fixedPhones}`);
     }
   }
 
@@ -9023,14 +9035,17 @@ export function plausibleEmail(e: string): boolean {
 // old data self-heals instead of re-poisoning the table.
 export function sanitizeRunRecord(r: RunLike): RunLike {
   try {
+    // Same rules as the engine's final validation pass (v6.9.95) so any
+    // restore of an older capture self-heals: emails, phones AND websites.
+    const SITE_JUNK = /schema\.org|w3\.org|ogp\.me|duckduckgo\.com|bing\.com|google\.[a-z.]+|ecosia\.org|startpage\.com|qwant\.com|brave\.com|mojeek\.com/i;
     for (const pair of r.businesses || []) {
       const arr = pair?.[1];
       if (!Array.isArray(arr)) continue;
       for (const b of arr as Record<string, unknown>[]) {
         if (b && typeof b.email === 'string' && b.email && !plausibleEmail(b.email)) b.email = '';
         if (b && typeof b.phone === 'string' && b.phone && !plausiblePhone(b.phone)) b.phone = '';
-        // v6.9.94b: old captures may carry search-engine domains as websites
-        if (b && typeof b.website === 'string' && b.website && isLikelyBusinessWebsite(b.website, String(b.name || '')) === false && /duckduckgo\.com|bing\.com|google\.[a-z.]+|schema\.org/i.test(b.website)) b.website = '';
+        if (b && typeof b.phone === 'string' && b.phone && /^\d{1,3}(\.\d{3}){2,}/.test(b.phone)) b.phone = '';
+        if (b && typeof b.website === 'string' && b.website && SITE_JUNK.test(b.website)) b.website = '';
       }
     }
   } catch { /* malformed record — return as-is */ }
@@ -9314,7 +9329,7 @@ function extractFromHtmlModule(html: string, b: Business): void {
 
   // Website: extract from links. Self-contained denylist (this variant must
   // not depend on the nested DIRECTORY_SITES/_EXCLUDE helpers).
-  const WEBSITE_DENY = /yelp\.com|tripadvisor|foursquare|booking\.com|expedia|yellowpages|justdial|zomato|opentable|flickr|pinterest\.com|tumblr|reddit\.com|quora|wikipedia\.org|youtube\.com|tiktok\.com|linkedin\.com|facebook\.com|instagram\.com|twitter\.com|x\.com|snapchat|threads|medium\.com|substack|archive\.org|amazon\.|ebay\.|aliexpress|2gis\.|yandex\.|uber\.com|doordash|grubhub|glassdoor|indeed\.com|thumbtack|bbb\.org|trustpilot|google\.|gstatic|apple\.com|microsoft\.com/i;
+  const WEBSITE_DENY = /yelp\.com|tripadvisor|foursquare|booking\.com|expedia|yellowpages|justdial|zomato|opentable|flickr|pinterest\.com|tumblr|reddit\.com|quora|wikipedia\.org|youtube\.com|tiktok\.com|linkedin\.com|facebook\.com|instagram\.com|twitter\.com|x\.com|snapchat|threads|medium\.com|substack|archive\.org|amazon\.|ebay\.|aliexpress|2gis\.|yandex\.|uber\.com|doordash|grubhub|glassdoor|indeed\.com|thumbtack|bbb\.org|trustpilot|google\.|gstatic|apple\.com|microsoft\.com|schema\.org|w3\.org|duckduckgo\.com|bing\.com/i;
   if (!b.website) {
     const links = html.matchAll(/href="([^"]+)"/g);
     for (const link of links) {
