@@ -744,6 +744,32 @@ export default function App() {
   const [selectedCity, setSelectedCity] = useState<CityResult | null>(null);
   const [selectedCategory, setSelectedCategory] = useState('');
   const [loading, setLoading] = useState(false);
+  // v6.9.93: cross-device session continuity — when the selected city+category
+  // has a server-backed run (from this or ANY device), offer to open it.
+  const [cloudMatch, setCloudMatch] = useState<RunArchiveMeta | null>(null);
+  const _cloudListRef = useRef<{ at: number; runs: RunArchiveMeta[] }>({ at: 0, runs: [] });
+  useEffect(() => {
+    let dead = false;
+    const check = async () => {
+      if (viewMode !== 'analysis' || loading) { setCloudMatch(null); return; }
+      if (!selectedCity) { setCloudMatch(null); return; }
+      const cat = selectedCategory || null;
+      // Local first — a fresh on-device match is authoritative.
+      const local = listRuns().find(r => r.city.name === selectedCity.name && (r.category || null) === cat);
+      if (local) { setCloudMatch(null); return; }
+      // Cached server listing (60s TTL) — one RPC per minute max.
+      let runs = _cloudListRef.current.runs;
+      if (Date.now() - _cloudListRef.current.at > 60000) {
+        try { runs = await listServerRuns(300) || []; _cloudListRef.current = { at: Date.now(), runs }; }
+        catch { runs = _cloudListRef.current.runs; }
+      }
+      if (dead) return;
+      const m = runs.find(r => r.city === selectedCity.name && (r.category || null) === cat);
+      setCloudMatch(m || null);
+    };
+    void check();
+    return () => { dead = true; };
+  }, [selectedCity, selectedCategory, viewMode, loading]);
   const [loadingStage, setLoadingStage] = useState('');
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState('');
@@ -1384,6 +1410,33 @@ export default function App() {
         if (ok) { try { (window as unknown as { __boLastSync?: string }).__boLastSync = rec.id; } catch { /* noop */ } }
       });
     } catch { /* history must never break the run */ }
+  };
+
+  // v6.9.93: open a server-backed run directly from the offer banner —
+  // fetch the full payload, cache it locally, restore the results view.
+  const openCloudRun = (m: RunArchiveMeta) => {
+    fetchServerRunPayload(m.run_id).then(p => {
+      if (!p) { setError('Could not fetch that run from the cloud backup.'); return; }
+      const rec = p as unknown as RunRecord;
+      try { saveRun(rec); } catch { /* quota — restore anyway */ }
+      try {
+        setSelectedCity({ name: rec.city.name, country: rec.city.country, countryCode: rec.city.countryCode, lat: rec.city.lat, lon: rec.city.lon, population: rec.city.population, populationSource: undefined, bbox: rec.city.bbox });
+        setBusinesses(new Map(rec.businesses as [string, Business[]][]));
+        setOpportunities(rec.opportunities as OpportunityResult[]);
+        setDemandSignals(new Map(rec.demandSignals as [string, DemandSignal][]));
+        setAiInsights(rec.aiInsights);
+        setAiAnalysis(rec.aiAnalysis as AIAnalysis | null);
+        setSelectedOppCategory(rec.selectedOppCategory);
+        if (rec.kind === 'analyze' && rec.category) setSelectedCategory(rec.category);
+        setScanAreaLabel(rec.scanAreaLabel);
+        setRescanNote(rec.rescanNote);
+        setEnrichProgress(null);
+        setLoading(false);
+        setError('');
+        setRestoredRun(rec);
+        setCloudMatch(null);
+      } catch { /* corrupt payload — ignore */ }
+    });
   };
 
   // Analyze single industry
@@ -2049,6 +2102,27 @@ export default function App() {
             <p className="mt-3 text-center text-xs text-muted-foreground">
               City selected — pick an industry for single-industry analysis, or click <span className="font-medium text-foreground">Discover Opportunities</span> for all categories.
             </p>
+          )}
+
+          {/* v6.9.93: cross-device session continuity — a server-backed run for
+              this exact city+category exists (made here or on any device). */}
+          {!loading && cloudMatch && (
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-sky-500/30 bg-sky-500/5 p-3 text-xs text-sky-300/90">
+              <span>
+                ☁ A previous analysis of <span className="font-semibold">{cloudMatch.city} · {cloudMatch.category || 'all categories'}</span> is in your cloud history
+                {cloudMatch.biz_count ? ` (${fmtCompact(cloudMatch.biz_count)} businesses, ${Math.round(cloudMatch.any_contact_pct)}% coverage)` : ''}.
+              </span>
+              <span className="flex gap-2">
+                <button
+                  onClick={() => openCloudRun(cloudMatch)}
+                  className="rounded-lg border border-sky-500/40 px-2.5 py-1 font-semibold text-sky-300 hover:bg-sky-500/10"
+                >Open ↗</button>
+                <button
+                  onClick={() => setCloudMatch(null)}
+                  className="rounded-lg border border-border px-2.5 py-1 text-muted-foreground hover:text-foreground"
+                >Dismiss</button>
+              </span>
+            </div>
           )}
 
           {loading && (
