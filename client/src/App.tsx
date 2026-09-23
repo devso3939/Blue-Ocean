@@ -790,7 +790,7 @@ export default function App() {
   const [showAllOpps, setShowAllOpps] = useState(false);
   const [aiInsights, setAiInsights] = useState('');
   const [aiAnalysis, setAiAnalysis] = useState<AIAnalysis | null>(null);
-  const [selectedBiz, setSelectedBiz] = useState<{name:string;category:string;categoryLabel:string;color:string;phone:string;email:string;website:string;address:string;facebook:string;instagram:string;linkedin:string;youtube:string;tiktok:string;twitter:string;pinterest:string;rating:number;reviewCount:number;hours:string;lat:number;lon:number;branches?:{url:string;title?:string;phone?:string;email?:string;address?:string}[]}|null>(null);
+  const [selectedBiz, setSelectedBiz] = useState<{name:string;category:string;categoryLabel:string;color:string;phone:string;email:string;website:string;address:string;facebook:string;instagram:string;linkedin:string;youtube:string;tiktok:string;twitter:string;pinterest:string;rating:number;reviewCount:number;hours:string;lat:number;lon:number;image?:string;branches?:{url:string;title?:string;phone?:string;email?:string;address?:string}[]}|null>(null);
   const [enrichProgress, setEnrichProgress] = useState<EnrichmentProgress | null>(null);
   // v6.9.2: engine health (quota / fallback banners) + AI verification notes
   const [engineHealth, setEngineHealth] = useState<EngineHealthEntry[]>([]);
@@ -1003,10 +1003,14 @@ export default function App() {
           if (p.address) contactParts.push(`<span style="color:#94a3b8;font-size:11px">📍 ${escapeHtml(p.address)}</span>`);
           const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${coords[1]},${coords[0]}`;
           contactParts.push(`<a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#34d399;text-decoration:none;font-size:11px">📍 Open in Maps</a>`);
+          // v6.9.94: real business photo in the popup header (fallback: letter avatar)
+          const imgHtml = p.image
+            ? `<img src="${escapeHtml(String(p.image))}" alt="" referrerpolicy="no-referrer" style="width:40px;height:40px;border-radius:8px;object-fit:cover;flex-shrink:0" onerror="this.style.display='none'">`
+            : `<span style="width:40px;height:40px;border-radius:8px;background:${p.color};color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;flex-shrink:0">${escapeHtml((p.name || '•').charAt(0).toUpperCase())}</span>`;
           const html = `
             <div style="min-width:200px;max-width:300px;font-family:system-ui;font-size:13px;padding:0">
-              <div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:${p.color}22;border-bottom:1px solid #333">
-                <span style="width:8px;height:8px;border-radius:50%;background:${p.color};flex-shrink:0"></span>
+              <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:${p.color}22;border-bottom:1px solid #333">
+                ${imgHtml}
                 <strong style="color:#fff;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(p.name) || 'Unknown'}</strong>
                 <span style="font-size:10px;color:${p.color};background:${p.color}22;padding:1px 6px;border-radius:8px">${escapeHtml(p.categoryLabel) || ''}</span>
               </div>
@@ -1027,6 +1031,7 @@ export default function App() {
             tiktok: p.tiktok || '', twitter: p.twitter || '', pinterest: p.pinterest || '',
             rating: p.rating || 0, reviewCount: p.reviewCount || 0, hours: p.hours || '',
             lat: coords[1], lon: coords[0],
+            image: p.image || '',
             branches: p.branches || [],
           };
           window.dispatchEvent(new CustomEvent('biz-click'));
@@ -1095,6 +1100,7 @@ export default function App() {
         tiktok: b.tiktok || '',
         twitter: b.twitter || '', pinterest: b.pinterest || '',
         rating: b.rating || 0, reviewCount: b.reviewCount || 0, hours: b.hours || '',
+        image: b.image || '',
         branches: (b.branches || []).slice(0, 12),
       },
     }));
@@ -2939,11 +2945,15 @@ export default function App() {
               <div ref={mapRef} className="h-[420px] w-full map-container" />
               {selectedBiz && (
                 <div ref={bizPanelRef} className="border-t border-border bg-card/80 backdrop-blur-sm px-3 py-2">
-                  {/* Desktop: rich card */}
+                  {/* Desktop: rich card — v6.9.94: real photo when available */}
                   <div className="hidden sm:flex items-start gap-3 text-xs">
-                    <div className="w-8 h-8 rounded-lg flex items-center justify-center text-sm flex-shrink-0" style={{background: selectedBiz.color + '22', color: selectedBiz.color}}>
-                      {selectedBiz.name.charAt(0).toUpperCase()}
-                    </div>
+                    {selectedBiz.image ? (
+                      <img src={selectedBiz.image} alt="" referrerPolicy="no-referrer" className="w-10 h-10 rounded-lg object-cover flex-shrink-0" onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                    ) : (
+                      <div className="w-8 h-8 rounded-lg flex items-center justify-center text-sm flex-shrink-0" style={{background: selectedBiz.color + '22', color: selectedBiz.color}}>
+                        {selectedBiz.name.charAt(0).toUpperCase()}
+                      </div>
+                    )}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-0.5">
                         <span className="font-semibold text-foreground truncate">{selectedBiz.name}</span>
@@ -2992,10 +3002,14 @@ export default function App() {
                     </div>
                     <button onClick={() => setSelectedBiz(null)} className="text-muted-foreground hover:text-foreground flex-shrink-0">✕</button>
                   </div>
-                  {/* Mobile: stacked rows */}
+                  {/* Mobile: stacked rows — v6.9.94: real photo when available */}
                   <div className="sm:hidden">
                     <div className="flex items-center gap-2 text-xs mb-1">
-                      <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{background: selectedBiz.color}} />
+                      {selectedBiz.image ? (
+                        <img src={selectedBiz.image} alt="" referrerPolicy="no-referrer" className="w-7 h-7 rounded-md object-cover flex-shrink-0" onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                      ) : (
+                        <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{background: selectedBiz.color}} />
+                      )}
                       <span className="font-semibold text-foreground truncate flex-1">{selectedBiz.name}</span>
                       <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{background: selectedBiz.color + '22', color: selectedBiz.color}}>{selectedBiz.categoryLabel}</span>
                       <button onClick={() => setSelectedBiz(null)} className="text-muted-foreground hover:text-foreground flex-shrink-0 text-sm">✕</button>

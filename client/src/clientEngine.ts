@@ -18,7 +18,7 @@ import { APP_VERSION } from './version';
 async function scrapeWordPressAPI(b: Business): Promise<void> {
   if (!b.website || (b.email && b.phone)) return;
   const base = b.website.replace(/\/$/, '');
-  const JUNK = /example\.com|wixpress|sentry|googleapis|google\.com|cloudflare|schema\.org/i;
+  const JUNK = /example\.com|wixpress|sentry|googleapis|google\.com|cloudflare|schema\.org|w3\.org|ogp\.me/i;
   const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
 
   const endpoints = ['/wp-json/', '/wp-json/wp/v2/users', '/wp-json/wp/v2/pages'];
@@ -175,7 +175,7 @@ export function pickDeeperLinks(html: string, baseUrl: string): string[] {
 async function enrichFromWebsiteDeep(b: Business): Promise<void> {
   if (!b.website) return;
   const EXCLUDE = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com/i;
-  const JUNK = /example\.com|wixpress|sentry|googleapis|google\.com|gstatic|cloudflare|schema\.org|privacy|terms|cookie/i;
+  const JUNK = /example\.com|wixpress|sentry|googleapis|google\.com|gstatic|cloudflare|schema\.org|w3\.org|ogp\.me|privacy|terms|cookie/i;
 
   // v6.9.66: homepage HTML stashed for link-discovery scoring
   let homeHtml = '';
@@ -225,7 +225,7 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
                 const digits = tp.replace(/\D/g, '');
                 if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(tp)) { b.phone = tp.trim(); yieldBump('jsonld'); }
               }
-              if (!b.email && typeof entity.email === 'string' && entity.email && !JUNK.test(entity.email) && !_EMAIL_FILE_RE.test(entity.email)) { b.email = entity.email; yieldBump('jsonld'); }
+              if (!b.email && typeof entity.email === 'string' && entity.email && plausibleEmail(entity.email)) { b.email = entity.email; yieldBump('jsonld'); }
               const types = (Array.isArray(entity['@type']) ? entity['@type'] : [entity['@type']]) as unknown[];
               if (types.some((t: unknown) => /LocalBusiness|Restaurant|Bar|Cafe|Store|Hotel|Organization/i.test(String(t || '')))) {
                 if (!b.website && typeof entity.url === 'string' && !EXCLUDE.test(entity.url) && isLikelyBusinessWebsite(entity.url, b.name)) b.website = entity.url;
@@ -250,6 +250,47 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
             }
           } catch {}
         }
+      }
+
+      // v6.9.94: real business photo — from the SAME fetched HTML, no extra
+      // request. Priority: JSON-LD image (the business's own pick) → og:image
+      // → twitter:image. Resolved against the page URL; data: URIs and tiny
+      // sprites/shared template assets rejected.
+      if (!b.image) {
+        try {
+          let img = '';
+          const jsonLdImgs = [...full.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)];
+          for (const m of jsonLdImgs) {
+            try {
+              const data = JSON.parse(m[1]);
+              const ents: Record<string, unknown>[] = [];
+              collectJsonLdEntities(data, ents);
+              for (const e of ents) {
+                const cand = e.image;
+                if (typeof cand === 'string' && cand && !cand.startsWith('data:')) { img = cand; break; }
+                if (Array.isArray(cand)) {
+                  const s = cand.find((c: unknown) => typeof c === 'string' && !String(c).startsWith('data:'));
+                  if (s) { img = String(s); break; }
+                }
+              }
+              if (img) break;
+            } catch {}
+          }
+          if (!img) {
+            const og = full.match(/<meta[^>]*property=["']og:image(?::secure_url)?["'][^>]*content=["']([^"']{10,500})["']/i)
+              || full.match(/<meta[^>]*content=["']([^"']{10,500})["'][^>]*property=["']og:image(?::secure_url)?["']/i)
+              || full.match(/<meta[^>]*name=["']twitter:image["'][^>]*content=["']([^"']{10,500})["']/i);
+            if (og) img = og[1];
+          }
+          if (img) {
+            img = img.trim().replace(/&amp;/g, '&');
+            if (!/^https?:\/\//i.test(img)) { try { img = new URL(img, url).toString(); } catch { img = ''; } }
+            // Junk filters: sharing placeholders, 1px trackers, emoji sprites
+            if (img && !/facebook\.com\/tr|doubleclick|googleanalytics|\/pixel|sprite|logo\.(png|svg)$/i.test(img)) {
+              b.image = img;
+            }
+          }
+        } catch { /* image is cosmetic — never break the scrape */ }
       }
 
       // v6.9.68: per-branch contact capture — every successfully fetched
@@ -313,7 +354,7 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
         }
         if (!b.email) {
           const mdE = full.match(/itemprop=["']email["'][^>]*>([^<]{6,80})</i) || full.match(/<meta[^>]*itemprop=["']email["'][^>]*content=["']([^"']{6,80})/i);
-          if (mdE && mdE[1].includes('@') && !JUNK.test(mdE[1])) b.email = mdE[1].trim();
+          if (mdE && mdE[1].includes('@') && plausibleEmail(mdE[1].trim())) b.email = mdE[1].trim();
         }
       }
 
@@ -339,7 +380,7 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
       if (!b.email) {
         // a. mailto: links
         const mailtoMatch = full.match(/href="mailto:([^"?\s]+)/i);
-        if (mailtoMatch && !EXCLUDE.test(mailtoMatch[1])) b.email = mailtoMatch[1].trim();        // b. email in text
+        if (mailtoMatch && !EXCLUDE.test(mailtoMatch[1]) && !_EMAIL_PLATFORM_RE.test(mailtoMatch[1].split('@')[1] || '')) b.email = mailtoMatch[1].trim();        // b. email in text
         if (!b.email) {
           const emails = full.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
           if (emails) {
@@ -960,6 +1001,8 @@ export interface Business {
   pinterest: string;
   /** v6.9.48: found via the web-registry supplement (not OSM) — approximate pin */
   supplemented?: boolean;
+  /** v6.9.94: real business photo — og:image / JSON-LD image from their site */
+  image?: string;
   /** v6.9.68: per-branch contacts harvested from crawled location/branch pages */
   branches?: Branch[];
   /** v6.9.68: internal dedup of branch-crawled URLs */
@@ -4053,7 +4096,7 @@ async function discoverSitemapUrls(base: string): Promise<string[]> {
 async function scrapeSitemapForContacts(b: Business): Promise<void> {
   if (!b.website || (b.email && b.phone)) return;
   const base = b.website.replace(/\/$/, '');
-  const JUNK = /example\.com|wixpress|sentry|googleapis|google\.com|cloudflare/i;
+  const JUNK = /example\.com|wixpress|sentry|googleapis|google\.com|cloudflare|schema\.org|w3\.org|ogp\.me/i;
   const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
   const PAGE_WORD = /contact|about|team|info|impressum|kontakt|контакт|iletisim|contatti|contacto|contato|nosotros|quiennes-somos|quienes|sobre|empresa|aviso-legal|aviso|nutseekond|nutiiebol|kavshiri|momkhmarebeli|connexion|mentions|კონტაქტ|კავშირ|ჩვენ შესახებ|Հետադարձ|կապ|մեր մասին/i;
 
@@ -4193,7 +4236,7 @@ async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct:
         }
         if (!b.email) {
           const m = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-          if (m && !m[0].includes('example.com') && !m[0].includes('google.com')) { b.email = m[0]; found++; }
+          if (m && plausibleEmail(m[0])) { b.email = m[0]; found++; }
         }
         if (!b.facebook) {
           const m = html.match(/facebook\.com\/([a-zA-Z0-9._]+)/);
@@ -4259,8 +4302,7 @@ async function tryCommonEmailPatterns(b: Business): Promise<void> {
         if (emails) {
           for (const e of emails) {
             const clean = e.replace(/[\s>);]+$/, '');
-            const junk = /example\.com|wixpress|sentry|googleapis|google\.com|cloudflare|schema\.org|duckduckgo/i;
-            if (!junk.test(clean) && clean.length > 6 && clean.length < 80) {
+            if (plausibleEmail(clean)) {
               b.email = clean;
               break;
             }
@@ -4294,7 +4336,7 @@ function extractFromText(text: string, b: Business): boolean {
   }
   if (!b.email) {
     const m = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-    if (m && !m[0].includes('example.com') && !m[0].includes('google') && !m[0].includes('facebook') && !m[0].includes('instagram')) { b.email = m[0]; touched = true; }
+    if (m && plausibleEmail(m[0])) { b.email = m[0]; touched = true; }
   }
   if (!b.facebook) {
     const m = text.match(/facebook\.com\/([a-zA-Z0-9._]+)/);
@@ -4521,7 +4563,7 @@ async function wikidataContacts(b: Business): Promise<void> {
       if (!row) return;
       if (!b.email && row.email?.value) {
         const e = String(row.email.value).replace(/^mailto:/, '');
-        if (!_EMAIL_FILE_RE.test(e) && !_EMAIL_JUNK_RE.test(e)) b.email = e;
+        if (plausibleEmail(e)) b.email = e;
       }
       if (!b.phone && row.phone?.value) {
         const p = String(row.phone.value);
@@ -4692,7 +4734,7 @@ function applySearchResult(b: Business, url: string, text: string, found: { n: n
   }
   if (!b.email && text) {
     const m = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-    if (m && !/example\.|duckduckgo|sentry|wixpress/i.test(m[0])) { b.email = m[0]; found.n++; }
+    if (m && plausibleEmail(m[0])) { b.email = m[0]; found.n++; }
   }
   if (!b.facebook && text) {
     const m = text.match(/facebook\.com\/([a-zA-Z0-9._-]{2,})/i);
@@ -5177,7 +5219,7 @@ async function enrichFromBrave(businesses: Business[], onProgress?: (pct: number
           // Extract email
           if (!b.email) {
             const m = desc.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-            if (m && !m[0].includes('example.com')) { b.email = m[0]; found++; }
+            if (m && plausibleEmail(m[0])) { b.email = m[0]; found++; }
           }
           // Extract social — try all platforms
           if (!b.facebook) {
@@ -5280,10 +5322,9 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         if (!b.email) {
           const emails = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
           if (emails) {
-            const junk = ['example.com', 'duckduckgo', 'googleapis', 'sentry', 'wixpress', 'cloudflare', 'schema.org'];
             for (const e of emails) {
               const clean = e.replace(/[\s>);]+$/, '');
-              if (junk.every(j => !clean.includes(j)) && clean.length > 6 && clean.length < 80) {
+              if (plausibleEmail(clean)) {
                 b.email = clean;
                 found++;
                 break;
@@ -8932,12 +8973,16 @@ function plausiblePhone(p: string, strict = true): boolean {
 
 // Junk emails: asset files and placeholder addresses that regexes pick up
 const _EMAIL_FILE_RE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
-const _EMAIL_JUNK_RE = /example\.com|noreply|no-reply|donotreply|wixpress|sentry\.io|cloudflare|privacy|abuse@|postmaster@/i;
+const _EMAIL_JUNK_RE = /example\.com|noreply|no-reply|donotreply|wixpress|sentry\.io|cloudflare|privacy|abuse@|postmaster@|schema\.org|w3\.org|user@|username@|your(name|mail)?@|email@domain/i;
 // v6.9.83: platform/infrastructure domains that scraped pages reference but
 // no small business owns. A cafe whose email reads info@duckduckgo.co got it
 // from a followed search-result page — poison. Search engines, CDNs, CMS
 // hosts and app stores can never be the SMTP domain of a local business.
-const _EMAIL_PLATFORM_RE = /(duckduckgo|bing|google|yahoo|microsoft|outlook|hotmail|gmail|icloud|proton|yandex|mail\.ru|zoho|fastmail|startpage|mojeek|brave|ecosia|qwant|search|cloudfront|akamai|amazonaws|azureedge|wix|shopify|squarespace|webflow|godaddy|namecheap|hostinger|siteground|bluehost|wordpress)\.(com|co|io|net|org|ge|ru|de|fr)$/i;
+// v6.9.94: adds the standards/validator domains that website TEMPLATES ship
+// with in their JSON-LD/microdata boilerplate — info@schema.org leaked into
+// hundreds of rows from template contact pages (the Wix/WordPress default
+// Organization block). Also w3.org, ogp.me, and webmaster spamtrap hosts.
+const _EMAIL_PLATFORM_RE = /(duckduckgo|bing|google|yahoo|microsoft|outlook|hotmail|gmail|icloud|proton|yandex|mail\.ru|zoho|fastmail|startpage|mojeek|brave|ecosia|qwant|search|cloudfront|akamai|amazonaws|azureedge|wix|shopify|squarespace|webflow|godaddy|namecheap|hostinger|siteground|bluehost|wordpress|schema|w3|ogp|whatwg|mozilla|wikipedia|wikimedia|webcache|translate)\.(com|co|io|net|org|me|ge|ru|de|fr)$/i;
 
 // v6.9.37: structural email validation for the final data-quality pass.
 // Checks the stored email still looks like a real address after every
@@ -9105,7 +9150,7 @@ function extractFromHtmlModule(html: string, b: Business): void {
     }
     if (!b.email) {
       const mdE = html.match(/itemprop=["']email["'][^>]*>([^<]{6,80})</i) || html.match(/<meta[^>]*itemprop=["']email["'][^>]*content=["']([^"']{6,80})/i);
-      if (mdE && mdE[1].includes('@') && !JUNK.test(mdE[1]) && !EMAIL_FILE.test(mdE[1])) { b.email = mdE[1].trim(); yieldBump('microdata'); }
+      if (mdE && mdE[1].includes('@') && plausibleEmail(mdE[1].trim())) { b.email = mdE[1].trim(); yieldBump('microdata'); }
     }
     // 3. Labeled phone patterns (Phone: +xxx, Tel: xxx, etc.)
     // v6.9.57: multilingual labels — Spanish sites label numbers "Teléfono:"
@@ -9147,7 +9192,7 @@ function extractFromHtmlModule(html: string, b: Business): void {
       if (emails) {
         for (const e of emails) {
           const clean = e.replace(/[\s>);]+$/, '');
-          if (!JUNK.test(clean) && !EMAIL_FILE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; yieldBump('label'); break; }
+          if (plausibleEmail(clean)) { b.email = clean; yieldBump('label'); break; }
         }
       }
     }
@@ -9158,13 +9203,13 @@ function extractFromHtmlModule(html: string, b: Business): void {
     // 1. mailto: links (most reliable)
     yieldTry('mailto');
     const mailM = html.match(/href="mailto:([^"\?\s]+)/i);
-    if (mailM && !JUNK.test(mailM[1]) && !EMAIL_FILE.test(mailM[1])) { b.email = mailM[1].trim(); yieldBump('mailto'); }
+    if (mailM && plausibleEmail(mailM[1].trim())) { b.email = mailM[1].trim(); yieldBump('mailto'); }
     // 2. Labeled email patterns (Email: xxx@yyy.com)
     if (!b.email) {
       // v6.9.57: + correo/courriel/e-mail international labels
       yieldTry('label');
       const labelM = html.match(/(?:email|e-mail|mail|contact|correo(?:\s+electr\u00f3nico)?|courriel|\u043f\u043e\u0447\u0442\u0430|\u03b5\u03c0\u03b9\u03ba\u03bf\u03b9\u03bd\u03c9\u03bd\u03af\u03b1|\u0627\u06cc\u0645\u06cc\u0644)\s*[:;=\s"'>]*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
-      if (labelM && !JUNK.test(labelM[1]) && !EMAIL_FILE.test(labelM[1])) { b.email = labelM[1]; yieldBump('label'); }
+      if (labelM && plausibleEmail(labelM[1])) { b.email = labelM[1]; yieldBump('label'); }
     }
     // 3. JSON-LD structured data
     if (!b.email) {
@@ -9177,7 +9222,7 @@ function extractFromHtmlModule(html: string, b: Business): void {
           const entities: Record<string, unknown>[] = [];
           collectJsonLdEntities(data, entities);
           for (const e of entities) {
-            if (typeof e.email === 'string' && e.email && !JUNK.test(e.email) && !EMAIL_FILE.test(e.email)) { b.email = e.email; yieldBump('jsonld'); break; }
+            if (typeof e.email === 'string' && e.email && plausibleEmail(e.email)) { b.email = e.email; yieldBump('jsonld'); break; }
           }
         } catch {}
         if (b.email) break;
@@ -9190,7 +9235,7 @@ function extractFromHtmlModule(html: string, b: Business): void {
       if (emails) {
         for (const e of emails) {
           const clean = e.replace(/[\s>);]+$/, '');
-          if (!JUNK.test(clean) && !EMAIL_FILE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; yieldBump('regex'); break; }
+          if (plausibleEmail(clean)) { b.email = clean; yieldBump('regex'); break; }
         }
       }
     }
@@ -9203,7 +9248,7 @@ function extractFromHtmlModule(html: string, b: Business): void {
           const bytes = cfM[1].match(/.{2}/g)!.map(h => parseInt(h, 16));
           const key = bytes[0];
           const decoded = bytes.slice(1).map(x => x ^ key).map(x => String.fromCharCode(x)).join('');
-          if (decoded.includes('@') && !JUNK.test(decoded)) { b.email = decoded; yieldBump('cfdecode'); }
+          if (decoded.includes('@') && plausibleEmail(decoded)) { b.email = decoded; yieldBump('cfdecode'); }
         } catch {}
       }
     }
