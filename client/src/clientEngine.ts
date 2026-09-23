@@ -282,6 +282,17 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
               || full.match(/<meta[^>]*name=["']twitter:image["'][^>]*content=["']([^"']{10,500})["']/i);
             if (og) img = og[1];
           }
+          // v6.9.97: favicon fallback — most small-business sites ship an
+          // og:image, but the ones that don't almost always still have a
+          // favicon. link rel=icon (apple-touch-icon preferred for size)
+          // → /favicon.ico guess. Fills b.image so rows get a real visual
+          // instead of the letter avatar.
+          if (!img) {
+            const fav = full.match(/<link[^>]*rel=["'][^"']*(?:apple-touch-icon|icon|shortcut icon)["'][^>]*href=["']([^"'\s]{4,500})["']/i)
+              || full.match(/<link[^>]*href=["']([^"'\s]{4,500})["'][^>]*rel=["'][^"']*(?:apple-touch-icon|icon|shortcut icon)["']/i);
+            if (fav) img = fav[1];
+            else if (urlHostOf(url)) img = '/favicon.ico';
+          }
           if (img) {
             img = img.trim().replace(/&amp;/g, '&');
             if (!/^https?:\/\//i.test(img)) { try { img = new URL(img, url).toString(); } catch { img = ''; } }
