@@ -5537,21 +5537,17 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       if (gap < 1100) await wait(1100 - gap);
       _nominatimLastCall = Date.now();
       try {
-        const revUrl = `https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=jsonv2&zoom=18&addressdetails=1`;
-        let d: any = null;
-        // Arm 1: direct simple GET (no preflight — browser CORS allows it when
-        // Nominatim serves 200 with its usual Access-Control-Allow-Origin)
-        try {
-          const r = await fetch(revUrl, { signal: AbortSignal.timeout(4000) });
-          if (r.ok) d = await r.json(); else _nominatimFails++;
-        } catch { _nominatimFails++; }
-        // Arm 2: server-side fetch lane — zero CORS restrictions, sees the
-        // real status even when Nominatim throttles the browser.
-        if (!d && _nominatimFails < 5) {
-          const srvRaw = await serverFetchRaw(revUrl, 10000);
-          if (srvRaw) { try { d = JSON.parse(srvRaw); } catch { d = null; } }
-        }
-        if (!d) return false;
+        // v6.9.99c: direct simple GET only. The server-lane arm here was a
+        // trap: one pollServerFetch call can take 15-90s (5 polls × 15s RPC
+        // timeout each), so a throttled Nominatim froze the whole phase for
+        // minutes per batch. Addresses are cosmetic — direct GET works when
+        // Nominatim serves 200, and the 5-fail circuit breaker below stops
+        // the grind when it doesn't. No server round-trips for cosmetics.
+        const r = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=jsonv2&zoom=18&addressdetails=1`, {
+          signal: AbortSignal.timeout(4000),
+        });
+        if (!r.ok) { _nominatimFails++; return false; }
+        const d = await r.json();
         const a = d?.address || {};
         const parts = [a.road || a.pedestrian || a.footway, a.house_number, a.suburb || a.neighbourhood || a.city_district, a.city || a.town || a.village].filter(Boolean);
         if (parts.length > 0) { b.address = parts.join(', '); _nominatimFails = 0; return true; }
