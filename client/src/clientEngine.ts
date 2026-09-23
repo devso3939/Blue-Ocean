@@ -4213,54 +4213,77 @@ async function scrapeVCard(b: Business): Promise<void> {
 }
 
 // ─── Google Maps Place Search Enrichment ────────────────────────
+// ── v6.9.98: extract contacts from a rendered Google Maps page ──
+// Shared by both arms of the Maps lane (render-lane DOM and server fetch).
+// Maps pages embed the full place record (phone, website, address) in the
+// initialization payload even when the page itself is a JS app.
+function extractFromMapsHtml(html: string, b: Business): number {
+  let found = 0;
+  if (!b.phone) {
+    // Maps embeds the canonical phone in APP_INITIALIZATION_STATE, often as
+    // a labeled array element. Prefer explicit phone-shaped strings.
+    const m = html.match(/\+\d[\d\s\-\.\(\)]{7,18}/);
+    if (m) {
+      const digits = m[0].replace(/\D/g, '');
+      if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(m[0])) { b.phone = m[0].trim(); found++; }
+    }
+  }
+  if (!b.website) {
+    const m = html.match(/(?:www\.|https?:\/\/)([^"\s<>]+\.(com|ge|net|org|io|co|am|ru|tr)[^"\s<>]*)/i);
+    if (m && !m[0].includes('google.') && !m[0].includes('gstatic') && isLikelyBusinessWebsite(m[0], b.name)) {
+      let u = m[0]; if (!u.startsWith('http')) u = 'https://' + u;
+      b.website = u; found++;
+    }
+  }
+  if (!b.email) {
+    const m = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+    if (m && plausibleEmail(m[0])) { b.email = m[0]; found++; }
+  }
+  if (!b.facebook) {
+    const m = html.match(/facebook\.com\/([a-zA-Z0-9._]+)/);
+    if (m && !/tr\?id|sharer|dialog|plugins/i.test(m[1])) { b.facebook = 'https://facebook.com/' + m[1]; found++; }
+  }
+  if (!b.instagram) {
+    const m = html.match(/instagram\.com\/([a-zA-Z0-9._]+)/);
+    if (m && !/p$|explore|accounts/i.test(m[1])) { b.instagram = 'https://instagram.com/' + m[1]; found++; }
+  }
+  return found;
+}
+
+// v6.9.98: Google Maps enrichment rebuilt. The old lane fetched
+// google.com/maps/search with plain corsFetch — probes proved Google serves
+// a 222KB JS app shell with ZERO contact data to non-JS fetchers (server
+// probes: name_pos=161, phone_pos=0). The page needs a REAL browser, which
+// is exactly what the headless render lane (urlscan) is. Maps profile pages
+// are public, stable, and cached by urlscan's index, so most businesses hit
+// the free reuse path without consuming fresh-scan quota.
 async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct: number, msg: string) => void): Promise<void> {
   const NEEDS = businesses.filter(b => !b.phone || !b.website || !b.email || (!b.facebook && !b.instagram));
   if (NEEDS.length === 0) return;
-  const BATCH = 3;
-  const max = Math.min(NEEDS.length, 50);
+  const BATCH = 2;
+  const max = Math.min(NEEDS.length, 40); // render lane budget — urlscan free tier ≈ 50/h
   let found = 0;
   for (let i = 0; i < max; i += BATCH) {
+    if (isCancelled()) break;
     const batch = NEEDS.slice(i, i + BATCH);
     await Promise.all(batch.map(async (b) => {
       try {
-        const q = encodeURIComponent(b.name + ' ' + (b.address || ''));
-        const r = await corsFetch('https://www.google.com/maps/search/' + q, {
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-          signal: AbortSignal.timeout(10000),
-        });
-        if (!r.ok) return;
-        const html = await r.text();
-        if (!b.phone) {
-          const m = html.match(/\+\d[\d\s\-\.\(\)]{7,18}/);
-          // Digit-count + plausibility guard (digits, not string length)
-          if (m) {
-            const digits = m[0].replace(/\D/g, '');
-            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(m[0])) { b.phone = m[0].trim(); found++; }
-          }
+        const q = encodeURIComponent(b.name + ' ' + (b.address || '').split(',').slice(0, 2).join(','));
+        const mapsUrl = 'https://www.google.com/maps/search/' + q + '?hl=en';
+        // Arm 1: headless render (real browser — passes the JS wall)
+        let html = await renderRescue(mapsUrl, 40000);
+        // Arm 2: server lane (sometimes serves APP_INIT state without JS;
+        // costs one cheap request, kept second so the render budget goes first)
+        if (!html || !/\+\d[\d\s\-\.\(\)]{7,18}/.test(html)) {
+          const srv = await serverFetchRaw(mapsUrl, 15000);
+          if (srv && srv.length > 5000) html = srv;
         }
-        if (!b.website) {
-          const m = html.match(/(?:www\.|https?:\/\/)([^"\s<>]+\.(com|ge|net|org|io|co)[^"\s<>]*)/i);
-          if (m && !m[0].includes('google.com') && !m[0].includes('gstatic') && isLikelyBusinessWebsite(m[0], b.name)) {
-            let u = m[0]; if (!u.startsWith('http')) u = 'https://' + u;
-            b.website = u; found++;
-          }
-        }
-        if (!b.email) {
-          const m = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-          if (m && plausibleEmail(m[0])) { b.email = m[0]; found++; }
-        }
-        if (!b.facebook) {
-          const m = html.match(/facebook\.com\/([a-zA-Z0-9._]+)/);
-          if (m) { b.facebook = 'https://facebook.com/' + m[1]; found++; }
-        }
-        if (!b.instagram) {
-          const m = html.match(/instagram\.com\/([a-zA-Z0-9._]+)/);
-          if (m) { b.instagram = 'https://instagram.com/' + m[1]; found++; }
-        }
+        if (!html) return;
+        found += extractFromMapsHtml(html, b);
       } catch {}
     }));
-    if (i + BATCH < max) await wait(3000);
-    onProgress?.(92, 'Google enrichment... ' + Math.min(i + BATCH, max) + '/' + max + ' (' + found + ' found)');
+    if (i + BATCH < max) await wait(2000);
+    onProgress?.(92, 'Google Maps (render)... ' + Math.min(i + BATCH, max) + '/' + max + ' (' + found + ' found)');
   }
 }
 
@@ -5041,8 +5064,17 @@ async function guessEmailFromDomain(b: Business): Promise<void> {
     // Skip free-mail hosts — info@gmail.com is never the business mailbox
     if (/(gmail|yahoo|hotmail|outlook|yandex|mail\.ru|icloud|proton)\./i.test(host)) return;
     if (!(await domainHasMx(host))) return;
-    const locals = ['info', 'contact', 'hello', 'office', 'mail', 'admin', 'support', 'booking', 'sales', 'hi'];
-    for (const prefix of locals) {
+    // v6.9.98: expanded candidate list — regional business conventions
+    // (CIS/ru/ka, Turkish, French/German/Spanish) that the old English-only
+    // 10-prefix list missed. MX validation still gates every candidate, so
+    // a wider list costs only local DNS-style checks, not real sends.
+    const locals = ['info', 'contact', 'hello', 'office', 'mail', 'admin', 'support', 'booking', 'sales', 'hi',
+      'welcome', 'reservation', 'reservations', 'orders', 'service', 'customer', 'team', 'main',
+      'инфо', 'офис', 'заказ', 'заказы', 'связь',
+      'iletisim', 'bilgi', 'rezervasyon',
+      'contacto', 'contato', 'kontakt'];
+    for (const prefix of Array.from(new Set(locals))) {
+      if (prefix.includes('@')) continue; // safety: never emit a double-@
       const candidate = prefix + '@' + host;
       if (plausibleEmail(candidate)) { b.email = candidate; yieldBump('mxguess'); return; }
     }
@@ -5993,14 +6025,33 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               // v6.9.8: gate — when the shared DDG engine is cooling down,
               // this per-business email query would just print another
               // allorigins abort error for zero data.
-              if (!engineAvailable('ddg')) return;
-              try {
-                const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + emailQ, {
-                  headers: { 'User-Agent': 'Mozilla/5.0' },
-                  signal: AbortSignal.timeout(4000),
-                });
-                if (r.ok) extractFromHtml(await r.text(), b);
-              } catch {}
+              if (engineAvailable('ddg')) {
+                try {
+                  const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + emailQ, {
+                    headers: { 'User-Agent': 'Mozilla/5.0' },
+                    signal: AbortSignal.timeout(4000),
+                  });
+                  if (r.ok) extractFromHtml(await r.text(), b);
+                } catch {}
+              } else {
+                // v6.9.98: Bing fallback — the email query survives a DDG
+                // cooldown instead of silently dropping the arm for that
+                // business (Bing itself falls back to the server lane).
+                try {
+                  const bingE = await searchBing(decodeURIComponent(emailQ));
+                  let touchedE = false;
+                  for (const res of bingE.slice(0, 5)) {
+                    if (extractFromText((res.snippet || '') + ' ' + (res.title || ''), b)) touchedE = true;
+                    if (!b.email && res.url && /contact|about|team/i.test(res.url)) {
+                      try {
+                        const pageR = await corsFetch(res.url, { signal: AbortSignal.timeout(3000) });
+                        if (pageR.ok) extractFromHtml(await pageR.text(), b);
+                      } catch {}
+                    }
+                  }
+                  if (touchedE) yieldBump('snippetdig');
+                } catch {}
+              }
             })(),
           ]);
         }
@@ -6121,12 +6172,16 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   const bumpPercent = (p: number) => { if (p > _ep.percent) { _ep.percent = p; emitEP(); } };
 
   // ── Lane: 2GIS (excellent for Georgia, Russia, CIS countries) ──
+  // v6.9.98: widened from "missing EVERYTHING" to "missing phone OR website"
+  // — 2GIS profiles carry emails too (the old loop silently dropped them),
+  // and a business with a phone but no website still benefits. Email
+  // extraction added below alongside phone/website/address.
   const lane2GIS = async () => {
-    const need2GIS = allBizList.filter(b => !b.phone && !b.email && !b.website);
+    const need2GIS = allBizList.filter(b => !b.phone || !b.website || !b.email);
     if (need2GIS.length === 0) return;
     _ep.activePass = 'Pass 2: Regional (2GIS)'; _ep.passNumber = 2; bumpPercent(91);
     _ep.engines.find(e => e.name === '2GIS')!.status = 'active'; emitEP();
-    for (let i2 = 0; i2 < (CATEGORY_MODE ? need2GIS.length : Math.min(need2GIS.length, 40)); i2 += _BATCH) {
+    for (let i2 = 0; i2 < (CATEGORY_MODE ? Math.min(need2GIS.length, 250) : Math.min(need2GIS.length, 60)); i2 += _BATCH) {
       if (laneStop()) break;
       const batch2 = need2GIS.slice(i2, i2 + _BATCH);
       await Promise.all(batch2.map(async (b) => {
@@ -6162,6 +6217,21 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                     }
                   }
                 }
+                // v6.9.98: 2GIS exposes emails as type 'email' — the old loop
+                // never read them, leaving a free contact source untapped for
+                // every CIS/Georgia business listed there.
+                if (!b.email && item.contact_groups) {
+                  for (const grp of item.contact_groups) {
+                    for (const contact of (grp.contacts || [])) {
+                      if ((contact.type === 'email' || /@/.test(String(contact.value || ''))) && contact.value && plausibleEmail(String(contact.value).trim())) {
+                        b.email = String(contact.value).trim();
+                        yieldBump('svfetch');
+                        break;
+                      }
+                    }
+                    if (b.email) break;
+                  }
+                }
                 if (!b.address && item.address_name) b.address = item.address_name;
                 break;
               }
@@ -6180,7 +6250,12 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   // fetch per business (each failure logs a console error).
   const laneYandex = async () => {
     const needYandex = allBizList.filter(b => !b.phone && !b.email && !b.website);
-    if (needYandex.length === 0 || !engineAvailable('ddg')) return;
+    if (needYandex.length === 0) return;
+    // v6.9.98: DDG-down no longer kills the lane — when the shared DDG gate is
+    // closed, the query reroutes through searchBing (which itself falls back
+    // to the server-side Bing lane). A regional pass used to silently skip
+    // whenever one engine cooled down.
+    if (!engineAvailable('ddg') && !engineAvailable('bing')) return;
     _ep.activePass = 'Pass 3: Regional (Yandex)'; _ep.passNumber = 3; bumpPercent(93);
     _ep.engines.find(e => e.name === 'Yandex')!.status = 'active'; emitEP();
     for (let i3 = 0; i3 < (CATEGORY_MODE ? needYandex.length : Math.min(needYandex.length, 30)); i3 += _BATCH) {
@@ -6191,13 +6266,24 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           const nameEn4 = getEnglishCityName(b.name);
           const cityEn3 = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
           const q3 = encodeURIComponent(`site:yandex.* ${nameEn4 || b.name} ${cityEn3 || ''} phone`);
-          const r3 = await corsFetch('https://html.duckduckgo.com/html/?q=' + q3, {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal: AbortSignal.timeout(6000),
-          });
-          if (r3.ok) {
-            const html3 = await r3.text();
-            extractFromHtml(html3, b);
+          if (engineAvailable('ddg')) {
+            const r3 = await corsFetch('https://html.duckduckgo.com/html/?q=' + q3, {
+              headers: { 'User-Agent': 'Mozilla/5.0' },
+              signal: AbortSignal.timeout(6000),
+            });
+            if (r3.ok) {
+              const html3 = await r3.text();
+              extractFromHtml(html3, b);
+            }
+          } else {
+            // v6.9.98: Bing fallback keeps the regional lane alive when DDG
+            // is cooling down — same query, independent engine + server lane.
+            const bing3 = await searchBing(decodeURIComponent(q3));
+            let touched3 = false;
+            for (const res of bing3.slice(0, 5)) {
+              if (extractFromText((res.snippet || '') + ' ' + (res.title || ''), b)) touched3 = true;
+            }
+            if (touched3) yieldBump('snippetdig');
           }
         } catch {}
       }));
