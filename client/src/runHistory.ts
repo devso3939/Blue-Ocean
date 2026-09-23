@@ -63,6 +63,21 @@ export function deleteRuns(ids: string[]): void {
   save(s);
 }
 export function clearRuns(): void { try { localStorage.removeItem(KEY); } catch { /* noop */ } }
+
+// v6.9.90: JSON backup — merge imported runs by id (duplicates skipped),
+// quota-safe via the same save() eviction path as normal writes.
+export function importRuns(incoming: unknown[]): { added: number; skipped: number } {
+  const s = load();
+  let added = 0, skipped = 0;
+  for (const raw of incoming) {
+    const r = raw as RunRecord;
+    if (!r || typeof r.id !== 'string' || !r.city || !r.stats) { skipped++; continue; }
+    if (s.runs.some(x => x.id === r.id)) { skipped++; continue; }
+    s.runs.push(r); added++;
+  }
+  if (added > 0) save(s);
+  return { added, skipped };
+}
 export function historyStats(): { count: number; bytes: number; heavy: boolean } {
   const raw = localStorage.getItem(KEY) || '';
   let count = 0;

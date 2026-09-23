@@ -36,7 +36,7 @@ import {
   onRenderHarvest, type RenderHarvestStats,
   fetchCoverageRecent, type CoverageHistoryRow,
 } from './clientEngine';
-import { saveRun, listRuns, deleteRuns, clearRuns, historyStats, type RunRecord } from './runHistory';
+import { saveRun, listRuns, deleteRuns, clearRuns, historyStats, importRuns, type RunRecord } from './runHistory';
 import CompareView from './CompareView';
 import CountryView from './CountryView';
 
@@ -442,6 +442,32 @@ function HistoryView({ onBack, onRestore, heavy, onCleanup }: {
     });
   const fmtAgo = (t: number) => { const d = Date.now() - t; if (d < 60e3) return 'just now'; if (d < 3600e3) return `${Math.floor(d / 60e3)}m ago`; if (d < 86400e3) return `${Math.floor(d / 3600e3)}h ago`; return `${Math.floor(d / 86400e3)}d ago`; };
   const fmtKb = (b: number) => b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} MB` : `${Math.round(b / 1024)} KB`;
+  // v6.9.90: per-run improvement diff — coverage delta vs the PREVIOUS run
+  // of the same city+category+kind (sorted by time). Green = improved.
+  const prevCov = new Map<string, number>();
+  const diffOf = (r: RunRecord): number | null => {
+    const key = `${r.city.name}|${r.category || ''}|${r.kind}`;
+    const prev = prevCov.get(key);
+    prevCov.set(key, r.stats.anyContactPct);
+    return prev === undefined ? null : r.stats.anyContactPct - prev;
+  };
+  const diffs = new Map(runs.slice().sort((a, b) => a.ts - b.ts).map(r => [r.id, diffOf(r)]));
+  const doExport = () => {
+    const blob = new Blob([JSON.stringify({ app: 'Blue Ocean', exportedAt: new Date().toISOString(), runs: listRuns() }, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = `blue-ocean-history-${new Date().toISOString().slice(0, 10)}.json`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  };
+  const doImport = (file: File) => {
+    file.text().then(txt => {
+      try {
+        const parsed = JSON.parse(txt) as { runs?: unknown[] };
+        const res = importRuns(Array.isArray(parsed.runs) ? parsed.runs : []);
+        alert(res.added > 0 ? `Imported ${res.added} run(s)${res.skipped ? ` · ${res.skipped} duplicate(s) or invalid skipped` : ''}.` : 'Nothing new to import — all runs already exist or the file is invalid.');
+        refresh();
+      } catch { alert('Not a valid Blue Ocean history file.'); }
+    });
+  };
   return (
     <div className="min-h-screen bg-background">
       <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md">
@@ -459,6 +485,11 @@ function HistoryView({ onBack, onRestore, heavy, onCleanup }: {
               placeholder="Search city, country, category…"
               className="w-44 sm:w-64 rounded-lg border border-border bg-card px-3 py-1.5 text-xs outline-none focus:border-primary/60"
             />
+            <button onClick={doExport} className="rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all" title="Download all runs as a JSON backup">⬇ Export</button>
+            <label className="cursor-pointer rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all" title="Restore runs from a JSON backup">
+              ⬆ Import
+              <input type="file" accept="application/json,.json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) doImport(f); e.target.value = ''; }} />
+            </label>
             <button onClick={onBack} className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-border text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all">← Back</button>
           </div>
         </div>
@@ -526,6 +557,11 @@ function HistoryView({ onBack, onRestore, heavy, onCleanup }: {
                       <td className="px-4 py-2.5 tabular-nums">{fmtNum(r.stats.bizCount)}</td>
                       <td className="px-4 py-2.5">
                         <span className={`font-bold tabular-nums ${r.stats.anyContactPct >= 80 ? 'text-emerald-400' : r.stats.anyContactPct >= 40 ? 'text-amber-400' : 'text-red-400'}`}>{r.stats.anyContactPct}%</span>
+                        {(() => { const d = diffs.get(r.id); return d === null || d === undefined ? null : (
+                          <span className={`ml-1.5 text-[10px] font-semibold tabular-nums ${d > 0 ? 'text-emerald-400' : d < 0 ? 'text-red-400' : 'text-muted-foreground'}`} title={`vs previous run of ${r.city.name} · ${r.category || 'all'}`}>
+                            {d > 0 ? '▲' : d < 0 ? '▼' : '＝'}{Math.abs(d)}pp
+                          </span>
+                        ); })()}
                       </td>
                       <td className="px-4 py-2.5 font-mono text-[10px] text-muted-foreground">v{r.version}</td>
                       <td className="px-4 py-2.5 text-right">
