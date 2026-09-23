@@ -434,6 +434,30 @@ function HistoryView({ onBack, onRestore, heavy, onCleanup }: {
   useEffect(() => { let dead = false; listServerRuns(100).then(m => { if (!dead) setCloud(m); }).catch(() => { if (!dead) setCloud(null); }); return () => { dead = true; }; }, []);
   const localIds = new Set(runs.map(r => r.id));
   const cloudOnly = (cloud || []).filter(m => !localIds.has(m.run_id));
+  // v6.9.92: one-click full sync — push every local-only run to the server
+  // archive. Per-run status: 'idle' | 'syncing' | 'ok' | 'fail'.
+  const [syncState, setSyncState] = useState<Record<string, 'syncing' | 'ok' | 'fail'>>({});
+  const cloudIds = new Set((cloud || []).map(m => m.run_id));
+  const localOnly = runs.filter(r => !cloudIds.has(r.id));
+  const syncAll = () => {
+    const targets = localOnly.filter(r => !syncState[r.id] || syncState[r.id] === 'fail');
+    targets.forEach(r => setSyncState(s => ({ ...s, [r.id]: 'syncing' })));
+    Promise.all(targets.map(r =>
+      archiveRunToServer(r as unknown as Parameters<typeof archiveRunToServer>[0])
+        .then(ok => ({ id: r.id, ok }))
+    )).then(res => {
+      setSyncState(s => { const n = { ...s }; res.forEach(x => { n[x.id] = x.ok ? 'ok' : 'fail'; }); return n; });
+      listServerRuns(100).then(m => setCloud(m)).catch(() => { /* keep old listing */ });
+    });
+  };
+  const syncBadge = (id: string) => {
+    const st = syncState[id];
+    if (st === 'syncing') return <span className="ml-1.5 text-[10px] text-sky-400">☁ syncing…</span>;
+    if (st === 'ok') return <span className="ml-1.5 text-[10px] text-sky-400" title="Backed up in Supabase">☁ ✓</span>;
+    if (st === 'fail') return <span className="ml-1.5 text-[10px] text-red-400" title="Sync failed — will retry on next Sync to cloud">☁ ✕</span>;
+    if (cloudIds.has(id)) return <span className="ml-1.5 text-[10px] text-sky-400/60" title="Backed up in Supabase">☁ ✓</span>;
+    return <span className="ml-1.5 text-[10px] text-muted-foreground" title="Local only — not yet in the server backup">☁ ·</span>;
+  };
   const restoreCloud = (m: RunArchiveMeta) => {
     fetchServerRunPayload(m.run_id).then(p => {
       if (!p) { alert('Could not fetch that run from the cloud backup.'); return; }
@@ -500,6 +524,12 @@ function HistoryView({ onBack, onRestore, heavy, onCleanup }: {
               placeholder="Search city, country, category…"
               className="w-44 sm:w-64 rounded-lg border border-border bg-card px-3 py-1.5 text-xs outline-none focus:border-primary/60"
             />
+            <button
+              onClick={syncAll}
+              disabled={localOnly.length === 0}
+              className="rounded-lg border border-sky-500/40 px-3 py-1.5 text-xs font-semibold text-sky-300 hover:bg-sky-500/10 disabled:opacity-40 disabled:cursor-not-allowed"
+              title={localOnly.length === 0 ? 'All runs are backed up in the cloud' : `Push ${localOnly.length} local-only run(s) to the Supabase backup`}
+            >☁ Sync to cloud{localOnly.length > 0 ? ` (${localOnly.length})` : ''}</button>
             <button onClick={doExport} className="rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all" title="Download all runs as a JSON backup">⬇ Export</button>
             {cloud && (
               <span className="rounded-lg border border-sky-500/30 bg-sky-500/5 px-2.5 py-1.5 text-xs font-semibold text-sky-300/90" title={`${cloud.length} run(s) backed up in Supabase — they survive local storage eviction`}>☁ {cloud.length}</span>
@@ -582,6 +612,7 @@ function HistoryView({ onBack, onRestore, heavy, onCleanup }: {
                         <button onClick={() => onRestore(r)} className="text-left font-semibold text-primary hover:underline" title="Open this run's full results">
                           {r.city.name} · {r.kind === 'analyze' ? getCategoryLabel(r.category || '') : 'All categories'}
                         </button>
+                        {syncBadge(r.id)}
                         <div className="text-[10px] text-muted-foreground">{r.city.country} · {r.kind === 'analyze' ? 'Analyze Industry' : 'Discover Opportunities'}</div>
                       </td>
                       <td className="px-4 py-2.5 text-xs text-muted-foreground">{fmtAgo(r.ts)}</td>
