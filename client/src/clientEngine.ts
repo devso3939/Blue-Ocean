@@ -3214,6 +3214,41 @@ export async function fetchCoverageRecent(limit = 50): Promise<CoverageHistoryRo
     return await supabaseRpc<CoverageHistoryRow[]>('rpc_coverage_recent', { p_limit: limit }, 15000);
   } catch { return null; }
 }
+
+// v6.9.91: server-side run archive — mirrors the on-device History into
+// Supabase so runs survive localStorage eviction and restore on any device.
+// Sync is fire-and-forget; failure never blocks or slows a run.
+export interface RunArchiveMeta {
+  run_id: string; kind: 'analyze' | 'discover'; ts: string; version: string;
+  country: string; city: string; category: string | null;
+  biz_count: number; any_contact_pct: number;
+}
+export async function archiveRunToServer(rec: {
+  id: string; kind: 'analyze' | 'discover'; ts: number; version: string;
+  city: { name: string; country: string }; category: string | null;
+  stats: { bizCount: number; anyContactPct: number };
+  [k: string]: unknown;
+}): Promise<boolean> {
+  try {
+    const res = await supabaseRpc<{ rid?: string }>('rpc_run_archive_upsert', {
+      p_run_id: rec.id, p_kind: rec.kind, p_ts: new Date(rec.ts).toISOString(),
+      p_version: rec.version, p_country: rec.city.country, p_city: rec.city.name,
+      p_category: rec.category, p_biz_count: rec.stats.bizCount,
+      p_any_contact_pct: rec.stats.anyContactPct, p_payload: rec,
+    }, 20000);
+    return res?.rid === 'ok';
+  } catch { return false; }
+}
+export async function listServerRuns(limit = 100): Promise<RunArchiveMeta[] | null> {
+  try {
+    return await supabaseRpc<RunArchiveMeta[]>('rpc_run_archive_list', { p_limit: limit }, 15000);
+  } catch { return null; }
+}
+export async function fetchServerRunPayload(runId: string): Promise<Record<string, unknown> | null> {
+  try {
+    return await supabaseRpc<Record<string, unknown>>('rpc_run_archive_get', { p_run_id: runId }, 20000);
+  } catch { return null; }
+}
 function emitHarvest(s: RenderHarvestStats | null): void {
   _harvestStats = s;
   try { (window as unknown as { __boHarvest?: RenderHarvestStats | null }).__boHarvest = s; } catch { /* non-browser */ }

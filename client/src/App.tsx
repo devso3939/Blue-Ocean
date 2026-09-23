@@ -37,6 +37,7 @@ import {
   fetchCoverageRecent, type CoverageHistoryRow,
 } from './clientEngine';
 import { saveRun, listRuns, deleteRuns, clearRuns, historyStats, importRuns, type RunRecord } from './runHistory';
+import { archiveRunToServer, listServerRuns, fetchServerRunPayload, type RunArchiveMeta } from './clientEngine';
 import CompareView from './CompareView';
 import CountryView from './CountryView';
 
@@ -427,6 +428,20 @@ function HistoryView({ onBack, onRestore, heavy, onCleanup }: {
   const [sortCol, setSortCol] = useState<'ts' | 'city' | 'biz' | 'cov'>('ts');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [stats, setStats] = useState(() => historyStats());
+  // v6.9.91: server-side mirror — runs backed up in Supabase survive local
+  // storage eviction and can be restored to ANY device.
+  const [cloud, setCloud] = useState<RunArchiveMeta[] | null>(null);
+  useEffect(() => { let dead = false; listServerRuns(100).then(m => { if (!dead) setCloud(m); }).catch(() => { if (!dead) setCloud(null); }); return () => { dead = true; }; }, []);
+  const localIds = new Set(runs.map(r => r.id));
+  const cloudOnly = (cloud || []).filter(m => !localIds.has(m.run_id));
+  const restoreCloud = (m: RunArchiveMeta) => {
+    fetchServerRunPayload(m.run_id).then(p => {
+      if (!p) { alert('Could not fetch that run from the cloud backup.'); return; }
+      const rec = p as unknown as RunRecord;
+      try { saveRun(rec); } catch { /* quota — restore anyway from memory */ }
+      onRestore(rec);
+    });
+  };
   const refresh = () => { setRuns(listRuns()); setStats(historyStats()); };
   const toggle = (id: string) => setSel(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   const arrow = (col: string) => sortCol !== col ? '↕' : (sortDir === 'asc' ? '↑' : '↓');
@@ -486,6 +501,9 @@ function HistoryView({ onBack, onRestore, heavy, onCleanup }: {
               className="w-44 sm:w-64 rounded-lg border border-border bg-card px-3 py-1.5 text-xs outline-none focus:border-primary/60"
             />
             <button onClick={doExport} className="rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all" title="Download all runs as a JSON backup">⬇ Export</button>
+            {cloud && (
+              <span className="rounded-lg border border-sky-500/30 bg-sky-500/5 px-2.5 py-1.5 text-xs font-semibold text-sky-300/90" title={`${cloud.length} run(s) backed up in Supabase — they survive local storage eviction`}>☁ {cloud.length}</span>
+            )}
             <label className="cursor-pointer rounded-lg border border-border px-3 py-1.5 text-xs font-semibold text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all" title="Restore runs from a JSON backup">
               ⬆ Import
               <input type="file" accept="application/json,.json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) doImport(f); e.target.value = ''; }} />
@@ -495,6 +513,19 @@ function HistoryView({ onBack, onRestore, heavy, onCleanup }: {
         </div>
       </header>
       <main className="mx-auto max-w-7xl px-4 py-6">
+        {cloudOnly.length > 0 && (
+          <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-sky-500/30 bg-sky-500/5 p-3 text-xs text-sky-300/90">
+            <span>☁ {cloudOnly.length} run{cloudOnly.length === 1 ? ' is' : 's are'} only in the server backup (cleared from this device{cloud === null ? ' or offline' : ''}).</span>
+            <button onClick={() => restoreCloud(cloudOnly[0])} className="rounded-lg border border-sky-500/40 px-2.5 py-1 font-semibold text-sky-300 hover:bg-sky-500/10">
+              Restore “{cloudOnly[0].city} · {cloudOnly[0].category || 'All'}” ↗
+            </button>
+            {cloudOnly.length > 1 && (
+              <button onClick={() => cloudOnly.forEach(m => restoreCloud(m))} className="rounded-lg border border-sky-500/40 px-2.5 py-1 font-semibold text-sky-300 hover:bg-sky-500/10">
+                Restore all ({cloudOnly.length})
+              </button>
+            )}
+          </div>
+        )}
         {(heavy || stats.heavy) && (
           <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-400/90">
             <span>⚠ History is getting heavy ({stats.count} runs · {fmtKb(stats.bytes)} on this device) — old runs slow down saving. Consider cleaning up.</span>
@@ -1301,7 +1332,7 @@ export default function App() {
       const bizArr: [string, Business[]][] = Array.from(S.businesses.entries()).map(([k, arr]) => [k, arr]);
       const cnt = (pred: (b: Business) => boolean) => bizArr.reduce((s, [, arr]) => s + arr.filter(pred).length, 0);
       const tot = bizArr.reduce((s, [, arr]) => s + arr.length, 0);
-      saveRun({
+      const rec: RunRecord = {
         id: `${kind}-${S.city.name}-${(kind === 'analyze' ? selectedCategory : S.selectedOppCategory) || 'all'}-${Date.now()}`,
         kind, ts: Date.now(), version: APP_VERSION,
         city: { name: S.city.name, country: S.city.country, countryCode: S.city.countryCode, lat: S.city.lat, lon: S.city.lon, population: S.city.population, bbox: S.city.bbox },
@@ -1313,8 +1344,14 @@ export default function App() {
         aiInsights: S.aiInsights, aiAnalysis: S.aiAnalysis as unknown | null,
         scanAreaLabel: S.scanAreaLabel, rescanNote: S.rescanNote,
         stats: { bizCount: tot, anyContactPct: tot ? Math.round(100 * cnt(b => !!(b.phone || b.email || b.website)) / tot) : 0 },
-      });
+      };
+      saveRun(rec);
       setHistoryHeavy(historyStats().heavy);
+      // v6.9.91: mirror the record to the server archive (fire-and-forget;
+      // best-effort — offline or quota errors never affect the run).
+      void archiveRunToServer(rec as unknown as Parameters<typeof archiveRunToServer>[0]).then(ok => {
+        if (ok) { try { (window as unknown as { __boLastSync?: string }).__boLastSync = rec.id; } catch { /* noop */ } }
+      });
     } catch { /* history must never break the run */ }
   };
 
