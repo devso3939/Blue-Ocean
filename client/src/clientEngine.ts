@@ -1702,7 +1702,7 @@ function extractContactPair(tags: Record<string, string>, countryCode?: string):
 }
 
 // Directory/listing sites that should NEVER be set as a business website
-const DIRECTORY_SITES = /yelp\.com|tripadvisor|foursquare|booking\.com|expedia|yellowpages|justdial|zomato|opentable|flickr|pinterest|tumblr|reddit\.com|quora|wikipedia|youtube\.com|tiktok\.com|linkedin\.com|x\.com|snapchat|threads|medium\.com|substack|gh-pages|archive\.org|amazon\.com|ebay\.com|aliexpress|2gis\.com|yandex\.com|uber\.com|doordash|grubhub|seamless|glassdoor|indeed\.com|glassdoor|angieslist|homeadvisor|thumbtack|bbb\.org|trustpilot|sitejabber|clutch\.co|goodfirms|sortlist|brightlocal|moz\.com|semrush|ahrefs|similarweb/i;
+const DIRECTORY_SITES = /yelp\.com|tripadvisor|foursquare|booking\.com|expedia|yellowpages|justdial|zomato|opentable|flickr|pinterest|tumblr|reddit\.com|quora|wikipedia|youtube\.com|tiktok\.com|linkedin\.com|x\.com|snapchat|threads|medium\.com|substack|gh-pages|archive\.org|amazon\.com|ebay\.com|aliexpress|2gis\.com|yandex\.com|uber\.com|doordash|grubhub|seamless|glassdoor|indeed\.com|glassdoor|angieslist|homeadvisor|thumbtack|bbb\.org|trustpilot|sitejabber|clutch\.co|goodfirms|sortlist|brightlocal|moz\.com|semrush|ahrefs|similarweb|duckduckgo\.com|bing\.com|google\.[a-z.]+|ecosia\.org|startpage\.com|qwant\.com|brave\.com|mojeek\.com|schema\.org|w3\.org/i;
 // Q&A / knowledge / UGC platforms that look like domains but are never a business's own site
 const QA_JUNK_SITES = /baidu\.com|zhidao|baike\.com|answers\.com|ask\.com|brainly|stackexchange|stackoverflow|wikihow|quora|socratic|brainly\.[a-z.]+/i;
 // Auto-generated aggregator clone networks (e.g. salobiebia.restaurants-us.com, x.hotels-uk.com)
@@ -9016,6 +9016,27 @@ export function plausibleEmail(e: string): boolean {
   if (_EMAIL_PLATFORM_RE.test(domain)) return false;
   return true;
 }
+
+// v6.9.94: sanitize a restored RunRecord — records captured by older versions
+// may carry template-poison emails (info@schema.org) that predate the strict
+// validator. Any email failing plausibleEmail is dropped at restore time so
+// old data self-heals instead of re-poisoning the table.
+export function sanitizeRunRecord(r: RunLike): RunLike {
+  try {
+    for (const pair of r.businesses || []) {
+      const arr = pair?.[1];
+      if (!Array.isArray(arr)) continue;
+      for (const b of arr as Record<string, unknown>[]) {
+        if (b && typeof b.email === 'string' && b.email && !plausibleEmail(b.email)) b.email = '';
+        if (b && typeof b.phone === 'string' && b.phone && !plausiblePhone(b.phone)) b.phone = '';
+        // v6.9.94b: old captures may carry search-engine domains as websites
+        if (b && typeof b.website === 'string' && b.website && isLikelyBusinessWebsite(b.website, String(b.name || '')) === false && /duckduckgo\.com|bing\.com|google\.[a-z.]+|schema\.org/i.test(b.website)) b.website = '';
+      }
+    }
+  } catch { /* malformed record — return as-is */ }
+  return r;
+}
+export interface RunLike { businesses?: [string, unknown[]][]; [k: string]: unknown; }
 
 // ─── Test-only exports (corsFetch is module-scope; extractFromHtml is
 // published inside queryBusinesses, which owns its scope) ───

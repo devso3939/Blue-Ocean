@@ -35,6 +35,7 @@ import {
   type OverpassRouteEvent,
   onRenderHarvest, type RenderHarvestStats,
   fetchCoverageRecent, type CoverageHistoryRow,
+  sanitizeRunRecord,
 } from './clientEngine';
 import { saveRun, listRuns, deleteRuns, clearRuns, historyStats, importRuns, type RunRecord } from './runHistory';
 import { archiveRunToServer, listServerRuns, fetchServerRunPayload, type RunArchiveMeta } from './clientEngine';
@@ -1424,6 +1425,7 @@ export default function App() {
     fetchServerRunPayload(m.run_id).then(p => {
       if (!p) { setError('Could not fetch that run from the cloud backup.'); return; }
       const rec = p as unknown as RunRecord;
+      sanitizeRunRecord(rec as unknown as Parameters<typeof sanitizeRunRecord>[0]); // v6.9.94: self-heal old archived payloads
       try { saveRun(rec); } catch { /* quota — restore anyway */ }
       try {
         setSelectedCity({ name: rec.city.name, country: rec.city.country, countryCode: rec.city.countryCode, lat: rec.city.lat, lon: rec.city.lon, population: rec.city.population, populationSource: undefined, bbox: rec.city.bbox });
@@ -1838,6 +1840,7 @@ export default function App() {
         // Restore the exact post-run state: city, category, businesses,
         // opportunities, signals, AI, badges — then show the results view.
         try {
+          sanitizeRunRecord(r as unknown as Parameters<typeof sanitizeRunRecord>[0]); // v6.9.94: drop poison from old captures
           setSelectedCity({ name: r.city.name, country: r.city.country, countryCode: r.city.countryCode, lat: r.city.lat, lon: r.city.lon, population: r.city.population, populationSource: undefined, bbox: r.city.bbox });
           setBusinesses(new Map(r.businesses as [string, Business[]][]));
           setOpportunities(r.opportunities as OpportunityResult[]);
