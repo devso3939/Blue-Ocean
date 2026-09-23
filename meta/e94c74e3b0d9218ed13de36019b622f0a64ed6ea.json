@@ -1,0 +1,10 @@
+{
+  "url": "https://paul-bakeries.com/contact",
+  "ts": "2026-09-23T12:24:28Z",
+  "goto_error": "Page.goto: Timeout 45000ms exceeded.\nCall log:\n  - navigating to \"https://paul-bakeries.com/contact\", waiting until \"domcontentloaded\"\n",
+  "engine": "camoufox",
+  "challenged": false,
+  "bytes": 39,
+  "status": "done",
+  "finished_at": "2026-09-23T12:25:21Z"
+}
