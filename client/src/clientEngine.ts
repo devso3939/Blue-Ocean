@@ -5520,28 +5520,55 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
     // backup calls are throttled to one per second via a shared last-call
     // timestamp; failures are counted but never throw out of the batch.
     let _nominatimLastCall = 0;
+    // v6.9.99: Nominatim circuit breaker. Nominatim does NOT send CORS headers
+    // on error/rate-limit responses, and our custom User-Agent header forces a
+    // CORS preflight — when Nominatim throttles, every call dies at the preflight
+    // and the whole address pass stalls at ~1.1s/business for hundreds of
+    // businesses (observed: frozen at 120/550 for 7+ minutes). Now: (1) drop the
+    // UA header (Nominatim's usage policy is about identification, and the
+    // Referer/Origin already identifies us; without the custom header the fetch
+    // is a simple GET with no preflight), (2) after 5 consecutive preflight/net
+    // failures the geocoder is abandoned for the rest of the pass — addresses
+    // are cosmetic and must never stall contact enrichment.
+    let _nominatimFails = 0;
     const nominatimReverse = async (b: Business): Promise<boolean> => {
+      if (_nominatimFails >= 5) return false; // circuit open — skip silently
       const gap = Date.now() - _nominatimLastCall;
       if (gap < 1100) await wait(1100 - gap);
       _nominatimLastCall = Date.now();
       try {
-        const r = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=jsonv2&zoom=18&addressdetails=1`, {
-          headers: { 'User-Agent': 'BlueOcean/6.9 (address backup)' },
-          signal: AbortSignal.timeout(4000),
-        });
-        if (!r.ok) return false;
-        const d = await r.json();
+        const revUrl = `https://nominatim.openstreetmap.org/reverse?lat=${b.lat}&lon=${b.lon}&format=jsonv2&zoom=18&addressdetails=1`;
+        let d: any = null;
+        // Arm 1: direct simple GET (no preflight — browser CORS allows it when
+        // Nominatim serves 200 with its usual Access-Control-Allow-Origin)
+        try {
+          const r = await fetch(revUrl, { signal: AbortSignal.timeout(4000) });
+          if (r.ok) d = await r.json(); else _nominatimFails++;
+        } catch { _nominatimFails++; }
+        // Arm 2: server-side fetch lane — zero CORS restrictions, sees the
+        // real status even when Nominatim throttles the browser.
+        if (!d && _nominatimFails < 5) {
+          const srvRaw = await serverFetchRaw(revUrl, 10000);
+          if (srvRaw) { try { d = JSON.parse(srvRaw); } catch { d = null; } }
+        }
+        if (!d) return false;
         const a = d?.address || {};
         const parts = [a.road || a.pedestrian || a.footway, a.house_number, a.suburb || a.neighbourhood || a.city_district, a.city || a.town || a.village].filter(Boolean);
-        if (parts.length > 0) { b.address = parts.join(', '); return true; }
+        if (parts.length > 0) { b.address = parts.join(', '); _nominatimFails = 0; return true; }
         return false;
-      } catch { return false; }
+      } catch { _nominatimFails++; return false; }
     };
     // v6.9.41: category mode fills addresses for the whole category
     const maxEnrich = CATEGORY_MODE ? allBizList.length : Math.min(allBizList.length, 150);
     const CONCURRENCY = 5; // Photon allows more parallel requests
     for (let i = 0; i < maxEnrich; i += CONCURRENCY) {
       if (isCancelled()) break;
+      // v6.9.99: both geocoders dead → stop grinding no-op batches (was: 430
+      // × 1.1s of guaranteed-failure waits freezing the run at one percent).
+      if (_photonFails >= 3 && _nominatimFails >= 5) {
+        onProgress?.(75, 'Address geocoders offline — skipping cosmetic address fill');
+        break;
+      }
       const batch = allBizList.slice(i, i + CONCURRENCY);
       await Promise.allSettled(batch.map(async (b) => {
         if (b.address) return; // already has address
