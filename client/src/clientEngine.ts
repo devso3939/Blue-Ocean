@@ -5559,10 +5559,21 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       } catch { _nominatimFails++; return false; }
     };
     // v6.9.41: category mode fills addresses for the whole category
+    // v6.9.99b: hard wall-clock budget for the whole address phase (90s).
+    // Addresses are cosmetic — every second spent here delays contact
+    // enrichment, the thing users actually wait for. After 90s the phase
+    // ends regardless of how many businesses remain (they keep the OSM
+    // street/city data they already carry).
+    const _addrDeadline = Date.now() + 90_000;
     const maxEnrich = CATEGORY_MODE ? allBizList.length : Math.min(allBizList.length, 150);
     const CONCURRENCY = 5; // Photon allows more parallel requests
+    let _addrDone = 0; // businesses actually attempted
     for (let i = 0; i < maxEnrich; i += CONCURRENCY) {
       if (isCancelled()) break;
+      if (Date.now() > _addrDeadline) {
+        onProgress?.(75, `Address fill budget reached — ${_addrDone} addressed, continuing to contacts`);
+        break;
+      }
       // v6.9.99: both geocoders dead → stop grinding no-op batches (was: 430
       // × 1.1s of guaranteed-failure waits freezing the run at one percent).
       if (_photonFails >= 3 && _nominatimFails >= 5) {
@@ -5594,6 +5605,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           await nominatimReverse(b);
         }
       }));
+      _addrDone += batch.length;
       if (i + CONCURRENCY < maxEnrich && _photonFails < 3) await wait(500);
       onProgress?.(75, `Filling addresses… ${Math.min(i + CONCURRENCY, maxEnrich)}/${maxEnrich}${_photonFails >= 3 ? ' (Nominatim backup)' : ''}`);
       _ep.businessesProcessed = Math.min(i + CONCURRENCY, maxEnrich);
