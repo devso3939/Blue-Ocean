@@ -6582,7 +6582,13 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             break;
           }
         } else if (probeHosts.length > 0) {
-          // Domain probe arm — direct fetch, no search engine involved
+          // Domain probe arm — direct fetch, no search engine involved.
+          // v6.9.101c: measured on the real cohort (17/40 hit), but generic
+          // .com hits are usually UNRELATED global companies (boa.com,
+          // billy.com). Country-TLD hits (.ge/.am/.az…) are accepted on name
+          // match; .com hits must additionally mention the scan city in the
+          // page or title to count.
+          const cityConfirm = (getScanContext()?.cityEn || '').toLowerCase();
           for (const ph of probeHosts) {
             try {
               const pr = await corsFetch(ph, { signal: AbortSignal.timeout(4000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
@@ -6590,6 +6596,11 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               const phtml = await pr.text();
               if (isCfChallenge(phtml) || phtml.length < 500) continue;
               if (!isLikelyBusinessWebsite(ph, b.name, phtml.slice(0, 2000))) continue;
+              const isCountryTld = /\.(ge|am|az|ru|tr|ua|by|kz|md|ro|bg|gr|it|de|fr|es|pt|pl|cz|hu|at|ch|nl|be|dk|fi|no|se|ie|co\.uk)(\/|$)/i.test(ph);
+              if (!isCountryTld) {
+                const head = phtml.slice(0, 6000).toLowerCase();
+                if (!cityConfirm || !head.includes(cityConfirm)) continue;
+              }
               b.website = ph;
               wdEngine.found++;
               extractFromHtml(phtml, b);
