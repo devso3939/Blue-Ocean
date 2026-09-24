@@ -2471,18 +2471,24 @@ export function resetEngineHealth(): void { _engineHealth.clear(); resetBraveBud
 //   • Ladder businesses are capped at 2 Brave queries each, and the ladder
 //     is skipped entirely once the run budget is drained (Bing/DDG + the
 //     zero-cost domain probe still work budget-free).
-const BRAVE_RUN_BUDGET = 350;
-const _braveBudget = { used: 0, cache: new Map<string, Array<{ title: string; url: string; description: string }>>() };
+const BRAVE_RUN_BUDGET = 350;  // total per scan
+const BRAVE_WAVE_CAP = 120;    // per-business waves never exceed this — discovery
+                               // (Pass 5c, the highest-yield consumer) keeps its slice
+const _braveBudget = { used: 0, waveUsed: 0, cache: new Map<string, Array<{ title: string; url: string; description: string }>>() };
 
-/** Consume one unit of the per-scan Brave budget (or serve from cache). */
-async function braveBudgetedSearch(q: string): Promise<{ title: string; url: string; description: string }[] | null> {
+/** Consume one unit of the per-scan Brave budget (or serve from cache).
+ *  pool 'wave' = per-business enrichment reroutes; 'discovery' = Pass 5c +
+ *  retry ladder. The cache is shared, so a repeat query is always free. */
+async function braveBudgetedSearch(q: string, pool: 'wave' | 'discovery' = 'wave'): Promise<{ title: string; url: string; description: string }[] | null> {
   const norm = q.trim().toLowerCase().replace(/\s+/g, ' ');
   const cached = _braveBudget.cache.get(norm);
   if (cached) return cached;
   if (_braveBudget.used >= BRAVE_RUN_BUDGET) return null;
+  if (pool === 'wave' && _braveBudget.waveUsed >= BRAVE_WAVE_CAP) return null;
   const rs = await braveSearchViaSupabase(q);
   if (rs && rs.length > 0) {
     _braveBudget.used++;
+    if (pool === 'wave') _braveBudget.waveUsed++;
     _braveBudget.cache.set(norm, rs);
     return rs;
   }
@@ -2495,6 +2501,7 @@ export function braveBudgetRemaining(): number {
 
 export function resetBraveBudget(): void {
   _braveBudget.used = 0;
+  _braveBudget.waveUsed = 0;
   _braveBudget.cache.clear();
 }
 
@@ -6602,7 +6609,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           : (tldCity && tldCity !== 'us' ? ['https://' + nameSlug + '.' + tldCity + '/'] : []);
         let rs: Array<{ title: string; url: string; snippet?: string; description?: string }> = [];
         if (engineAvailable('brave_s')) {
-          try { rs = (await braveBudgetedSearch(decodeURIComponent(q))) || []; } catch { rs = []; }
+          try { rs = (await braveBudgetedSearch(decodeURIComponent(q), 'discovery')) || []; } catch { rs = []; }
         }
         if (rs.length === 0) { try { rs = await searchBing(q); } catch { rs = []; } }
         // v6.9.101d: the probe arm runs whenever b.website is still empty —
@@ -6950,7 +6957,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             try {
               if (eng === 'bing') rs = await searchBing(q);
               else if (eng === 'ddg') rs = await searchDDGHtml(q);
-              else if (eng === 'brave') rs = (await braveBudgetedSearch(q)) || [];
+              else if (eng === 'brave') rs = (await braveBudgetedSearch(q, 'discovery')) || [];
             } catch {}
             if (rs.length === 0) continue;
             for (const r of rs.slice(0, 4)) {
