@@ -6437,7 +6437,10 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   // Finds phones/websites for businesses that every other engine missed
   // (capped; the maps.google.com endpoint rate-limits per IP).
   const laneGooglePlaces = async () => {
-    const stillEmpty = allBizList.filter(b => !b.phone && !b.email && !b.website && !b.facebook);
+    // v6.9.100: previously required ALL fields empty (including socials), so
+    // a business with only a Facebook page (extremely common for small cafes)
+    // never got a Maps lookup — the one source that reliably carries its phone.
+    const stillEmpty = allBizList.filter(b => !b.phone && !b.email && !b.website);
     if (stillEmpty.length === 0) return;
     _ep.activePass = 'Pass 5: Google Places sweep'; _ep.passNumber = 5; bumpPercent(95);
     const gpEngine: EngineStatus = { name: 'Google Places', icon: '🗺️', status: 'active', found: 0 };
@@ -6514,6 +6517,64 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   // Wayback) crawled 30+ minutes on a 500-business category — the user saw a
   // frozen "198/198 · 100%" forever. The budget guarantees the scan ALWAYS
   // ends: when time is up, lanes stop early and everything found ships.
+  // ── Lane: WEBSITE DISCOVERY (v6.9.100) — pre-wave before the lanes ──
+  // Websites gate every later layer — no site → no deep crawl, no nav ladder,
+  // no contact chain, no MX guess. The phase-1 search arm caps its needy
+  // queue, so OSM businesses whose site never surfaced get one dedicated
+  // Bing sweep here. The strict isLikelyBusinessWebsite gate keeps
+  // directories/socials/aggregators out; when a site lands it is fetched
+  // immediately so the standard extractors cascade phone + email from it
+  // inside this same pass (and every later lane picks it up too).
+  const laneWebsiteDiscovery = async () => {
+    const needSite = allBizList.filter(b => !b.website && b.name);
+    if (needSite.length === 0) return;
+    _ep.activePass = 'Pass 5c: Website discovery'; _ep.passNumber = 5; bumpPercent(94);
+    const wdEngine: EngineStatus = { name: 'Site Finder', icon: '🔎', status: 'active', found: 0 };
+    _ep.engines.push(wdEngine); emitEP();
+    const maxWD = Math.min(needSite.length, CATEGORY_MODE ? 150 : 50);
+    const wdCity = getScanContext()?.cityEn || getScanContext()?.cityNative || '';
+    for (let iwd = 0; iwd < maxWD; iwd += _BATCH) {
+      if (isCancelled() || Date.now() >= wdDeadline) break;
+      const batchWD = needSite.slice(iwd, iwd + _BATCH);
+      await Promise.all(batchWD.map(async (b) => {
+        if (b.website) return;
+        const q = encodeURIComponent(`"${b.name}" ${wdCity}`.trim());
+        let rs: Array<{ title: string; url: string; snippet?: string; description?: string }> = [];
+        try { rs = await searchBing(q); } catch { return; }
+        for (const r of rs.slice(0, 5)) {
+          if (!r.url || !/^https?:\/\//i.test(r.url)) continue;
+          if (!isLikelyBusinessWebsite(r.url, b.name, (r.title || '') + ' ' + (r.snippet || r.description || ''))) continue;
+          b.website = r.url;
+          wdEngine.found++;
+          // cascade — site is fresh, pull contacts from it now
+          try {
+            const rr = await corsFetch(r.url, { signal: AbortSignal.timeout(6000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
+            if (rr.ok) {
+              const html = await rr.text();
+              if (!isCfChallenge(html) && html.length > 500) extractFromHtml(html, b);
+              else prefetchRenderDispatch(r.url);
+            }
+          } catch { /* site fetch failed — website kept, later lanes retry */ }
+          break;
+        }
+      }));
+      emitEP();
+      if (iwd + _BATCH < maxWD) await wait(800);
+    }
+    wdEngine.status = 'done'; emitEP();
+  };
+
+  // Pre-wave: discover missing websites FIRST so the regional lanes (2GIS,
+  // Places), deep-crawl and MX-guess all operate on a website-richer set.
+  onProgress?.(92, 'Finding missing websites…');
+  const WD_BUDGET_MS = CATEGORY_MODE ? 3 * 60_000 : 90_000;
+  const wdDeadline = Date.now() + WD_BUDGET_MS;
+  await Promise.race([
+    laneWebsiteDiscovery().catch(() => {}),
+    new Promise<void>(res => setTimeout(res, Math.max(1000, WD_BUDGET_MS))),
+  ]);
+  if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
+
   const LANE_BUDGET_MS = CATEGORY_MODE ? 8 * 60_000 : 3 * 60_000;
   const laneDeadline = Date.now() + LANE_BUDGET_MS;
   const laneStop = () => isCancelled() || Date.now() >= laneDeadline;
