@@ -6539,8 +6539,14 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       await Promise.all(batchWD.map(async (b) => {
         if (b.website) return;
         const q = encodeURIComponent(`"${b.name}" ${wdCity}`.trim());
+        // v6.9.101: Brave server lane FIRST — it doesn't touch Bing's query
+        // budget, so discovery no longer competes with snippet-dig and the
+        // retry ladder for the same engine. Bing stays as fallback for when
+        // the Brave pool is exhausted/rate-limited.
         let rs: Array<{ title: string; url: string; snippet?: string; description?: string }> = [];
-        try { rs = await searchBing(q); } catch { return; }
+        try { rs = (await braveSearchViaSupabase(decodeURIComponent(q))) || []; } catch { rs = []; }
+        if (rs.length === 0) { try { rs = await searchBing(q); } catch { return; } }
+        if (rs.length === 0) return;
         for (const r of rs.slice(0, 5)) {
           if (!r.url || !/^https?:\/\//i.test(r.url)) continue;
           if (!isLikelyBusinessWebsite(r.url, b.name, (r.title || '') + ' ' + (r.snippet || r.description || ''))) continue;
