@@ -2456,7 +2456,47 @@ export function getEngineHealthSnapshot(): EngineHealthEntry[] {
   return out;
 }
 
-export function resetEngineHealth(): void { _engineHealth.clear(); }
+export function resetEngineHealth(): void { _engineHealth.clear(); resetBraveBudget(); }
+
+// ─── v6.9.103: Brave query BUDGET — the pool is a shared monthly resource ──
+// A single Tbilisi run previously fired ~2,800 Brave queries (per-business
+// Phase-1 reroutes + email searches + Pass-5c discovery + a retry ladder
+// querying up to 3× per business). Two keys at 2,000/mo die in days. The
+// governor makes every server-Brave call ask permission first:
+//   • RUN_BUDGET hard-caps a whole scan at 350 queries (17% of a key's
+//     monthly quota — a full scan is no longer a quota bomb).
+//   • The retry ladder re-searches businesses that ALREADY had a Brave
+//     search, and their old results are discarded → 90%+ duplicate spend.
+//     A per-scan result cache keyed by normalized query makes those free.
+//   • Ladder businesses are capped at 2 Brave queries each, and the ladder
+//     is skipped entirely once the run budget is drained (Bing/DDG + the
+//     zero-cost domain probe still work budget-free).
+const BRAVE_RUN_BUDGET = 350;
+const _braveBudget = { used: 0, cache: new Map<string, Array<{ title: string; url: string; description: string }>>() };
+
+/** Consume one unit of the per-scan Brave budget (or serve from cache). */
+async function braveBudgetedSearch(q: string): Promise<{ title: string; url: string; description: string }[] | null> {
+  const norm = q.trim().toLowerCase().replace(/\s+/g, ' ');
+  const cached = _braveBudget.cache.get(norm);
+  if (cached) return cached;
+  if (_braveBudget.used >= BRAVE_RUN_BUDGET) return null;
+  const rs = await braveSearchViaSupabase(q);
+  if (rs && rs.length > 0) {
+    _braveBudget.used++;
+    _braveBudget.cache.set(norm, rs);
+    return rs;
+  }
+  return rs;
+}
+
+export function braveBudgetRemaining(): number {
+  return Math.max(0, BRAVE_RUN_BUDGET - _braveBudget.used);
+}
+
+export function resetBraveBudget(): void {
+  _braveBudget.used = 0;
+  _braveBudget.cache.clear();
+}
 
 // ─── v6.9.65: Per-arm profiling — measured yield-per-second per engine ──
 // The pass-1 batch fires 8 engine arms in parallel per business; arms that
@@ -5631,6 +5671,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       // quota entries survive the reset (sticky for the session by design)
     }
     _braveFails = 0; // surge guard resets with it
+    resetBraveBudget(); // v6.9.103: fresh scan → fresh per-scan Brave budget + result cache
   }
   {
     const probe = async (id: string, label: string, fn: () => Promise<Response>): Promise<void> => {
@@ -5975,15 +6016,15 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             }
             // v6.9.55: browser arm failed (rate limit / no key / network) →
             // reroute THIS business through the server-side Brave proxy —
-            // a separate quota pool (Vault key), so the lane keeps yielding.
-            const srv = await braveSearchViaSupabase(decodeURIComponent(q));
+            // v6.9.103: via the per-scan budget (cache + run cap).
+            const srv = await braveBudgetedSearch(decodeURIComponent(q));
             if (srv && srv.length > 0) { applyBraveResults(srv); return true; }
             return false;
           }, async () => {
             // v6.9.55: browser engine skipped (cooldown/quota from a previous
             // wave) → the server-side proxy keeps this business's Brave lane
             // alive instead of silently dropping it for the whole scan.
-            const srv = await braveSearchViaSupabase(decodeURIComponent(q));
+            const srv = await braveBudgetedSearch(decodeURIComponent(q));
             if (srv && srv.length > 0) applyBraveResults(srv);
           }),
           ]);
@@ -6046,7 +6087,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                 }
               }
               if (!engineAvailable('brave')) {
-                const srv = await braveSearchViaSupabase(decodeURIComponent(emailQ));
+                const srv = await braveBudgetedSearch(decodeURIComponent(emailQ));
                 if (srv) {
                   for (const res of srv) {
                     extractFromText((res.description || '') + ' ' + (res.title || ''), b);
@@ -6561,7 +6602,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           : (tldCity && tldCity !== 'us' ? ['https://' + nameSlug + '.' + tldCity + '/'] : []);
         let rs: Array<{ title: string; url: string; snippet?: string; description?: string }> = [];
         if (engineAvailable('brave_s')) {
-          try { rs = (await braveSearchViaSupabase(decodeURIComponent(q))) || []; } catch { rs = []; }
+          try { rs = (await braveBudgetedSearch(decodeURIComponent(q))) || []; } catch { rs = []; }
         }
         if (rs.length === 0) { try { rs = await searchBing(q); } catch { rs = []; } }
         // v6.9.101d: the probe arm runs whenever b.website is still empty —
@@ -6886,22 +6927,30 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         const engOrder = _retryEngineOrder();
         yieldTry('rsearch');
         let anyEngineHit = false;
+        let braveLadderQ = 0; // v6.9.103: ≤2 Brave queries for THIS business in the ladder
         for (const eng of engOrder) {
           if (isCancelled()) break;
           // In-ladder cutoff: ≥15 ladder attempts with ZERO gains → engine
           // is dead for this run; skip it instead of burning its timeout.
           if ((_rEngCalls[eng] || 0) >= 15 && (_rEngGains[eng] || 0) === 0) continue;
+          // v6.9.103: run budget drained — the zero-cost engines (Bing/DDG +
+          // the domain probe) keep working, Brave steps aside.
+          if (eng === 'brave' && braveBudgetRemaining() === 0) continue;
           _rEngCalls[eng] = (_rEngCalls[eng] || 0) + 1;
           const pre = { e: b.email, p: b.phone, w: b.website };
           // v6.9.81: Bing (the proven workhorse) gets the 4th query shape;
           // secondary engines keep 3 to bound wall time.
           for (const q of (eng === 'bing' ? rsearchQueries(b) : rsearchQueries(b).slice(0, 3))) {
             if (isCancelled()) break;
+            if (eng === 'brave') {
+              if (braveLadderQ >= 2) break; // v6.9.103: per-business Brave cap in the ladder
+              braveLadderQ++;
+            }
             let rs: Array<{ title: string; url: string; description?: string; snippet?: string }> = [];
             try {
               if (eng === 'bing') rs = await searchBing(q);
               else if (eng === 'ddg') rs = await searchDDGHtml(q);
-              else if (eng === 'brave') rs = (await braveSearchViaSupabase(q)) || [];
+              else if (eng === 'brave') rs = (await braveBudgetedSearch(q)) || [];
             } catch {}
             if (rs.length === 0) continue;
             for (const r of rs.slice(0, 4)) {
