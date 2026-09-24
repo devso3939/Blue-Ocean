@@ -2385,7 +2385,11 @@ export interface EngineHealthEntry {
 const _engineHealth = new Map<string, EngineHealthEntry>();
 const COOLDOWN_NET_MS = 45_000;      // transient failures: retry after 45s
 const COOLDOWN_CHALLENGE_MS = 90_000; // captcha/challenge pages: 90s
-const COOLDOWN_QUOTA_MS = 30 * 60_000; // quota exhausted: 30 min (per scan-life)
+// v6.9.101b: Brave free-tier monthly quota (http-402) does NOT recover in
+// 30 minutes — every retry inside a session burns one doomed RPC round-trip
+// (start+poll ≈ 4s) and silently falls back. Make quota sticky for the whole
+// session; the preflight health reset still clears it on a fresh scan.
+const COOLDOWN_QUOTA_MS = 6 * 60 * 60_000;
 
 // Quota / auth error fingerprints across providers (Brave, Serper, Tavily,
 // OpenRouter, proxies). Matched against status + response body snippets.
@@ -6543,25 +6547,55 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         // budget, so discovery no longer competes with snippet-dig and the
         // retry ladder for the same engine. Bing stays as fallback for when
         // the Brave pool is exhausted/rate-limited.
+        // v6.9.101b: three arms per business, first hit wins:
+        //   1. bare name+city on Brave (free of the Bing budget)
+        //   2. bare name+city on Bing (only when Brave is unavailable)
+        //   3. DOMAIN PROBE — the exact-match host ("shavi coffee" →
+        //      shavicoffee.ge/.com + name-token variants) fetched directly;
+        //      zero search-engine budget, catches the many businesses whose
+        //      site simply wasn't in any search index snippet.
+        const nameSlug = b.name.toLowerCase().replace(/[^a-z0-9\u10A0-\u10FF\u0530-\u058F]+/gi, '');
+        const tldCity = (getScanContext()?.countryCode || '').toLowerCase();
+        const probeHosts = nameSlug.length >= 3 && /^[a-z0-9]+$/.test(nameSlug)
+          ? ['https://' + nameSlug + '.ge/', 'https://www.' + nameSlug + '.ge/', 'https://' + nameSlug + '.com/']
+          : (tldCity && tldCity !== 'us' ? ['https://' + nameSlug + '.' + tldCity + '/'] : []);
         let rs: Array<{ title: string; url: string; snippet?: string; description?: string }> = [];
-        try { rs = (await braveSearchViaSupabase(decodeURIComponent(q))) || []; } catch { rs = []; }
-        if (rs.length === 0) { try { rs = await searchBing(q); } catch { return; } }
-        if (rs.length === 0) return;
-        for (const r of rs.slice(0, 5)) {
-          if (!r.url || !/^https?:\/\//i.test(r.url)) continue;
-          if (!isLikelyBusinessWebsite(r.url, b.name, (r.title || '') + ' ' + (r.snippet || r.description || ''))) continue;
-          b.website = r.url;
-          wdEngine.found++;
-          // cascade — site is fresh, pull contacts from it now
-          try {
-            const rr = await corsFetch(r.url, { signal: AbortSignal.timeout(6000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
-            if (rr.ok) {
-              const html = await rr.text();
-              if (!isCfChallenge(html) && html.length > 500) extractFromHtml(html, b);
-              else prefetchRenderDispatch(r.url);
-            }
-          } catch { /* site fetch failed — website kept, later lanes retry */ }
-          break;
+        if (engineAvailable('brave_s')) {
+          try { rs = (await braveSearchViaSupabase(decodeURIComponent(q))) || []; } catch { rs = []; }
+        }
+        if (rs.length === 0) { try { rs = await searchBing(q); } catch { rs = []; } }
+        if (rs.length > 0) {
+          for (const r of rs.slice(0, 5)) {
+            if (!r.url || !/^https?:\/\//i.test(r.url)) continue;
+            if (!isLikelyBusinessWebsite(r.url, b.name, (r.title || '') + ' ' + (r.snippet || r.description || ''))) continue;
+            b.website = r.url;
+            wdEngine.found++;
+            // cascade — site is fresh, pull contacts from it now
+            try {
+              const rr = await corsFetch(r.url, { signal: AbortSignal.timeout(6000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
+              if (rr.ok) {
+                const html = await rr.text();
+                if (!isCfChallenge(html) && html.length > 500) extractFromHtml(html, b);
+                else prefetchRenderDispatch(r.url);
+              }
+            } catch { /* site fetch failed — website kept, later lanes retry */ }
+            break;
+          }
+        } else if (probeHosts.length > 0) {
+          // Domain probe arm — direct fetch, no search engine involved
+          for (const ph of probeHosts) {
+            try {
+              const pr = await corsFetch(ph, { signal: AbortSignal.timeout(4000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
+              if (!pr.ok) continue;
+              const phtml = await pr.text();
+              if (isCfChallenge(phtml) || phtml.length < 500) continue;
+              if (!isLikelyBusinessWebsite(ph, b.name, phtml.slice(0, 2000))) continue;
+              b.website = ph;
+              wdEngine.found++;
+              extractFromHtml(phtml, b);
+              break;
+            } catch { /* next probe host */ }
+          }
         }
       }));
       emitEP();
