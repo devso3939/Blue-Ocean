@@ -4486,7 +4486,24 @@ function extractFromText(text: string, b: Business): boolean {
 
 // ─── Brave Search Enrichment ───────────────────────────────────
 // Bing Search (free scraping, no API key needed)
+// v6.9.106: shared cross-scan cache for the Bing lane (server table, 3-day
+// TTL). The retry ladder and Pass-5c discovery re-fire the same queries on
+// every rescan — each a fresh Bing fetch with block/challenge risk. A stored
+// result serves them for free; only non-empty results are cached (a challenge
+// page is not a cacheable answer).
 async function searchBing(query: string): Promise<{title: string; url: string; snippet: string}[]> {
+  try {
+    const hit = await supabaseRpc<{ results?: Array<{ title: string; url: string; snippet: string }> } | null>('rpc_lane_cache_get', { p_lane: 'bing', p_key: query }, 10000);
+    if (hit?.results && hit.results.length > 0) return hit.results;
+  } catch { /* cache unavailable — fetch live */ }
+  const rs = await searchBingRaw(query);
+  if (rs.length > 0) {
+    try { void supabaseRpc<string>('rpc_lane_cache_put', { p_lane: 'bing', p_key: query, p_results: rs }, 15000).catch(() => {}); } catch { /* best-effort */ }
+  }
+  return rs;
+}
+
+async function searchBingRaw(query: string): Promise<{title: string; url: string; snippet: string}[]> {
   try {
     const r = await corsFetch('https://www.bing.com/search?q=' + query + '&count=10', {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
@@ -4535,7 +4552,20 @@ async function searchBing(query: string): Promise<{title: string; url: string; s
 }
 
 // DuckDuckGo Lite search — different endpoint from html.duckduckgo.com, returns cleaner results
+// v6.9.106: shared cross-scan cache for the DDG-Lite lane (3-day TTL).
 async function searchDDGLite(query: string): Promise<{title: string; url: string; snippet: string}[]> {
+  try {
+    const hit = await supabaseRpc<{ results?: Array<{ title: string; url: string; snippet: string }> } | null>('rpc_lane_cache_get', { p_lane: 'ddg', p_key: query }, 10000);
+    if (hit?.results && hit.results.length > 0) return hit.results;
+  } catch { /* cache unavailable — fetch live */ }
+  const rs = await searchDDGLiteRaw(query);
+  if (rs.length > 0) {
+    try { void supabaseRpc<string>('rpc_lane_cache_put', { p_lane: 'ddg', p_key: query, p_results: rs }, 15000).catch(() => {}); } catch { /* best-effort */ }
+  }
+  return rs;
+}
+
+async function searchDDGLiteRaw(query: string): Promise<{title: string; url: string; snippet: string}[]> {
   // v6.9.4: engine-health gate — after repeated failures stop firing
   // DDG Lite per-business (each failed fetch prints a console error).
   if (!engineAvailable('ddglite')) return [];
@@ -4595,7 +4625,20 @@ async function searchDDGLite(query: string): Promise<{title: string; url: string
 // calls (129s) — the best efficiency of ANY engine (Bing 1/16s) — while
 // lite.duckduckgo (searchDDGLite) sat health-gated dead the whole pass. The
 // ladder's 'ddg' slot now uses this parser instead.
+// v6.9.106: shared cross-scan cache for the DDG-HTML lane (3-day TTL).
 async function searchDDGHtml(query: string): Promise<{ title: string; url: string; snippet: string }[]> {
+  try {
+    const hit = await supabaseRpc<{ results?: Array<{ title: string; url: string; snippet: string }> } | null>('rpc_lane_cache_get', { p_lane: 'ddg', p_key: query }, 10000);
+    if (hit?.results && hit.results.length > 0) return hit.results;
+  } catch { /* cache unavailable — fetch live */ }
+  const rs = await searchDDGHtmlRaw(query);
+  if (rs.length > 0) {
+    try { void supabaseRpc<string>('rpc_lane_cache_put', { p_lane: 'ddg', p_key: query, p_results: rs }, 15000).catch(() => {}); } catch { /* best-effort */ }
+  }
+  return rs;
+}
+
+async function searchDDGHtmlRaw(query: string): Promise<{ title: string; url: string; snippet: string }[]> {
   if (!engineAvailable('ddg')) return [];
   try {
     const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + query, {
@@ -5623,7 +5666,13 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         const d = await r.json();
         const a = d?.address || {};
         const parts = [a.road || a.pedestrian || a.footway, a.house_number, a.suburb || a.neighbourhood || a.city_district, a.city || a.town || a.village].filter(Boolean);
-        if (parts.length > 0) { b.address = parts.join(', '); _nominatimFails = 0; return true; }
+        if (parts.length > 0) {
+          b.address = parts.join(', ');
+          _nominatimFails = 0;
+          // v6.9.106: backfill the shared geocode cache for this coordinate.
+          try { void supabaseRpc<string>('rpc_lane_cache_put', { p_lane: 'geocode', p_key: `${b.lat.toFixed(5)},${b.lon.toFixed(5)}`, p_results: [{ address: b.address }] }, 12000).catch(() => {}); } catch { /* best-effort */ }
+          return true;
+        }
         return false;
       } catch { _nominatimFails++; return false; }
     };
@@ -5652,6 +5701,17 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
       const batch = allBizList.slice(i, i + CONCURRENCY);
       await Promise.allSettled(batch.map(async (b) => {
         if (b.address) return; // already has address
+        // v6.9.106: shared geocode cache (server table, 30-day TTL) — the same
+        // POI coordinates recur across scans of the same city and street
+        // addresses barely drift. A hit skips the throttled geocoder entirely,
+        // saving both the 1.1s pacing and the 90s address-phase budget.
+        const gk = `${b.lat.toFixed(5)},${b.lon.toFixed(5)}`;
+        let ghit: { results?: Array<{ address?: string }> } | null = null;
+        try {
+          ghit = await supabaseRpc<{ results?: Array<{ address?: string }> } | null>('rpc_lane_cache_get', { p_lane: 'geocode', p_key: gk }, 8000);
+        } catch { /* cache unavailable — geocode live */ }
+        const gaddr = ghit?.results?.[0]?.address;
+        if (typeof gaddr === 'string' && gaddr) { b.address = gaddr; return; }
         // v6.9.10: photon dead → v6.9.55: fall back to Nominatim instead of skipping
         if (_photonFails >= 3) { engineNoteFail('photon', 'Photon (addresses)', 'net', 'dead — using Nominatim backup'); await nominatimReverse(b); return; }
         try {
@@ -5664,6 +5724,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             if (f) {
               const parts = [f.name, f.housenumber, f.district || f.locality, f.city].filter(Boolean);
               b.address = parts.join(', ') || '';
+              if (b.address) { try { void supabaseRpc<string>('rpc_lane_cache_put', { p_lane: 'geocode', p_key: gk, p_results: [{ address: b.address }] }, 12000).catch(() => {}); } catch { /* best-effort */ } }
             }
           } else {
             _photonFails++;
