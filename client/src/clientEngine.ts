@@ -6564,6 +6564,9 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           try { rs = (await braveSearchViaSupabase(decodeURIComponent(q))) || []; } catch { rs = []; }
         }
         if (rs.length === 0) { try { rs = await searchBing(q); } catch { rs = []; } }
+        // v6.9.101d: the probe arm runs whenever b.website is still empty —
+        // search returning *results* but none passing the business-site filter
+        // was leaving the probe unexplored on the noisiest cohort.
         if (rs.length > 0) {
           for (const r of rs.slice(0, 5)) {
             if (!r.url || !/^https?:\/\//i.test(r.url)) continue;
@@ -6581,7 +6584,8 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             } catch { /* site fetch failed — website kept, later lanes retry */ }
             break;
           }
-        } else if (probeHosts.length > 0) {
+        }
+        if (!b.website && probeHosts.length > 0) {
           // Domain probe arm — direct fetch, no search engine involved.
           // v6.9.101c: measured on the real cohort (17/40 hit), but generic
           // .com hits are usually UNRELATED global companies (boa.com,
