@@ -433,6 +433,34 @@ function HistoryView({ onBack, onRestore, heavy, onCleanup }: {
   // storage eviction and can be restored to ANY device.
   const [cloud, setCloud] = useState<RunArchiveMeta[] | null>(null);
   useEffect(() => { let dead = false; listServerRuns(100).then(m => { if (!dead) setCloud(m); }).catch(() => { if (!dead) setCloud(null); }); return () => { dead = true; }; }, []);
+  // v6.9.104: auto-resurrect — if this browser profile has NO local history
+  // (fresh profile, cleared storage, another device) but the server archive
+  // has runs, pull the most recent 10 back into localStorage automatically.
+  // History must never start empty when a cloud backup exists; the rest of
+  // the cloud-only runs stay one click away in the banner below.
+  const autoHealed = useRef(false);
+  useEffect(() => {
+    if (autoHealed.current || runs.length > 0 || cloud === null || cloud.length === 0) return;
+    autoHealed.current = true;
+    let dead = false;
+    (async () => {
+      for (const m of cloud.slice(0, 10)) {
+        if (dead) break;
+        try {
+          const p = await fetchServerRunPayload(m.run_id);
+          if (!p || dead) continue;
+          const rec = sanitizeRunRecord(p as unknown as Parameters<typeof sanitizeRunRecord>[0]) as unknown as RunRecord;
+          if (!rec || typeof rec.id !== 'string' || !rec.city || !rec.stats) continue;
+          try { saveRun(rec); } catch { break; } // quota — stop pulling more
+        } catch { /* skip broken payload */ }
+      }
+      if (!dead) {
+        setRuns(listRuns()); setStats(historyStats());
+        listServerRuns(100).then(m2 => { if (!dead) setCloud(m2); }).catch(() => { /* keep listing */ });
+      }
+    })();
+    return () => { dead = true; };
+  }, [cloud]);
   const localIds = new Set(runs.map(r => r.id));
   const cloudOnly = (cloud || []).filter(m => !localIds.has(m.run_id));
   // v6.9.92: one-click full sync — push every local-only run to the server
