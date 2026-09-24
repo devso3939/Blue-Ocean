@@ -2478,11 +2478,28 @@ const _braveBudget = { used: 0, waveUsed: 0, cache: new Map<string, Array<{ titl
 
 /** Consume one unit of the per-scan Brave budget (or serve from cache).
  *  pool 'wave' = per-business enrichment reroutes; 'discovery' = Pass 5c +
- *  retry ladder. The cache is shared, so a repeat query is always free. */
+ *  retry ladder. Caches are checked in order: per-scan map → the shared
+ *  Supabase query cache (v6.9.105: zero-quota hits across scans/devices) →
+ *  a live pool search, which backfills both caches. */
 async function braveBudgetedSearch(q: string, pool: 'wave' | 'discovery' = 'wave'): Promise<{ title: string; url: string; description: string }[] | null> {
   const norm = q.trim().toLowerCase().replace(/\s+/g, ' ');
   const cached = _braveBudget.cache.get(norm);
   if (cached) return cached;
+  // v6.9.105: shared server-side cache — a query any device already ran
+  // (within 14 days) costs ZERO pool quota. A cache hit still counts toward
+  // the per-scan cap so one scan can't fire unbounded lookups.
+  type BraveCacheRow = { results?: Array<{ title: string; url: string; description: string }> };
+  let dbHit: BraveCacheRow | null = null;
+  try {
+    dbHit = await supabaseRpc<BraveCacheRow>('rpc_brave_cache_get', { p_q: q }, 10000);
+  } catch { /* cache unavailable — go live */ }
+  if (dbHit?.results && dbHit.results.length > 0) {
+    const rs = dbHit.results;
+    _braveBudget.cache.set(norm, rs);
+    _braveBudget.used++;
+    if (pool === 'wave') _braveBudget.waveUsed++;
+    return rs;
+  }
   if (_braveBudget.used >= BRAVE_RUN_BUDGET) return null;
   if (pool === 'wave' && _braveBudget.waveUsed >= BRAVE_WAVE_CAP) return null;
   const rs = await braveSearchViaSupabase(q);
@@ -2490,6 +2507,11 @@ async function braveBudgetedSearch(q: string, pool: 'wave' | 'discovery' = 'wave
     _braveBudget.used++;
     if (pool === 'wave') _braveBudget.waveUsed++;
     _braveBudget.cache.set(norm, rs);
+    // v6.9.105: backfill the shared cache (fire-and-forget; never blocks or
+    // fails the search). Next scan/device gets this query for free.
+    try {
+      void supabaseRpc<string>('rpc_brave_cache_put', { p_q: q, p_results: rs }, 15000).catch(() => {});
+    } catch { /* best-effort */ }
     return rs;
   }
   return rs;
@@ -8814,23 +8836,16 @@ export async function supplementProServices(
         .replace('{catNative}', catNative)
         .replace(/\{tld\}/g, tld);
       opts?.onProgress?.(`Searching the web for more ${getCategoryLabel(cat)} businesses…`);
-      try {
-        const start = await supabaseRpc<{ rid?: number; error?: string }>('rpc_brave_start', { p_query: q }, 15000);
-        if (!start?.rid) { if (start?.error) engineNoteFail('brave', 'Brave', 'net', `proxy: ${start.error}`); break; }
-        const rid = start.rid;
-        let data: any = null;
-        for (let i = 0; i < 10; i++) {
-          if (opts?.signal?.aborted) break;
-          if (i > 0) await abortableWait(1500);
-          const poll = await supabaseRpc<{ state: string; data?: any; error?: string }>('rpc_brave_poll', { p_rid: rid }, 15000);
-          if (!poll) break;
-          if (poll.state === 'done') { data = poll.data; break; }
-          if (poll.state === 'failed') { braveNoteFail('net', `proxy: ${poll.error || 'failed'}`); break; }
-        }
-        if (!data) continue;
-        const rawResults = (data.web?.results || []).length;
+      // v6.9.105: through the budget governor + shared query cache —
+      // supplement queries repeat for the same city/category across scans,
+      // so most of them are now zero-quota cache hits.
+      const srv = await braveBudgetedSearch(q, 'discovery');
+      if (!srv) break;                // budget drained or proxy error — stop
+      if (srv.length === 0) continue; // live search came back empty — next template
+      {
+        const rawResults = srv.length;
         rawTotal += rawResults;
-        for (const res of (data.web?.results || [])) {
+        for (const res of srv) {
           if (added >= 15) break;
           const url: string = res.url || '';
           if (!url || !/^https?:\/\//i.test(url)) { bump('bad-url'); continue; }
@@ -8895,7 +8910,7 @@ export async function supplementProServices(
           });
           added++;
         }
-      } catch { /* network fail — try next template */ }
+      } // end per-result loop (v6.9.105: budget/cache wrapper, no try/catch)
       await abortableWait(600);
     }
     if (added > 0) {
