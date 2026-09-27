@@ -2480,7 +2480,12 @@ const _braveBudget = { used: 0, waveUsed: 0, cache: new Map<string, Array<{ titl
  *  pool 'wave' = per-business enrichment reroutes; 'discovery' = Pass 5c +
  *  retry ladder. Caches are checked in order: per-scan map → the shared
  *  Supabase query cache (v6.9.105: zero-quota hits across scans/devices) →
- *  a live pool search, which backfills both caches. */
+ *  a live pool search, which backfills both caches.
+ *  v6.9.108 contract: null means ONLY "the per-scan budget is drained" —
+ *  callers may treat it as a stop signal. A live search that fails or comes
+ *  back empty resolves to [] (an ordinary no-yield engine answer), so a
+ *  transient proxy timeout or health-gated engine skips to the next query
+ *  instead of looking like a stop order. */
 async function braveBudgetedSearch(q: string, pool: 'wave' | 'discovery' = 'wave'): Promise<{ title: string; url: string; description: string }[] | null> {
   const norm = q.trim().toLowerCase().replace(/\s+/g, ' ');
   const cached = _braveBudget.cache.get(norm);
@@ -2502,17 +2507,17 @@ async function braveBudgetedSearch(q: string, pool: 'wave' | 'discovery' = 'wave
   }
   if (_braveBudget.used >= BRAVE_RUN_BUDGET) return null;
   if (pool === 'wave' && _braveBudget.waveUsed >= BRAVE_WAVE_CAP) return null;
-  const rs = await braveSearchViaSupabase(q);
-  if (rs && rs.length > 0) {
+  // v6.9.108: a live-search failure (proxy error/timeout → null from the
+  // lane) is a transient no-yield, not a budget signal — normalize to [].
+  const rs = (await braveSearchViaSupabase(q)) || [];
+  if (rs.length > 0) {
     _braveBudget.used++;
     if (pool === 'wave') _braveBudget.waveUsed++;
     _braveBudget.cache.set(norm, rs);
     // v6.9.105: backfill the shared cache (fire-and-forget; never blocks or
     // fails the search). Next scan/device gets this query for free.
-    try {
-      void supabaseRpc<string>('rpc_brave_cache_put', { p_q: q, p_results: rs }, 15000).catch(() => {});
-    } catch { /* best-effort */ }
-    return rs;
+    // supabaseRpc is async — it can't throw synchronously, so no try/catch.
+    void supabaseRpc<string>('rpc_brave_cache_put', { p_q: q, p_results: rs }, 15000).catch(() => {});
   }
   return rs;
 }
@@ -3540,21 +3545,14 @@ async function fetchOverpass(query: string, timeoutSec = 30, onWait?: (msg: stri
       // the dead-mirror window poisoned scans for 24h. An empty area re-scans
       // next time (cheap); a poisoned city poisons every metric for a day.
       if (data.elements?.length > 1 && serialized.length <= 2_000_000) {
-        try {
-          localStorage.setItem(CACHE_PREFIX + ck, serialized);
-        } catch {
-          // Quota exceeded — drop our oldest entries (cheap LRU) and retry once
-          try {
-            const ours = Object.keys(localStorage).filter(k => k.startsWith(CACHE_PREFIX));
-            ours.sort((a, b) => {
-              const ta = JSON.parse(localStorage.getItem(a) || '{"t":0}').t;
-              const tb = JSON.parse(localStorage.getItem(b) || '{"t":0}').t;
-              return ta - tb;
-            });
-            for (const k of ours.slice(0, Math.ceil(ours.length / 2))) localStorage.removeItem(k);
-            localStorage.setItem(CACHE_PREFIX + ck, serialized);
-          } catch { /* give up silently — cache is best-effort */ }
-        }
+        // v6.9.107: MUST go through cacheSet. This used to setItem the RAW
+        // payload while the read side uses cacheGet, which expects a {t,v}
+        // envelope — every Overpass cache READ saw t === undefined, self-
+        // evicted the entry and returned null, so the 24h cache could never
+        // hit and every repeat scan re-ran the whole Overpass phase (the
+        // most expensive part of a scan). cacheSet owns the envelope AND the
+        // quota LRU that was previously duplicated inline here.
+        cacheSet(ck, data);
       }
     } catch { /* stringify failed — skip caching */ }
     return data;
@@ -4485,22 +4483,37 @@ function extractFromText(text: string, b: Business): boolean {
 }
 
 // ─── Brave Search Enrichment ───────────────────────────────────
+// ─── v6.9.108: shared cross-scan cache wrapper for the search lanes ────
+// One helper for the v6.9.106 lane-cache protocol (get → miss → live fetch →
+// fire-and-forget put of non-empty results), previously copy-pasted across
+// the Bing / DDG-Lite / DDG-HTML wrappers and the geocode call sites.
+// Never throws: a cache outage degrades to a plain live fetch.
+async function cachedLane<T>(
+  lane: string,
+  key: string,
+  fetcher: () => Promise<T[]>,
+  opts?: { getTimeoutMs?: number; putTimeoutMs?: number },
+): Promise<T[]> {
+  try {
+    const hit = await supabaseRpc<{ results?: T[] } | null>('rpc_lane_cache_get', { p_lane: lane, p_key: key }, opts?.getTimeoutMs ?? 10000);
+    if (hit?.results && hit.results.length > 0) return hit.results;
+  } catch { /* cache unavailable — fetch live */ }
+  const rs = await fetcher();
+  if (rs.length > 0) {
+    void supabaseRpc<string>('rpc_lane_cache_put', { p_lane: lane, p_key: key, p_results: rs }, opts?.putTimeoutMs ?? 15000).catch(() => {});
+  }
+  return rs;
+}
+
 // Bing Search (free scraping, no API key needed)
 // v6.9.106: shared cross-scan cache for the Bing lane (server table, 3-day
 // TTL). The retry ladder and Pass-5c discovery re-fire the same queries on
 // every rescan — each a fresh Bing fetch with block/challenge risk. A stored
 // result serves them for free; only non-empty results are cached (a challenge
 // page is not a cacheable answer).
-async function searchBing(query: string): Promise<{title: string; url: string; snippet: string}[]> {
-  try {
-    const hit = await supabaseRpc<{ results?: Array<{ title: string; url: string; snippet: string }> } | null>('rpc_lane_cache_get', { p_lane: 'bing', p_key: query }, 10000);
-    if (hit?.results && hit.results.length > 0) return hit.results;
-  } catch { /* cache unavailable — fetch live */ }
-  const rs = await searchBingRaw(query);
-  if (rs.length > 0) {
-    try { void supabaseRpc<string>('rpc_lane_cache_put', { p_lane: 'bing', p_key: query, p_results: rs }, 15000).catch(() => {}); } catch { /* best-effort */ }
-  }
-  return rs;
+// v6.9.108: get/put through the shared cachedLane helper.
+function searchBing(query: string): Promise<{title: string; url: string; snippet: string}[]> {
+  return cachedLane('bing', query, () => searchBingRaw(query));
 }
 
 async function searchBingRaw(query: string): Promise<{title: string; url: string; snippet: string}[]> {
@@ -4553,16 +4566,10 @@ async function searchBingRaw(query: string): Promise<{title: string; url: string
 
 // DuckDuckGo Lite search — different endpoint from html.duckduckgo.com, returns cleaner results
 // v6.9.106: shared cross-scan cache for the DDG-Lite lane (3-day TTL).
-async function searchDDGLite(query: string): Promise<{title: string; url: string; snippet: string}[]> {
-  try {
-    const hit = await supabaseRpc<{ results?: Array<{ title: string; url: string; snippet: string }> } | null>('rpc_lane_cache_get', { p_lane: 'ddg', p_key: query }, 10000);
-    if (hit?.results && hit.results.length > 0) return hit.results;
-  } catch { /* cache unavailable — fetch live */ }
-  const rs = await searchDDGLiteRaw(query);
-  if (rs.length > 0) {
-    try { void supabaseRpc<string>('rpc_lane_cache_put', { p_lane: 'ddg', p_key: query, p_results: rs }, 15000).catch(() => {}); } catch { /* best-effort */ }
-  }
-  return rs;
+// v6.9.108: get/put through the shared cachedLane helper (same 'ddg' lane and
+// payload shape as searchDDGHtml — the two endpoints share one cache entry).
+function searchDDGLite(query: string): Promise<{title: string; url: string; snippet: string}[]> {
+  return cachedLane('ddg', query, () => searchDDGLiteRaw(query));
 }
 
 async function searchDDGLiteRaw(query: string): Promise<{title: string; url: string; snippet: string}[]> {
@@ -4626,16 +4633,9 @@ async function searchDDGLiteRaw(query: string): Promise<{title: string; url: str
 // lite.duckduckgo (searchDDGLite) sat health-gated dead the whole pass. The
 // ladder's 'ddg' slot now uses this parser instead.
 // v6.9.106: shared cross-scan cache for the DDG-HTML lane (3-day TTL).
-async function searchDDGHtml(query: string): Promise<{ title: string; url: string; snippet: string }[]> {
-  try {
-    const hit = await supabaseRpc<{ results?: Array<{ title: string; url: string; snippet: string }> } | null>('rpc_lane_cache_get', { p_lane: 'ddg', p_key: query }, 10000);
-    if (hit?.results && hit.results.length > 0) return hit.results;
-  } catch { /* cache unavailable — fetch live */ }
-  const rs = await searchDDGHtmlRaw(query);
-  if (rs.length > 0) {
-    try { void supabaseRpc<string>('rpc_lane_cache_put', { p_lane: 'ddg', p_key: query, p_results: rs }, 15000).catch(() => {}); } catch { /* best-effort */ }
-  }
-  return rs;
+// v6.9.108: get/put through the shared cachedLane helper.
+function searchDDGHtml(query: string): Promise<{ title: string; url: string; snippet: string }[]> {
+  return cachedLane('ddg', query, () => searchDDGHtmlRaw(query));
 }
 
 async function searchDDGHtmlRaw(query: string): Promise<{ title: string; url: string; snippet: string }[]> {
@@ -5669,8 +5669,10 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         if (parts.length > 0) {
           b.address = parts.join(', ');
           _nominatimFails = 0;
-          // v6.9.106: backfill the shared geocode cache for this coordinate.
-          try { void supabaseRpc<string>('rpc_lane_cache_put', { p_lane: 'geocode', p_key: `${b.lat.toFixed(5)},${b.lon.toFixed(5)}`, p_results: [{ address: b.address }] }, 12000).catch(() => {}); } catch { /* best-effort */ }
+          // v6.9.106: backfill the shared geocode cache for this coordinate
+          // (v6.9.108: put via the shared cachedLane helper — the get half of
+          // this lane lives in the batch loop below).
+          void cachedLane('geocode', `${b.lat.toFixed(5)},${b.lon.toFixed(5)}`, async () => [{ address: b.address }], { getTimeoutMs: 8000, putTimeoutMs: 12000 });
           return true;
         }
         return false;
@@ -5706,34 +5708,37 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         // addresses barely drift. A hit skips the throttled geocoder entirely,
         // saving both the 1.1s pacing and the 90s address-phase budget.
         const gk = `${b.lat.toFixed(5)},${b.lon.toFixed(5)}`;
-        let ghit: { results?: Array<{ address?: string }> } | null = null;
-        try {
-          ghit = await supabaseRpc<{ results?: Array<{ address?: string }> } | null>('rpc_lane_cache_get', { p_lane: 'geocode', p_key: gk }, 8000);
-        } catch { /* cache unavailable — geocode live */ }
-        const gaddr = ghit?.results?.[0]?.address;
-        if (typeof gaddr === 'string' && gaddr) { b.address = gaddr; return; }
-        // v6.9.10: photon dead → v6.9.55: fall back to Nominatim instead of skipping
-        if (_photonFails >= 3) { engineNoteFail('photon', 'Photon (addresses)', 'net', 'dead — using Nominatim backup'); await nominatimReverse(b); return; }
-        try {
-          const r = await fetch(`https://photon.komoot.io/reverse?lat=${b.lat}&lon=${b.lon}&lang=en`, {
-            signal: AbortSignal.timeout(3000),
-          });
-          if (r.ok) {
-            const d = await r.json();
-            const f = d.features?.[0]?.properties;
-            if (f) {
-              const parts = [f.name, f.housenumber, f.district || f.locality, f.city].filter(Boolean);
-              b.address = parts.join(', ') || '';
-              if (b.address) { try { void supabaseRpc<string>('rpc_lane_cache_put', { p_lane: 'geocode', p_key: gk, p_results: [{ address: b.address }] }, 12000).catch(() => {}); } catch { /* best-effort */ } }
+        // v6.9.108: get + put through the shared cachedLane helper — the
+        // fetcher keeps the photon → Nominatim fallback and returns the
+        // cacheable single-element payload.
+        const ghit = await cachedLane<{ address?: string }>('geocode', gk, async () => {
+          // v6.9.10: photon dead → v6.9.55: fall back to Nominatim instead of skipping
+          if (_photonFails >= 3) { engineNoteFail('photon', 'Photon (addresses)', 'net', 'dead — using Nominatim backup'); await nominatimReverse(b); return []; }
+          try {
+            const r = await fetch(`https://photon.komoot.io/reverse?lat=${b.lat}&lon=${b.lon}&lang=en`, {
+              signal: AbortSignal.timeout(3000),
+            });
+            if (r.ok) {
+              const d = await r.json();
+              const f = d.features?.[0]?.properties;
+              if (f) {
+                const parts = [f.name, f.housenumber, f.district || f.locality, f.city].filter(Boolean);
+                b.address = parts.join(', ') || '';
+                return b.address ? [{ address: b.address }] : [];
+              }
+              return [];
             }
-          } else {
             _photonFails++;
             await nominatimReverse(b);
+            return [];
+          } catch {
+            _photonFails++;
+            await nominatimReverse(b);
+            return [];
           }
-        } catch {
-          _photonFails++;
-          await nominatimReverse(b);
-        }
+        }, { getTimeoutMs: 8000, putTimeoutMs: 12000 });
+        const gaddr = ghit?.[0]?.address;
+        if (typeof gaddr === 'string' && gaddr) b.address = gaddr;
       }));
       _addrDone += batch.length;
       if (i + CONCURRENCY < maxEnrich && _photonFails < 3) await wait(500);
@@ -6692,7 +6697,12 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           : (tldCity && tldCity !== 'us' ? ['https://' + nameSlug + '.' + tldCity + '/'] : []);
         let rs: Array<{ title: string; url: string; snippet?: string; description?: string }> = [];
         if (engineAvailable('brave_s')) {
-          try { rs = (await braveBudgetedSearch(decodeURIComponent(q), 'discovery')) || []; } catch { rs = []; }
+          try {
+            // v6.9.108 contract: null = budget drained → leave rs empty and
+            // fall through to the Bing arm; [] = no yield, same thing.
+            const hit = await braveBudgetedSearch(decodeURIComponent(q), 'discovery');
+            if (hit) rs = hit;
+          } catch { rs = []; }
         }
         if (rs.length === 0) { try { rs = await searchBing(q); } catch { rs = []; } }
         // v6.9.101d: the probe arm runs whenever b.website is still empty —
@@ -7025,7 +7035,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           if ((_rEngCalls[eng] || 0) >= 15 && (_rEngGains[eng] || 0) === 0) continue;
           // v6.9.103: run budget drained — the zero-cost engines (Bing/DDG +
           // the domain probe) keep working, Brave steps aside.
-          if (eng === 'brave' && braveBudgetRemaining() === 0) continue;
+          if (eng === 'brave' && braveBudgetRemaining() <= 0) continue;
           _rEngCalls[eng] = (_rEngCalls[eng] || 0) + 1;
           const pre = { e: b.email, p: b.phone, w: b.website };
           // v6.9.81: Bing (the proven workhorse) gets the 4th query shape;
@@ -7040,7 +7050,13 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             try {
               if (eng === 'bing') rs = await searchBing(q);
               else if (eng === 'ddg') rs = await searchDDGHtml(q);
-              else if (eng === 'brave') rs = (await braveBudgetedSearch(q, 'discovery')) || [];
+              // v6.9.108 contract: null = run budget drained → stop this
+              // engine's query loop; [] = no yield → next query shape.
+              else if (eng === 'brave') {
+                const bhit = await braveBudgetedSearch(q, 'discovery');
+                if (bhit === null) break;
+                rs = bhit;
+              }
             } catch {}
             if (rs.length === 0) continue;
             for (const r of rs.slice(0, 4)) {
@@ -8900,78 +8916,80 @@ export async function supplementProServices(
       // v6.9.105: through the budget governor + shared query cache —
       // supplement queries repeat for the same city/category across scans,
       // so most of them are now zero-quota cache hits.
+      // v6.9.108 contract: null = the run budget drained → stop the category;
+      // [] = the live search failed transiently or came back empty — a poll
+      // timeout or a health-gated engine (common under load, see v6.9.55b)
+      // must only skip to the next template, not abandon the category the way
+      // v6.9.105's single `break` did.
       const srv = await braveBudgetedSearch(q, 'discovery');
-      if (!srv) break;                // budget drained or proxy error — stop
-      if (srv.length === 0) continue; // live search came back empty — next template
-      {
-        const rawResults = srv.length;
-        rawTotal += rawResults;
-        for (const res of srv) {
-          if (added >= 15) break;
-          const url: string = res.url || '';
-          if (!url || !/^https?:\/\//i.test(url)) { bump('bad-url'); continue; }
-          const host = (() => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } })();
-          if (!host) { bump('bad-url'); continue; }
-          if (SUPP_DIRECTORY_HOSTS.test(host) || SUPP_DIRECTORY_HOSTS2.test(host)) { bump('directory-host'); continue; }
-          if (SUPP_PROFESSION_PORTAL.test(host) || SUPP_INSTITUTIONAL.test(host)) { bump('registry-host'); continue; }
-          if (seenHosts.has(host)) { bump('duplicate'); continue; }
-          // v6.9.48c: small-city queries return mostly DIRECTORY pages
-          // (madloba.info/en/batumi/accounting…, taxravens.com/en/accountant/…).
-          // A real firm's site never carries the CITY in its path — reject
-          // those. (The country token alone is normal on country sites, so it
-          // is only used as a soft signal, not a hard drop.)
-          let path = '';
-          try { path = new URL(url).pathname.toLowerCase(); } catch { path = ''; }
-          const citySlug = (ctx?.cityEn || '').toLowerCase();
-          if (citySlug && path.includes(citySlug)) { bump('city-in-path'); continue; }
-          if (SUPP_DIRECTORY_PATHS.test(path)) { bump('registry-path'); continue; }
-          if (/\/(directory|listings?|catalog|catalogues?|companies|company-directory|firms?|agencies|business-directory|categories|category|browse|search|find|local|yellow[_-]?pages?|yp|legal-assistance|embassy)\//.test(path)) { bump('listing-path'); continue; }
-          const titleLc = (res.title || '').toLowerCase();
-          // Title must look like a firm, not a listing page: reject plural
-          // roundups, "top N", "list of", "companies in <city>".
-          if (/(\btop \d|\bbest \d|\blist of|\ddirectory|\bcompanies in\b|\bfirms in\b|\bagencies in\b|\bservices in\b)/i.test(titleLc)) { bump('generic-title'); continue; }
-          if (/\b(companies|firms|agencies|specialists|professionals)\b/i.test(titleLc) && !/\b(llc|ltd|inc|gmbh|group|partners|associates|studio|solutions)\b/i.test(titleLc)) { bump('plural-title'); continue; }
-          let name = suppExtractName(res.title || '', url);
-          // A long title is a page headline, not a brand → use the domain.
-          if (name.length > 40) name = suppBrandFromHost(host) || name.slice(0, 40);
-          if (!name || name.length < 3) { bump('no-name'); continue; }
-          if (seenNames.has(name.toLowerCase())) { bump('duplicate-name'); continue; }
-          // Approximate pin: deterministic per-domain hash → ±2km around the
-          // city center so pins are spread, stable across rescans, and not
-          // stacked on one spot.
-          let h = 0;
-          for (let i = 0; i < host.length; i++) h = (h * 31 + host.charCodeAt(i)) >>> 0;
-          const lat = cityLat + (((h >>> 8) % 400) - 200) / 100000; // ±0.002°
-          const lon = cityLon + ((h % 400) - 200) / 100000;
-          seenHosts.add(host);
-          seenNames.add(name.toLowerCase());
-          existing.push({
-            id: `supp/${cat}/${h.toString(36)}`,
-            name,
-            lat, lon,
-            category: cat,
-            categoryLabel: getCategoryLabel(cat),
-            address: `${ctx?.cityEn || ''} · found on the web${res.description ? '' : ''}`.trim(),
-            phone: '',
-            website: url,
-            email: '',
-            brand: '',
-            cuisine: '',
-            facebook: '',
-            instagram: '',
-            linkedin: '',
-            youtube: '',
-            tiktok: '',
-            rating: 0,
-            reviewCount: 0,
-            hours: '',
-            twitter: '',
-            pinterest: '',
-            supplemented: true,
-          });
-          added++;
-        }
-      } // end per-result loop (v6.9.105: budget/cache wrapper, no try/catch)
+      if (srv === null) break;
+      if (srv.length === 0) continue; // no yield — next template
+      rawTotal += srv.length;
+      for (const res of srv) {
+        if (added >= 15) break;
+        const url: string = res.url || '';
+        if (!url || !/^https?:\/\//i.test(url)) { bump('bad-url'); continue; }
+        const host = (() => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } })();
+        if (!host) { bump('bad-url'); continue; }
+        if (SUPP_DIRECTORY_HOSTS.test(host) || SUPP_DIRECTORY_HOSTS2.test(host)) { bump('directory-host'); continue; }
+        if (SUPP_PROFESSION_PORTAL.test(host) || SUPP_INSTITUTIONAL.test(host)) { bump('registry-host'); continue; }
+        if (seenHosts.has(host)) { bump('duplicate'); continue; }
+        // v6.9.48c: small-city queries return mostly DIRECTORY pages
+        // (madloba.info/en/batumi/accounting…, taxravens.com/en/accountant/…).
+        // A real firm's site never carries the CITY in its path — reject
+        // those. (The country token alone is normal on country sites, so it
+        // is only used as a soft signal, not a hard drop.)
+        let path = '';
+        try { path = new URL(url).pathname.toLowerCase(); } catch { path = ''; }
+        const citySlug = (ctx?.cityEn || '').toLowerCase();
+        if (citySlug && path.includes(citySlug)) { bump('city-in-path'); continue; }
+        if (SUPP_DIRECTORY_PATHS.test(path)) { bump('registry-path'); continue; }
+        if (/\/(directory|listings?|catalog|catalogues?|companies|company-directory|firms?|agencies|business-directory|categories|category|browse|search|find|local|yellow[_-]?pages?|yp|legal-assistance|embassy)\//.test(path)) { bump('listing-path'); continue; }
+        const titleLc = (res.title || '').toLowerCase();
+        // Title must look like a firm, not a listing page: reject plural
+        // roundups, "top N", "list of", "companies in <city>".
+        if (/(\btop \d|\bbest \d|\blist of|\ddirectory|\bcompanies in\b|\bfirms in\b|\bagencies in\b|\bservices in\b)/i.test(titleLc)) { bump('generic-title'); continue; }
+        if (/\b(companies|firms|agencies|specialists|professionals)\b/i.test(titleLc) && !/\b(llc|ltd|inc|gmbh|group|partners|associates|studio|solutions)\b/i.test(titleLc)) { bump('plural-title'); continue; }
+        let name = suppExtractName(res.title || '', url);
+        // A long title is a page headline, not a brand → use the domain.
+        if (name.length > 40) name = suppBrandFromHost(host) || name.slice(0, 40);
+        if (!name || name.length < 3) { bump('no-name'); continue; }
+        if (seenNames.has(name.toLowerCase())) { bump('duplicate-name'); continue; }
+        // Approximate pin: deterministic per-domain hash → ±2km around the
+        // city center so pins are spread, stable across rescans, and not
+        // stacked on one spot.
+        let h = 0;
+        for (let i = 0; i < host.length; i++) h = (h * 31 + host.charCodeAt(i)) >>> 0;
+        const lat = cityLat + (((h >>> 8) % 400) - 200) / 100000; // ±0.002°
+        const lon = cityLon + ((h % 400) - 200) / 100000;
+        seenHosts.add(host);
+        seenNames.add(name.toLowerCase());
+        existing.push({
+          id: `supp/${cat}/${h.toString(36)}`,
+          name,
+          lat, lon,
+          category: cat,
+          categoryLabel: getCategoryLabel(cat),
+          address: `${ctx?.cityEn || ''} · found on the web${res.description ? '' : ''}`.trim(),
+          phone: '',
+          website: url,
+          email: '',
+          brand: '',
+          cuisine: '',
+          facebook: '',
+          instagram: '',
+          linkedin: '',
+          youtube: '',
+          tiktok: '',
+          rating: 0,
+          reviewCount: 0,
+          hours: '',
+          twitter: '',
+          pinterest: '',
+          supplemented: true,
+        });
+        added++;
+      } // end per-result loop (v6.9.108: unwrap — the old cache/budget wrapper block is gone)
       await abortableWait(600);
     }
     if (added > 0) {
