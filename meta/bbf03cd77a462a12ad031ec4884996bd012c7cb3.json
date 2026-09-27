@@ -1,0 +1,10 @@
+{
+  "url": "https://www.magticom.ge/contact",
+  "ts": "2026-09-27T00:29:07Z",
+  "goto_error": "Page.goto: Timeout 45000ms exceeded.\nCall log:\n  - navigating to \"https://www.magticom.ge/contact\", waiting until \"domcontentloaded\"\n",
+  "engine": "camoufox",
+  "challenged": false,
+  "bytes": 3959,
+  "status": "done",
+  "finished_at": "2026-09-27T00:30:01Z"
+}
