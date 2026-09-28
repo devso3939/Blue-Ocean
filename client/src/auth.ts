@@ -97,11 +97,8 @@ function jwtClaims(token?: string): { sub?: string; email?: string } {
 
 export async function signUp(email: string, password: string): Promise<{ session: BoSession | null; needsConfirm: boolean; error?: string }> {
   try {
-    const r = await supabaseAuthFetch<AuthResponse>(`${SB_URL}/auth/v1/signup`, {
-      method: 'POST',
-      headers: { 'apikey': SB_ANON, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
-    });
+    // v6.9.112: confirmation links return the user to this exact page too.
+    const r = await postAuthEmail('signup', { email, password }) as AuthResponse;
     if (r.error_description || r.error || r.msg) return { session: null, needsConfirm: false, error: r.error_description || r.error || r.msg };
     const session = toSession(r);
     if (session) storeSession(session);
@@ -174,28 +171,35 @@ export async function getAccessToken(): Promise<string | null> {
 // ── v6.9.111: forgot password — request reset + set new password ──
 
 /**
+ * v6.9.112: POST an auth-email endpoint asking GoTrue to return the user to
+ * the exact page that made the request (email_redirect_to). When the project's
+ * redirect allow-list rejects the URL, retry without it — the email then uses
+ * the project's Site URL default (see backend/supabase/README.md, "Auth email
+ * redirects", for the dashboard allow-list this depends on).
+ */
+async function postAuthEmail(path: string, body: Record<string, unknown>): Promise<unknown> {
+  const post = (redirectTo?: string) => supabaseAuthFetch(`${SB_URL}/auth/v1/${path}`, {
+    method: 'POST',
+    headers: { 'apikey': SB_ANON, 'Content-Type': 'application/json' },
+    body: JSON.stringify(redirectTo ? { ...body, email_redirect_to: redirectTo } : body),
+  });
+  try {
+    return await post(location.origin + location.pathname);
+  } catch (e) {
+    if (/redirect/i.test(String((e as Error)?.message))) return await post();
+    throw e;
+  }
+}
+
+/**
  * Send a password-recovery email. Always succeeds from the UI's point of
  * view (GoTrue returns 200 even for unknown addresses — deliberately
  * identical so the endpoint can't be used to enumerate accounts), so the
  * caller shows a neutral "check your inbox" message either way.
  */
 export async function requestPasswordReset(email: string): Promise<{ sent: boolean; error?: string }> {
-  const post = (redirectTo?: string) => supabaseAuthFetch(`${SB_URL}/auth/v1/recover`, {
-    method: 'POST',
-    headers: { 'apikey': SB_ANON, 'Content-Type': 'application/json' },
-    body: JSON.stringify(redirectTo ? { email, email_redirect_to: redirectTo } : { email }),
-  });
   try {
-    // Ask GoTrue to return the user to the page that requested the reset.
-    // Projects with a redirect allow-list that excludes us still succeed —
-    // the email then uses the project's default (SITE_URL) redirect.
-    try {
-      await post(location.origin + location.pathname);
-    } catch (e) {
-      if (/redirect/i.test(String((e as Error)?.message))) await post();
-      else throw e;
-    }
-    // GoTrue answers 200 even for unknown addresses (no account enumeration).
+    await postAuthEmail('recover', { email });
     return { sent: true };
   } catch (e) {
     return { sent: false, error: String((e as Error)?.message || e).slice(0, 120) };

@@ -68,6 +68,42 @@ Seed data: `seed.py` (taxonomy + countries), `seed_peers.py` (99-city peer pool)
 - The publishable key in the browser can **submit jobs and read results** but
   cannot mutate reference data (RLS-enforced)
 
+## Auth email redirects (GoTrue allow-list)
+
+The client asks GoTrue to return the user to the **exact page** that triggered
+an auth email (`email_redirect_to = location.origin + location.pathname`) for:
+
+- password **recovery** links (`/auth/v1/recover`) — the app consumes the
+  landing (`#access_token=…&type=recovery`), swaps in a "set a new password"
+  form, and scrubs the hash from the address bar;
+- **signup confirmation** links (`/auth/v1/signup`) — so confirming lands the
+  user back in the app.
+
+GoTrue only honors `email_redirect_to` values that appear in the project's
+**Redirect URLs allow-list** (Dashboard → Authentication → URL Configuration →
+Redirect URLs). Anything else silently falls back to the **Site URL** default.
+
+**Current state (observed 2026-09-28):** the allow-list only contains
+`http://localhost:3199`, so a recovery link requested from the live site
+redirected to `http://localhost:3199/` — the bare Site URL root, ignoring the
+requested `https://devso3939.github.io/Blue-Ocean/` path. It still works
+(Site URL serves the SPA), but not on the exact page.
+
+**Required dashboard change** (manual, one-time — no Management API token in
+this repo):
+
+1. Supabase Dashboard → project `bfoagnqjkoqhogxvkvkw` →
+   **Authentication → URL Configuration → Redirect URLs**.
+2. **Add both** `https://devso3939.github.io/Blue-Ocean/` (exact) and
+   `https://devso3939.github.io/Blue-Ocean/*` (wildcard — covers the
+   query/fragment variants the client requests, e.g. `?recovery` landings).
+3. Optionally **remove** `http://localhost:3199` once the above is in place.
+4. **Save**, then verify: request a password reset from the live site and
+   check the emailed verify link ends with
+   `&redirect_to=https://devso3939.github.io/Blue-Ocean/`.
+
+The same list governs magic-link, invite, and (any future) OAuth redirects.
+
 ## Verified end-to-end (2026-09-09)
 
 - Tbilisi: 68 ranked opportunities, 5 live peers, 8 anomaly warnings
