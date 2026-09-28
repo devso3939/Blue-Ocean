@@ -15,6 +15,22 @@ export async function supabaseAuthFetch<T = unknown>(url: string, init: RequestI
   return body as T;
 }
 
+/**
+ * v6.9.111: detect a recovery-link landing. Supabase's implicit flow puts
+ * the grant in the URL fragment (never sent to a server):
+ *   #access_token=<jwt>&expires_in=…&refresh_token=<one-time>&token_type=bearer&type=recovery
+ * Returns the refresh_token when this is a recovery landing, else null.
+ */
+export function detectRecoveryToken(): string | null {
+  try {
+    if (!location.hash || location.hash.length < 8) return null;
+    const p = new URLSearchParams(location.hash.startsWith('#') ? location.hash.slice(1) : location.hash);
+    if (p.get('type') !== 'recovery') return null;
+    const rt = p.get('refresh_token');
+    return rt ? rt : null;
+  } catch { return null; }
+}
+
 /** Current stored access token (raw — callers refresh via getAccessToken()). */
 export function storedAccessToken(): string | null {
   try {

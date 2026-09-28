@@ -40,7 +40,8 @@ import {
 import { saveRun, listRuns, deleteRuns, clearRuns, historyStats, importRuns, type RunRecord } from './runHistory';
 import { archiveRunToServer, listServerRuns, fetchServerRunPayload, type RunArchiveMeta } from './clientEngine';
 import { getStoredSession, signUp, signIn, signOut, sessionExpired } from './auth'; // v6.9.110: user accounts
-import { refreshSession } from './auth';
+import type { BoSession } from './auth';
+import { refreshSession, consumeRecoveryLink, requestPasswordReset, updatePassword } from './auth'; // v6.9.111: password reset
 import { saveUserPrefs, loadUserPrefs } from './clientEngine';
 import CompareView from './CompareView';
 import CountryView from './CountryView';
@@ -778,11 +779,16 @@ export default function App() {
     return s && !sessionExpired() ? s : null;
   });
   const [authPanelOpen, setAuthPanelOpen] = useState(false);
-  const [authMode, setAuthMode] = useState<'in' | 'up'>('in');
+  const [authMode, setAuthMode] = useState<'in' | 'up' | 'reset'>('in');
   const [authEmail, setAuthEmail] = useState('');
   const [authPw, setAuthPw] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
   const [authMsg, setAuthMsg] = useState<{ kind: 'err' | 'ok'; text: string } | null>(null);
+  // v6.9.111: the recovery session from an email reset link flips the auth
+  // panel into the "set a new password" form.
+  const [recoverySession, setRecoverySession] = useState<BoSession | null>(null);
+  const [authPw2, setAuthPw2] = useState('');
+  const [changePwOpen, setChangePwOpen] = useState(false);
   // v6.9.88: History state — heavy-store banner + selected record for the detail view
   const [historyHeavy, setHistoryHeavy] = useState(false);
   const [restoredRun, setRestoredRun] = useState<RunRecord | null>(null);
@@ -908,9 +914,20 @@ export default function App() {
   // ── v6.9.110: session bootstrap + preferences sync ─────────────
   // Refresh an expired-but-stored session once on load; pull the user's
   // saved preferences and apply the country/category they last used.
+  // v6.9.111: a recovery-link landing (#access_token=…&type=recovery) is
+  // consumed first — it exchanges the one-time grant for a session and
+  // flips the auth panel into the "set a new password" form.
   useEffect(() => {
     let dead = false;
     (async () => {
+      if (await consumeRecoveryLink()) {
+        if (!dead) {
+          setRecoverySession(getStoredSession());
+          setAuthPanelOpen(true);
+          setAuthMode('in');
+        }
+        return;
+      }
       if (sessionExpired()) {
         const fresh = await refreshSession();
         if (!dead) setAuthSession(fresh);
@@ -933,6 +950,18 @@ export default function App() {
     setAuthBusy(true); setAuthMsg(null);
     const email = authEmail.trim().toLowerCase();
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { setAuthMsg({ kind: 'err', text: 'Enter a valid email address.' }); setAuthBusy(false); return; }
+    // v6.9.111: forgot-password — no password check on this branch.
+    if (authMode === 'reset') {
+      if (authPw.length > 0) { setAuthMsg({ kind: 'err', text: 'Leave the password field empty — use the link we email you to choose a new one.' }); setAuthBusy(false); return; }
+      const r = await requestPasswordReset(email);
+      if (r.error) setAuthMsg({ kind: 'err', text: `Could not send the reset email: ${r.error}` });
+      else {
+        setAuthMsg({ kind: 'ok', text: `If an account exists for ${email}, a reset link is on its way — check your inbox (and spam).` });
+        setAuthMode('in');
+      }
+      setAuthBusy(false);
+      return;
+    }
     if (authPw.length < 6) { setAuthMsg({ kind: 'err', text: 'Password must be at least 6 characters.' }); setAuthBusy(false); return; }
     if (authMode === 'up') {
       const r = await signUp(email, authPw);
@@ -943,6 +972,45 @@ export default function App() {
       const r = await signIn(email, authPw);
       if (r.error || !r.session) setAuthMsg({ kind: 'err', text: r.error || 'Sign-in failed.' });
       else { setAuthSession(r.session); setAuthPanelOpen(false); setAuthMsg(null); }
+    }
+    setAuthBusy(false);
+  };
+
+  // v6.9.111: set a new password from the recovery session.
+  const handleNewPasswordSubmit = async () => {
+    setAuthBusy(true); setAuthMsg(null);
+    if (authPw.length < 6) { setAuthMsg({ kind: 'err', text: 'Password must be at least 6 characters.' }); setAuthBusy(false); return; }
+    if (authPw2 !== authPw) { setAuthMsg({ kind: 'err', text: 'Passwords do not match.' }); setAuthBusy(false); return; }
+    const r = await updatePassword(authPw);
+    if (r.error || !r.session) {
+      setAuthMsg({ kind: 'err', text: r.error || 'Could not update the password.' });
+      setRecoverySession(null); // dead link — back to the standard panel
+    } else {
+      setAuthSession(r.session);
+      setRecoverySession(null);
+      setAuthPanelOpen(false);
+      setAuthPw(''); setAuthPw2('');
+      setAuthMsg(null);
+    }
+    setAuthBusy(false);
+  };
+
+  // v6.9.111: an authenticated user can change their password from the menu.
+  const handleChangePasswordSubmit = async () => {
+    setAuthBusy(true); setAuthMsg(null);
+    if (authPw.length < 6) { setAuthMsg({ kind: 'err', text: 'Password must be at least 6 characters.' }); setAuthBusy(false); return; }
+    if (authPw2 !== authPw) { setAuthMsg({ kind: 'err', text: 'Passwords do not match.' }); setAuthBusy(false); return; }
+    const r = await updatePassword(authPw);
+    if (r.error || !r.session) {
+      setAuthMsg({ kind: 'err', text: r.error || 'Could not update the password.' });
+      if (!r.session) { signOut(); setAuthSession(null); setChangePwOpen(false); }
+    } else {
+      // Success feedback lives INSIDE the open account menu — the sign-in
+      // panel is gated off while signed in, so it would never be seen.
+      setAuthSession(r.session);
+      setChangePwOpen(true);
+      setAuthPw(''); setAuthPw2('');
+      setAuthMsg({ kind: 'ok', text: '✅ Password updated — use it next time you sign in.' });
     }
     setAuthBusy(false);
   };
@@ -2078,11 +2146,11 @@ export default function App() {
               {/* v6.9.110: account — sign in / sign up / signed-in state */}
               {authSession ? (
                 <button
-                  onClick={() => { signOut(); setAuthSession(null); }}
-                  title={`Signed in as ${authSession.email} — click to sign out`}
+                  onClick={() => { setChangePwOpen(s => !s); setAuthMsg(null); setAuthPw(''); setAuthPw2(''); }}
+                  title={`Signed in as ${authSession.email} — click for account options (change password / sign out)`}
                   className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-emerald-500/40 text-emerald-400/90 hover:text-emerald-300 hover:border-emerald-500/60 transition-all max-w-[180px] truncate"
                 >
-                  👤 {authSession.email.split('@')[0]} · Sign out
+                  👤 {authSession.email.split('@')[0]} ▾
                 </button>
               ) : (
                 <button
@@ -2098,20 +2166,116 @@ export default function App() {
         </div>
       </header>
 
-      {/* ── v6.9.110: Sign in / Sign up panel ─────────────────────────── */}
-      {authPanelOpen && !authSession && (
+      {/* ── v6.9.111: signed-in menu — change password / sign out ── */}
+      {authSession && changePwOpen && (
+        <section className="mx-auto max-w-md px-4 pt-4">
+          <div className="rounded-xl border border-border bg-card/60 p-4">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-sm font-bold text-foreground">🔑 Change password</div>
+              <button onClick={() => setChangePwOpen(false)} className="text-xs text-muted-foreground hover:text-foreground">✕ close</button>
+            </div>
+            <p className="text-xs text-muted-foreground mb-3">Signed in as {authSession.email}.</p>
+            {authMsg && (
+              <div className={`mb-3 rounded-lg border px-3 py-2 text-xs ${authMsg.kind === 'err' ? 'border-red-500/30 bg-red-500/10 text-red-300' : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'}`}>
+                {authMsg.text}
+              </div>
+            )}
+            <div className="space-y-2">
+              <input
+                type="password"
+                value={authPw}
+                onChange={e => setAuthPw(e.target.value)}
+                placeholder="New password (6+ characters)"
+                autoComplete="new-password"
+                className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+              />
+              <input
+                type="password"
+                value={authPw2}
+                onChange={e => setAuthPw2(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') void handleChangePasswordSubmit(); }}
+                placeholder="Repeat new password"
+                autoComplete="new-password"
+                className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+              />
+              <button
+                onClick={() => void handleChangePasswordSubmit()}
+                disabled={authBusy}
+                className="h-10 w-full rounded-lg bg-gradient-to-r from-indigo-500 to-violet-500 text-sm font-semibold text-white shadow-lg hover:from-indigo-600 hover:to-violet-600 disabled:opacity-40 transition-all"
+              >
+                {authBusy ? '…' : 'Update password'}
+              </button>
+              <button
+                onClick={() => { signOut(); setAuthSession(null); setChangePwOpen(false); }}
+                className="h-9 w-full rounded-lg border border-border text-xs font-semibold text-muted-foreground hover:text-foreground transition-all"
+              >
+                Sign out
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* ── v6.9.111: set a new password (opened from the reset email) ── */}
+      {authPanelOpen && recoverySession && (
+        <section className="mx-auto max-w-md px-4 pt-4">
+          <div className="rounded-xl border border-border bg-card/60 p-4">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-sm font-bold text-foreground">🔒 Set a new password</div>
+              <button onClick={() => { setAuthPanelOpen(false); setRecoverySession(null); setAuthMsg(null); setAuthPw(''); setAuthPw2(''); }} className="text-xs text-muted-foreground hover:text-foreground">✕ close</button>
+            </div>
+            <p className="text-xs text-muted-foreground mb-3">Choose a new password for your account{recoverySession.email ? ` (${recoverySession.email})` : ''}.</p>
+            {authMsg && (
+              <div className={`mb-3 rounded-lg border px-3 py-2 text-xs ${authMsg.kind === 'err' ? 'border-red-500/30 bg-red-500/10 text-red-300' : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'}`}>
+                {authMsg.text}
+              </div>
+            )}
+            <div className="space-y-2">
+              <input
+                type="password"
+                value={authPw}
+                onChange={e => setAuthPw(e.target.value)}
+                placeholder="New password (6+ characters)"
+                autoComplete="new-password"
+                className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+              />
+              <input
+                type="password"
+                value={authPw2}
+                onChange={e => setAuthPw2(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') void handleNewPasswordSubmit(); }}
+                placeholder="Repeat new password"
+                autoComplete="new-password"
+                className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+              />
+              <button
+                onClick={() => void handleNewPasswordSubmit()}
+                disabled={authBusy}
+                className="h-10 w-full rounded-lg bg-gradient-to-r from-indigo-500 to-violet-500 text-sm font-semibold text-white shadow-lg hover:from-indigo-600 hover:to-violet-600 disabled:opacity-40 transition-all"
+              >
+                {authBusy ? '…' : 'Save new password'}
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* ── v6.9.110/111: Sign in / Sign up / Forgot password panel ──── */}
+      {authPanelOpen && !authSession && !recoverySession && (
         <section className="mx-auto max-w-md px-4 pt-4">
           <div className="rounded-xl border border-border bg-card/60 p-4">
             <div className="flex items-center justify-between mb-2">
               <div className="text-sm font-bold text-foreground">
-                {authMode === 'in' ? '👤 Sign in' : '✨ Create account'}
+                {authMode === 'in' ? '👤 Sign in' : authMode === 'up' ? '✨ Create account' : '🔑 Reset password'}
               </div>
               <button onClick={() => setAuthPanelOpen(false)} className="text-xs text-muted-foreground hover:text-foreground">✕ close</button>
             </div>
             <p className="text-xs text-muted-foreground mb-3">
               {authMode === 'in'
                 ? 'Your run history and preferences sync across devices while signed in.'
-                : 'One free account: your scans are backed up to the cloud and preferences follow you to any device.'}
+                : authMode === 'up'
+                ? 'One free account: your scans are backed up to the cloud and preferences follow you to any device.'
+                : 'Enter your email and we\u2019ll send you a link to choose a new password.'}
             </p>
             {authMsg && (
               <div className={`mb-3 rounded-lg border px-3 py-2 text-xs ${authMsg.kind === 'err' ? 'border-red-500/30 bg-red-500/10 text-red-300' : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'}`}>
@@ -2127,26 +2291,32 @@ export default function App() {
                 autoComplete="email"
                 className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
               />
-              <input
-                type="password"
-                value={authPw}
-                onChange={e => setAuthPw(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') void handleAuthSubmit(); }}
-                placeholder={authMode === 'up' ? 'Password (6+ characters)' : 'Password'}
-                autoComplete={authMode === 'up' ? 'new-password' : 'current-password'}
-                className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-              />
+              {authMode !== 'reset' && (
+                <input
+                  type="password"
+                  value={authPw}
+                  onChange={e => setAuthPw(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') void handleAuthSubmit(); }}
+                  placeholder={authMode === 'up' ? 'Password (6+ characters)' : 'Password'}
+                  autoComplete={authMode === 'up' ? 'new-password' : 'current-password'}
+                  className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                />
+              )}
               <button
                 onClick={() => void handleAuthSubmit()}
                 disabled={authBusy}
                 className="h-10 w-full rounded-lg bg-gradient-to-r from-indigo-500 to-violet-500 text-sm font-semibold text-white shadow-lg hover:from-indigo-600 hover:to-violet-600 disabled:opacity-40 transition-all"
               >
-                {authBusy ? '…' : authMode === 'in' ? 'Sign in' : 'Create account'}
+                {authBusy ? '…' : authMode === 'in' ? 'Sign in' : authMode === 'up' ? 'Create account' : 'Email me a reset link'}
               </button>
             </div>
             <div className="mt-3 text-center text-xs text-muted-foreground">
               {authMode === 'in' ? (
-                <>No account? <button onClick={() => { setAuthMode('up'); setAuthMsg(null); }} className="text-primary hover:underline">Sign up</button></>
+                <>
+                  No account? <button onClick={() => { setAuthMode('up'); setAuthMsg(null); }} className="text-primary hover:underline">Sign up</button>
+                  {' · '}
+                  <button onClick={() => { setAuthMode('reset'); setAuthMsg(null); setAuthPw(''); }} className="text-primary hover:underline">Forgot password?</button>
+                </>
               ) : (
                 <>Already registered? <button onClick={() => { setAuthMode('in'); setAuthMsg(null); }} className="text-primary hover:underline">Sign in</button></>
               )}
