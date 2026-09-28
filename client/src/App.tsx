@@ -40,8 +40,8 @@ import {
 import { saveRun, listRuns, deleteRuns, clearRuns, historyStats, importRuns, type RunRecord } from './runHistory';
 import { archiveRunToServer, listServerRuns, fetchServerRunPayload, type RunArchiveMeta } from './clientEngine';
 import { getStoredSession, signUp, signIn, signOut, sessionExpired } from './auth'; // v6.9.110: user accounts
-import type { BoSession } from './auth';
-import { refreshSession, consumeRecoveryLink, requestPasswordReset, updatePassword } from './auth'; // v6.9.111: password reset
+import type { BoSession, RedirectDiagnostics } from './auth';
+import { refreshSession, consumeRecoveryLink, requestPasswordReset, updatePassword, getRedirectDiagnostics, redirectAllows } from './auth'; // v6.9.111/113: password reset + diagnostics
 import { saveUserPrefs, loadUserPrefs } from './clientEngine';
 import CompareView from './CompareView';
 import CountryView from './CountryView';
@@ -894,6 +894,13 @@ export default function App() {
     } catch {}
     refreshBkStatus();
   }, [refreshBkStatus]);
+  // v6.9.113: auth redirect diagnostics (Settings panel) — makes the GoTrue
+  // allow-list problem visible in-app: what the client requests vs what the
+  // project is configured with, plus where the last recovery email landed.
+  const [redirectDiag, setRedirectDiag] = useState<RedirectDiagnostics | null>(null);
+  const refreshRedirectDiag = useCallback(() => {
+    void getRedirectDiagnostics().then(d => setRedirectDiag(d)).catch(() => {});
+  }, []);
 
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
@@ -2137,7 +2144,7 @@ export default function App() {
                 🕓 History{historyHeavy ? ' ⚠' : ''}
               </button>
               <button
-                onClick={() => { setShowSettings(s => !s); refreshBkStatus(); }}
+                onClick={() => { setShowSettings(s => !s); refreshBkStatus(); refreshRedirectDiag(); }}
                 title="Backup API keys & engine settings"
                 className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-border text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all"
               >
@@ -2378,6 +2385,71 @@ export default function App() {
               — when ALL keys for a provider are exhausted the engine banner shows
               <span className="text-red-300"> "backups exceeded"</span> and the scan continues on backup engines.
             </p>
+          </div>
+        </section>
+      )}
+
+      {/* ── v6.9.113: auth redirect diagnostics (Settings) ────────────── */}
+      {showSettings && redirectDiag && (
+        <section className="mx-auto max-w-3xl px-4 pt-4">
+          <div className="rounded-xl border border-border bg-card/60 p-4">
+            <div className="flex items-center justify-between mb-1">
+              <div className="text-sm font-bold text-foreground">🔐 Auth Redirect Diagnostics</div>
+              <button onClick={refreshRedirectDiag} className="text-xs text-muted-foreground hover:text-foreground">↻ re-check</button>
+            </div>
+            <p className="text-xs text-muted-foreground mb-3">
+              Password-reset and confirmation emails ask to return to the exact page below.
+              Supabase only honors that when the URL is allow-listed (Dashboard → Authentication → URL
+              Configuration) — otherwise links silently fall back to the Site URL.{' '}
+              <a className="underline hover:text-foreground" href="https://supabase.com/dashboard/project/_/auth/url-configuration" target="_blank" rel="noreferrer">Open dashboard</a>
+              {' · '}
+              <a className="underline hover:text-foreground" href="https://github.com/devso3939/Blue-Ocean/blob/main/backend/supabase/README.md" target="_blank" rel="noreferrer">README notes</a>
+            </p>
+            <div className="grid gap-2 text-xs">
+              <div className="flex flex-col gap-0.5 rounded-lg border border-border/60 px-3 py-2">
+                <span className="text-muted-foreground">Requested redirect (this page)</span>
+                <code className="break-all">{redirectDiag.requestedRedirect}</code>
+              </div>
+              <div className="flex flex-col gap-0.5 rounded-lg border border-border/60 px-3 py-2">
+                <span className="text-muted-foreground">Project Site URL (fallback target)</span>
+                <code className="break-all">{redirectDiag.siteUrl || 'unknown — could not read /auth/v1/settings'}</code>
+              </div>
+              <div className="flex flex-col gap-0.5 rounded-lg border border-border/60 px-3 py-2">
+                <span className="text-muted-foreground">Allow-listed redirect URLs</span>
+                {redirectDiag.allowListKnown ? (
+                  redirectDiag.allowList.length ? (
+                    <ul className="space-y-0.5">
+                      {redirectDiag.allowList.map(u => {
+                        const ok = redirectAllows(redirectDiag.requestedRedirect, u);
+                        return (
+                          <li key={u} className="break-all">
+                            <span className={ok ? 'text-emerald-400' : 'text-red-400'}>{ok ? '✓' : '✗'}</span>{' '}
+                            <code>{u}</code>
+                            {ok
+                              ? <span className="text-muted-foreground"> — matches this page</span>
+                              : <span className="text-muted-foreground"> — no match; emails fall back to the Site URL</span>}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  ) : <span className="text-red-400">empty — every auth email falls back to the Site URL</span>
+                ) : <span className="text-muted-foreground">unknown — /auth/v1/settings unreachable from this browser</span>}
+              </div>
+              <div className="flex flex-col gap-0.5 rounded-lg border border-border/60 px-3 py-2">
+                <span className="text-muted-foreground">Last recovery-email landing (this browser)</span>
+                {redirectDiag.lastLanding ? (
+                  <>
+                    <code className="break-all">{redirectDiag.lastLanding.url}</code>
+                    <span className={redirectDiag.landingMatchesRequest ? 'text-emerald-400' : 'text-amber-400'}>
+                      {new Date(redirectDiag.lastLanding.at).toLocaleString()} —{' '}
+                      {redirectDiag.landingMatchesRequest
+                        ? 'landed on the requested page (allow-list honored the request)'
+                        : 'landed on a different page than requested — the allow-list fell back to the Site URL'}
+                    </span>
+                  </>
+                ) : <span className="text-muted-foreground">none recorded yet</span>}
+              </div>
+            </div>
           </div>
         </section>
       )}

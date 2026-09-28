@@ -184,6 +184,7 @@ async function postAuthEmail(path: string, body: Record<string, unknown>): Promi
     body: JSON.stringify(redirectTo ? { ...body, email_redirect_to: redirectTo } : body),
   });
   try {
+    noteRedirectRequest(); // v6.9.113: remember for redirect diagnostics
     return await post(location.origin + location.pathname);
   } catch (e) {
     if (/redirect/i.test(String((e as Error)?.message))) return await post();
@@ -274,6 +275,100 @@ export async function consumeRecoveryLink(): Promise<boolean> {
     };
     if (!session.userId) return false;
     storeSession(session);
+    recordRecoveryLanding(); // v6.9.113: diagnostics saw the landing
     return true;
   } catch { return false; }
+}
+
+// ── v6.9.113: auth redirect diagnostics (Settings panel) ─────────────
+// Makes the GoTrue redirect allow-list problem visible in-app: what the
+// client requests, what the project is configured with, and where the last
+// recovery email ACTUALLY landed (the fallback is silent otherwise).
+
+const REDIRECT_REQ_KEY = 'bo_auth_redirect_req_v1';
+const REDIRECT_LANDING_KEY = 'bo_auth_redirect_landing_v1';
+
+export interface RedirectDiagnostics {
+  /** Exactly what the client asks GoTrue to honor (email_redirect_to). */
+  requestedRedirect: string;
+  /** Project Site URL (default link target), '' when the probe failed. */
+  siteUrl: string;
+  /** Project Redirect URLs allow-list, [] when the probe failed. */
+  allowList: string[];
+  /** false → the /auth/v1/settings probe failed (CORS/offline). */
+  allowListKnown: boolean;
+  /** Where the last recovery email landed, when seen by this browser. */
+  lastLanding: { at: number; url: string } | null;
+  /** null → no landing recorded; false → allow-list fell back to Site URL. */
+  landingMatchesRequest: boolean | null;
+}
+
+/** GoTrue-style allow-list match: exact, or glob via `*`. */
+export function redirectAllows(url: string, pattern: string): boolean {
+  if (url === pattern) return true;
+  if (!pattern.includes('*')) return false;
+  const re = new RegExp('^' + pattern.split('*').map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
+  return re.test(url);
+}
+
+function samePage(a: string, b: string): boolean {
+  try {
+    const ua = new URL(a), ub = new URL(b);
+    return ua.origin + ua.pathname === ub.origin + ub.pathname;
+  } catch { return a === b; }
+}
+
+/** Remember which page requested an auth email (called before the POST). */
+function noteRedirectRequest(): void {
+  try { localStorage.setItem(REDIRECT_REQ_KEY, location.origin + location.pathname); } catch { /* private mode */ }
+}
+
+/**
+ * Record where a recovery link actually landed. Call right after
+ * consumeRecoveryLink() returns true — the hash is already scrubbed by then,
+ * so the URL is reconstructed as origin+path+search (enough for allow-list
+ * matching). Falls back to the current page when no request was recorded
+ * in this browser (email opened on another device).
+ */
+export function recordRecoveryLanding(): void {
+  try {
+    const landing = location.origin + location.pathname + location.search;
+    const requested = localStorage.getItem(REDIRECT_REQ_KEY) || location.origin + location.pathname;
+    localStorage.setItem(REDIRECT_LANDING_KEY, JSON.stringify({ at: Date.now(), url: landing, requested }));
+  } catch { /* private mode */ }
+}
+
+async function fetchAuthConfig(): Promise<{ siteUrl: string; allowList: string[] } | null> {
+  try {
+    const r = await fetch(`${SB_URL}/auth/v1/settings`, { headers: { 'apikey': SB_ANON }, signal: AbortSignal.timeout(4000) });
+    if (!r.ok) return null;
+    const d: any = await r.json();
+    // The PUBLIC settings endpoint does not expose site_url/redirect_urls
+    // (admin-only). Only report data when the fields are actually present;
+    // otherwise the caller shows an honest "unknown" instead of a misleading
+    // "allow-list is empty".
+    const list = d?.external?.redirect_urls ?? d?.redirect_urls;
+    const siteUrl = d?.external?.site_url ?? d?.site_url;
+    const hasData = typeof siteUrl === 'string' || Array.isArray(list);
+    if (!hasData) return null;
+    return { siteUrl: typeof siteUrl === 'string' ? siteUrl : '', allowList: Array.isArray(list) ? list : [] };
+  } catch { return null; }
+}
+
+export async function getRedirectDiagnostics(): Promise<RedirectDiagnostics> {
+  const requested = (() => { try { return localStorage.getItem(REDIRECT_REQ_KEY) || location.origin + location.pathname; } catch { return location.origin + location.pathname; } })();
+  const cfg = await fetchAuthConfig();
+  let lastLanding: RedirectDiagnostics['lastLanding'] = null;
+  try {
+    const raw = localStorage.getItem(REDIRECT_LANDING_KEY);
+    if (raw) { const p = JSON.parse(raw); if (p?.url) lastLanding = { at: p.at, url: p.url }; }
+  } catch { /* ignore */ }
+  return {
+    requestedRedirect: requested,
+    siteUrl: cfg?.siteUrl ?? '',
+    allowList: cfg?.allowList ?? [],
+    allowListKnown: !!cfg,
+    lastLanding,
+    landingMatchesRequest: lastLanding ? samePage(lastLanding.url, requested) : null,
+  };
 }
