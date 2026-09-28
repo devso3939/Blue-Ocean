@@ -2436,6 +2436,14 @@ export default function App() {
                 ) : <span className="text-muted-foreground">unknown — /auth/v1/settings unreachable from this browser</span>}
               </div>
               <div className="flex flex-col gap-0.5 rounded-lg border border-border/60 px-3 py-2">
+                <span className="text-muted-foreground">Live probe — does GoTrue honor this page's URL right now?</span>
+                <span className={redirectDiag.probeVerdict === 'honored' ? 'text-emerald-400' : redirectDiag.probeVerdict === 'not-honored' ? 'text-red-400' : 'text-muted-foreground'}>
+                  {redirectDiag.probeVerdict === 'honored' ? '✓' : redirectDiag.probeVerdict === 'not-honored' ? '✗' : '·'}{' '}
+                  {redirectDiag.probeVerdict === 'honored' ? 'HONORED' : redirectDiag.probeVerdict === 'not-honored' ? 'NOT HONORED' : 'UNKNOWN'}
+                  {' — '}{redirectDiag.probeDetail}
+                </span>
+              </div>
+              <div className="flex flex-col gap-0.5 rounded-lg border border-border/60 px-3 py-2">
                 <span className="text-muted-foreground">Last recovery-email landing (this browser)</span>
                 {redirectDiag.lastLanding ? (
                   <>

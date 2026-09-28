@@ -301,6 +301,9 @@ export interface RedirectDiagnostics {
   lastLanding: { at: number; url: string } | null;
   /** null → no landing recorded; false → allow-list fell back to Site URL. */
   landingMatchesRequest: boolean | null;
+  /** Live server-side probe of the allow-list (migration 020 RPC). */
+  probeVerdict: 'honored' | 'not-honored' | 'unknown';
+  probeDetail: string;
 }
 
 /** GoTrue-style allow-list match: exact, or glob via `*`. */
@@ -355,6 +358,61 @@ async function fetchAuthConfig(): Promise<{ siteUrl: string; allowList: string[]
   } catch { return null; }
 }
 
+/**
+ * v6.9.114: live allow-list probe via the migration-020 RPC. GoTrue answers
+ * the verify endpoint with a 302 to the honored URL (or the Site URL when
+ * rejected); the server-side pg_net follower reports where it landed.
+ *   honored candidate  → 'followed' (final page fetched)
+ *   rejected candidate → 'follow-failed' (Site URL typically unreachable)
+ * A baseline probe of a never-allow-listed URL shares the rejected
+ * signature, so channel trouble (both arms 'timeout') reads as unknown.
+ * The two probes run SEQUENTIALLY — burst submissions to one host made
+ * pg_net fail every parallel connection ("Couldn't connect to server").
+ */
+async function probeOnce(candidate: string): Promise<{ result: string; detail?: string; status?: string } | null> {
+  try {
+    const start = await supabaseAuthFetch<{ rids?: (number | null)[]; error?: string }>(
+      `${SB_URL}/rest/v1/rpc/rpc_auth_redirect_probe_start`, {
+        method: 'POST',
+        headers: { 'apikey': SB_ANON, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ p_candidates: [candidate] }),
+      });
+    const rid = start?.rids?.[0];
+    if (!rid) return { result: 'submit-failed', detail: start?.error };
+    await new Promise(r => setTimeout(r, 2200)); // pg_net worker round-trip
+    const poll = await supabaseAuthFetch<{ responses?: Record<string, { result: string; detail?: string; status?: string }> }>(
+      `${SB_URL}/rest/v1/rpc/rpc_auth_redirect_probe_poll`, {
+        method: 'POST',
+        headers: { 'apikey': SB_ANON, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ p_rids: [rid] }),
+      });
+    return poll?.responses?.[`_${rid}`] ?? { result: 'no-response' };
+  } catch (e) {
+    return { result: 'rpc-error', detail: String((e as Error)?.message || e).slice(0, 80) };
+  }
+}
+
+async function probeAllowList(requested: string): Promise<{ verdict: RedirectDiagnostics['probeVerdict']; detail: string }> {
+  const baseline = await probeOnce('https://allowlist-probe.invalid/');
+  const page = await probeOnce(requested);
+  if (!page || page.result === 'timeout' || page.result === 'submit-failed' || page.result === 'rpc-error') {
+    return { verdict: 'unknown', detail: `probe unavailable (${page?.result || 'no response'})` };
+  }
+  if (page.result === 'followed') {
+    return { verdict: 'honored', detail: `GoTrue accepted this URL (followed to a ${page.status || '?'} response)` };
+  }
+  // follow-failed: rejected, or honored-but-target-unreachable. The baseline
+  // (always rejected) shows the same signature — a matching baseline confirms
+  // the probe channel itself works and the page URL was genuinely not honored.
+  const rejected = baseline?.result === 'follow-failed';
+  return {
+    verdict: rejected ? 'not-honored' : 'unknown',
+    detail: rejected
+      ? `GoTrue did NOT accept this URL (redirect fell back to the Site URL: ${page.detail || 'unreachable'})`
+      : `inconclusive (${page.detail || page.result})`,
+  };
+}
+
 export async function getRedirectDiagnostics(): Promise<RedirectDiagnostics> {
   const requested = (() => { try { return localStorage.getItem(REDIRECT_REQ_KEY) || location.origin + location.pathname; } catch { return location.origin + location.pathname; } })();
   const cfg = await fetchAuthConfig();
@@ -363,6 +421,7 @@ export async function getRedirectDiagnostics(): Promise<RedirectDiagnostics> {
     const raw = localStorage.getItem(REDIRECT_LANDING_KEY);
     if (raw) { const p = JSON.parse(raw); if (p?.url) lastLanding = { at: p.at, url: p.url }; }
   } catch { /* ignore */ }
+  const probe = await probeAllowList(requested);
   return {
     requestedRedirect: requested,
     siteUrl: cfg?.siteUrl ?? '',
@@ -370,5 +429,7 @@ export async function getRedirectDiagnostics(): Promise<RedirectDiagnostics> {
     allowListKnown: !!cfg,
     lastLanding,
     landingMatchesRequest: lastLanding ? samePage(lastLanding.url, requested) : null,
+    probeVerdict: probe.verdict,
+    probeDetail: probe.detail,
   };
 }
