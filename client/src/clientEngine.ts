@@ -331,7 +331,14 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
               const known = new Set([b.phone, b.email, b.address, ...b.branches.flatMap(x => [x.phone, x.email, x.address])]);
               const novel = [bPhone, bEmail, bAddr].filter(v => v && !known.has(v));
               if (novel.length > 0 && b.branches.length < 12) {
-                b.branches.push({ url, title, phone: bPhone, email: bEmail, address: bAddr });
+                // v6.9.109: store an ABSOLUTE url — relative hrefs ('/contact')
+                // used to reach the biz panel where `new URL(br.url)` threw and
+                // crashed the whole app into the ErrorBoundary screen.
+                let absUrl = url;
+                if (!/^https?:\/\//i.test(absUrl) && b.website) {
+                  try { absUrl = new URL(absUrl, b.website).toString(); } catch { /* keep raw — panel display is guarded too */ }
+                }
+                b.branches.push({ url: absUrl, title, phone: bPhone, email: bEmail, address: bAddr });
               }
             }
           }
@@ -659,16 +666,110 @@ function settlementKind(r: any): string | null {
   return null;
 }
 
+// Normalizes a free-text city query into a stable cache-key suffix.
+function normCityKey(q: string): string {
+  return q.trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 120);
+}
+
+// Resolves with the FIRST promise that yields a non-empty value; resolves
+// null only when every promise has yielded null/failed. Losers keep running
+// in the background and their results are discarded.
+function firstNonNull<T>(ps: Array<Promise<T | null>>): Promise<T | null> {
+  return new Promise(resolve => {
+    let pending = ps.length;
+    for (const p of ps) {
+      p.then(v => {
+        if (v) resolve(v);
+        else if (--pending === 0) resolve(null);
+      }, () => {
+        if (--pending === 0) resolve(null);
+      });
+    }
+  });
+}
+
 export async function resolveCity(query: string): Promise<CityResult[]> {
+  // v6.9.109: localStorage cache first — repeated queries (typo corrections,
+  // backspacing, returning users) must not re-hit Nominatim at all. The
+  // proxy path below can take 30-40s before its fallback fires, so anything
+  // that avoids it entirely is the single biggest perceived-speed win.
+  try {
+    const cached = cacheGet<CityResult[]>('cityq_' + normCityKey(query), 7 * DAY_MS);
+    if (cached?.length) return cached;
+  } catch { /* cache unavailable — search live */ }
   const params = { q: query, format: 'json', addressdetails: '1', limit: '8', extratags: '1', 'accept-language': 'en' };
-  // v6.9.32: server proxy first (Nominatim rate-limits aggressive browser
-  // IPs — the recurring "can't find city" bug); direct fetch as fallback.
-  const proxied = await nominatimViaProxy('search', params);
-  if (proxied && Array.isArray(proxied) && proxied.length) {
+  // v6.9.109: THREE arms race CONCURRENTLY — first non-empty answer wins,
+  // hard-capped at 12s overall. Previously the proxy ran first and could
+  // hold the dropdown hostage for ~40s (15s start + 12×1.5s polls) before
+  // the direct fallback fired; and when Nominatim 429s the browser IP, the
+  // direct retry loop added another ~26s. Arms:
+  //   1. Photon (CORS-native, no key, lenient limits) — usually fastest;
+  //      population comes from the non-blocking backfill below.
+  //   2. direct Nominatim GET (2 attempts × 5s).
+  //   3. server Nominatim proxy (8s race cap).
+  const photonArm = (async (): Promise<CityResult[] | null> => {
+    try {
+      const r = await fetch('https://photon.komoot.io/api/?q=' + encodeURIComponent(query) + '&limit=8&lang=en', { signal: AbortSignal.timeout(4000) });
+      if (!r.ok) return null;
+      const d = await r.json();
+      const feats: any[] = (d?.features || []).filter((f: any) => f?.properties?.name);
+      if (!feats.length) return null;
+      const settled = feats.filter((f: any) => ['city', 'town', 'village', 'municipality'].includes(f?.properties?.osm_value));
+      const usable = settled.length ? settled : feats;
+      const rank: Record<string, number> = { city: 0, municipality: 1, town: 2, village: 3 };
+      usable.sort((a: any, b: any) => (rank[a?.properties?.osm_value] ?? 9) - (rank[b?.properties?.osm_value] ?? 9));
+      return usable.slice(0, 8).map((f: any) => {
+        const [lon, lat] = f.geometry?.coordinates || [0, 0];
+        const p = f.properties || {};
+        // Photon extent = [minLon, maxLat, maxLon, minLat] → CityResult bbox
+        // order is [south, west, north, east].
+        const e = p.extent;
+        const bbox: [number, number, number, number] = Array.isArray(e) && e.length === 4 ? [e[3], e[0], e[1], e[2]] : [lat - 0.05, lon - 0.05, lat + 0.05, lon + 0.05];
+        return {
+          name: p.name,
+          country: p.country || '',
+          countryCode: (p.countrycode || '').toUpperCase(),
+          lat, lon,
+          population: null,
+          populationSource: undefined,
+          bbox,
+        } as CityResult;
+      });
+    } catch { return null; }
+  })();
+  const directArm = (async (): Promise<CityResult[] | null> => {
+    const directUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&addressdetails=1&limit=8&extratags=1&accept-language=en`;
+    // v6.9.109: tightened retry loop — 2 attempts × 5s + 1s backoff keeps
+    // the worst case ≈11s instead of the old 3 × 8s + 1.5s/3s ≈ 26s.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await directFetch(directUrl, { headers: { 'Accept': 'en-US,en;q=0.9' }, signal: AbortSignal.timeout(5000) });
+        if (res.status === 429) { await new Promise(r => setTimeout(r, 1000 * (attempt + 1))); continue; }
+        if (!res.ok) return null;
+        const data = await res.json();
+        return Array.isArray(data) && data.length ? data : null;
+      } catch { return null; }
+    }
+    return null;
+  })();
+  const proxyArm = (async (): Promise<CityResult[] | null> => {
+    try {
+      return await Promise.race([
+        nominatimViaProxy('search', params),
+        new Promise<null>(r => setTimeout(() => r(null), 8000)),
+      ]);
+    } catch { return null; }
+  })();
+  // Hard cap: whatever the arms do, the dropdown gets an answer in ≤12s.
+  const raw = await Promise.race([
+    firstNonNull<any>([photonArm, directArm, proxyArm]),
+    new Promise<null>(r => setTimeout(() => r(null), 12000)),
+  ]);
+  if (raw && Array.isArray(raw) && raw.length) {
     // v6.9.33: drop POI results (hostels/cafés/offices) BEFORE mapping —
     // a POI's 5 m bbox as the scan area is the "1 business per city" bug.
-    const settlements = proxied.filter((r: any) => settlementKind(r) !== null);
-    const usable = settlements.length ? settlements : proxied;
+    const settlements = raw.filter((r: any) => settlementKind(r) !== null);
+    const usable = settlements.length ? settlements : raw;
     // v6.9.33: proper cities first so the top suggestion can never be a POI,
     // and among settlements rank city > town > village > district…
     usable.sort((a: any, b: any) =>
@@ -692,45 +793,13 @@ export async function resolveCity(query: string): Promise<CityResult[]> {
       }, [0, 0, 0, 0] as number[]) as [number, number, number, number],
     }));
     // v6.9.33: sorting already applied to `usable` before mapping
-    await backfillCityPopulations(results);
-    return results;
-  }
-  const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&addressdetails=1&limit=5&extratags=1`;
-  // Retry up to 3 times on rate limit (429) with backoff
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await directFetch(url, { headers: { 'Accept': 'en-US,en;q=0.9' }, signal: AbortSignal.timeout(8000) });
-    if (res.status === 429) {
-      await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
-      continue;
-    }
-    if (!res.ok) throw new Error(`Nominatim returned ${res.status}`);
-    const data = await res.json();
-    if (!data.length) throw new Error(`No results found for "${query}"`);
-    // v6.9.33: same settlement guard as the proxy path — POIs (hostels,
-    // cafés) with 5 m bboxes must never become the scan area.
-    const settled = data.filter((r: any) => settlementKind(r) !== null);
-    const usable = (settled.length ? settled : data);
-    usable.sort((a: any, b: any) =>
-      (SETTLEMENT_RANK[settlementKind(a) ?? 'zzz'] ?? 99) - (SETTLEMENT_RANK[settlementKind(b) ?? 'zzz'] ?? 99));
-    const results: CityResult[] = usable.map((r: any) => {
-      const bbox = r.boundingbox.map(Number);
-      const pop = r.extratags?.population ? parseInt(r.extratags.population) : null;
-      return {
-        name: r.address?.city || r.address?.town || r.address?.village || r.address?.municipality || r.display_name.split(',')[0],
-        country: r.address?.country || '',
-        countryCode: r.address?.country_code?.toUpperCase() || '',
-        lat: parseFloat(r.lat),
-        lon: parseFloat(r.lon),
-        population: pop,
-        populationSource: pop != null ? ('osm' as PopulationSource) : undefined,
-        bbox: [bbox[0], bbox[2], bbox[1], bbox[3]],
-      };
-    });
-    // v6.9.24: population fallback chain — Nominatim's extratags.population
-    // is missing for many cities (Tbilisi included), which silently disabled
-    // every per-capita metric. Backfill from the next service in the chain
-    // (Open-Meteo; stage 3 / Wikidata completes on city selection).
-    await backfillCityPopulations(results);
+    // v6.9.109: cache + DON'T block the suggestions on population backfill —
+    // per-city Open-Meteo calls (8 results in parallel) added seconds of
+    // dead latency before the dropdown could render, and a slow proxy
+    // stretched it further. The selected city still gets its population via
+    // the ensureCityPopulation chain on click.
+    try { cacheSet('cityq_' + normCityKey(query), results); } catch { /* quota full — ignore */ }
+    void backfillCityPopulations(results);
     return results;
   }
   throw new Error('Nominatim rate limit — try again in a few seconds');

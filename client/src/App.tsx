@@ -3017,7 +3017,10 @@ export default function App() {
                             {selectedBiz.branches.map((br, i) => (
                               <div key={i} className="px-2 py-1">
                                 <div className="flex items-center gap-1.5">
-                                  <span className="font-medium text-foreground/90 truncate text-[11px]">{br.title || new URL(br.url).pathname.slice(0, 40)}</span>
+                                  {/* v6.9.109: guarded URL parse — a malformed/relative
+                                       branch URL must never crash the whole app
+                                       into the ErrorBoundary screen (observed live). */}
+                                  <span className="font-medium text-foreground/90 truncate text-[11px]">{br.title || (() => { try { return new URL(br.url).pathname.slice(0, 40); } catch { return 'Branch'; } })()}</span>
                                   <a href={br.url} target="_blank" className="text-[9px] text-blue-400 hover:underline shrink-0">↗</a>
                                 </div>
                                 <div className="flex flex-wrap gap-x-3 text-[10px] text-muted-foreground">
