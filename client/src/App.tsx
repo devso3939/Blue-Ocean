@@ -39,6 +39,9 @@ import {
 } from './clientEngine';
 import { saveRun, listRuns, deleteRuns, clearRuns, historyStats, importRuns, type RunRecord } from './runHistory';
 import { archiveRunToServer, listServerRuns, fetchServerRunPayload, type RunArchiveMeta } from './clientEngine';
+import { getStoredSession, signUp, signIn, signOut, sessionExpired } from './auth'; // v6.9.110: user accounts
+import { refreshSession } from './auth';
+import { saveUserPrefs, loadUserPrefs } from './clientEngine';
 import CompareView from './CompareView';
 import CountryView from './CountryView';
 
@@ -499,7 +502,12 @@ function HistoryView({ onBack, onRestore, heavy, onCleanup }: {
   const toggle = (id: string) => setSel(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   const arrow = (col: string) => sortCol !== col ? '↕' : (sortDir === 'asc' ? '↑' : '↓');
   const sortBy = (col: typeof sortCol) => { if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc'); else { setSortCol(col); setSortDir('desc'); } };
+  // v6.9.110: guard the LIST view too — a record with a missing city/stats
+  // object (corrupt payload) used to throw during render and crash the whole
+  // app into the ErrorBoundary. Such rows are dropped from the list, and a
+  // record missing BOTH businesses and city is skipped entirely.
   const rows = runs
+    .filter(r => r && r.city && r.stats)
     .filter(r => !q || `${r.city.name} ${r.city.country} ${r.category || 'all'} ${r.kind} ${r.version}`.toLowerCase().includes(q.toLowerCase()))
     .sort((a, b) => {
       const m = sortDir === 'asc' ? 1 : -1;
@@ -519,7 +527,7 @@ function HistoryView({ onBack, onRestore, heavy, onCleanup }: {
     prevCov.set(key, r.stats.anyContactPct);
     return prev === undefined ? null : r.stats.anyContactPct - prev;
   };
-  const diffs = new Map(runs.slice().sort((a, b) => a.ts - b.ts).map(r => [r.id, diffOf(r)]));
+  const diffs = new Map(runs.filter(r => r && r.city && r.stats).slice().sort((a, b) => a.ts - b.ts).map(r => [r.id, diffOf(r)]));
   const doExport = () => {
     const blob = new Blob([JSON.stringify({ app: 'Blue Ocean', exportedAt: new Date().toISOString(), runs: listRuns() }, null, 2)], { type: 'application/json' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
@@ -764,6 +772,17 @@ import { APP_VERSION } from './version'; // v6.9.29: shared stamp — visible on
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country' | 'coverage' | 'history'>('analysis');
+  // ── v6.9.110: user accounts — session state + auth panel ──────────
+  const [authSession, setAuthSession] = useState(() => {
+    const s = getStoredSession();
+    return s && !sessionExpired() ? s : null;
+  });
+  const [authPanelOpen, setAuthPanelOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<'in' | 'up'>('in');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPw, setAuthPw] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMsg, setAuthMsg] = useState<{ kind: 'err' | 'ok'; text: string } | null>(null);
   // v6.9.88: History state — heavy-store banner + selected record for the detail view
   const [historyHeavy, setHistoryHeavy] = useState(false);
   const [restoredRun, setRestoredRun] = useState<RunRecord | null>(null);
@@ -885,6 +904,48 @@ export default function App() {
     setLoadingStage('');
     setProgress(0);
   }, []);
+
+  // ── v6.9.110: session bootstrap + preferences sync ─────────────
+  // Refresh an expired-but-stored session once on load; pull the user's
+  // saved preferences and apply the country/category they last used.
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      if (sessionExpired()) {
+        const fresh = await refreshSession();
+        if (!dead) setAuthSession(fresh);
+        if (!fresh) return;
+      }
+      const prefs = await loadUserPrefs();
+      if (dead || !prefs) return;
+      if (typeof prefs.country === 'string' && prefs.country) setSelectedCountry(prefs.country);
+      if (typeof prefs.category === 'string' && prefs.category) setSelectedCategory(prefs.category);
+    })();
+    return () => { dead = true; };
+  }, []);
+  // Persist the country/category whenever the signed-in user changes them.
+  useEffect(() => {
+    if (!authSession) return;
+    void saveUserPrefs({ country: selectedCountry, category: selectedCategory });
+  }, [authSession, selectedCountry, selectedCategory]);
+
+  const handleAuthSubmit = async () => {
+    setAuthBusy(true); setAuthMsg(null);
+    const email = authEmail.trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { setAuthMsg({ kind: 'err', text: 'Enter a valid email address.' }); setAuthBusy(false); return; }
+    if (authPw.length < 6) { setAuthMsg({ kind: 'err', text: 'Password must be at least 6 characters.' }); setAuthBusy(false); return; }
+    if (authMode === 'up') {
+      const r = await signUp(email, authPw);
+      if (r.error) setAuthMsg({ kind: 'err', text: r.error });
+      else if (r.needsConfirm) { setAuthMsg({ kind: 'ok', text: 'Check your inbox — confirm your email, then sign in.' }); setAuthMode('in'); }
+      else { setAuthSession(r.session); setAuthPanelOpen(false); setAuthMsg(null); }
+    } else {
+      const r = await signIn(email, authPw);
+      if (r.error || !r.session) setAuthMsg({ kind: 'err', text: r.error || 'Sign-in failed.' });
+      else { setAuthSession(r.session); setAuthPanelOpen(false); setAuthMsg(null); }
+    }
+    setAuthBusy(false);
+  };
 
   // Listen for map pin clicks
   const bizPanelRef = useRef<HTMLDivElement>(null);
@@ -1453,25 +1514,44 @@ export default function App() {
     fetchServerRunPayload(m.run_id).then(p => {
       if (!p) { setError('Could not fetch that run from the cloud backup.'); return; }
       const rec = p as unknown as RunRecord;
-      sanitizeRunRecord(rec as unknown as Parameters<typeof sanitizeRunRecord>[0]); // v6.9.94: self-heal old archived payloads
-      try { saveRun(rec); } catch { /* quota — restore anyway */ }
       try {
-        setSelectedCity({ name: rec.city.name, country: rec.city.country, countryCode: rec.city.countryCode, lat: rec.city.lat, lon: rec.city.lon, population: rec.city.population, populationSource: undefined, bbox: rec.city.bbox });
-        setBusinesses(new Map(rec.businesses as [string, Business[]][]));
-        setOpportunities(rec.opportunities as OpportunityResult[]);
-        setDemandSignals(new Map(rec.demandSignals as [string, DemandSignal][]));
-        setAiInsights(rec.aiInsights);
-        setAiAnalysis(rec.aiAnalysis as AIAnalysis | null);
-        setSelectedOppCategory(rec.selectedOppCategory);
+        sanitizeRunRecord(rec as unknown as Parameters<typeof sanitizeRunRecord>[0]); // v6.9.94: self-heal old archived payloads
+        const rc = rec.city || ({} as RunRecord['city']);
+        const city = {
+          name: rc.name || 'Unknown city',
+          country: rc.country || '',
+          countryCode: rc.countryCode || '',
+          lat: typeof rc.lat === 'number' ? rc.lat : 0,
+          lon: typeof rc.lon === 'number' ? rc.lon : 0,
+          population: typeof rc.population === 'number' ? rc.population : null,
+          populationSource: undefined,
+          bbox: (Array.isArray(rc.bbox) && rc.bbox.length === 4 ? rc.bbox : [rc.lat - 0.05, rc.lon - 0.05, rc.lat + 0.05, rc.lon + 0.05]) as [number, number, number, number],
+        };
+        const bizPairs: [string, Business[]][] = Array.isArray(rec.businesses)
+          ? (rec.businesses as [string, Business[]][]).filter(p => Array.isArray(p) && Array.isArray(p[1]))
+          : [];
+        try { saveRun({ ...rec, businesses: bizPairs }); } catch { /* quota — restore anyway */ }
+        setSelectedCity(city);
+        setBusinesses(new Map(bizPairs));
+        setOpportunities(Array.isArray(rec.opportunities) ? (rec.opportunities as OpportunityResult[]) : []);
+        setDemandSignals(new Map(Array.isArray(rec.demandSignals) ? (rec.demandSignals as [string, DemandSignal][]) : []));
+        setAiInsights(typeof rec.aiInsights === 'string' ? rec.aiInsights : '');
+        setAiAnalysis((rec.aiAnalysis as AIAnalysis) || null);
+        setSelectedOppCategory(rec.selectedOppCategory ?? null);
         if (rec.kind === 'analyze' && rec.category) setSelectedCategory(rec.category);
-        setScanAreaLabel(rec.scanAreaLabel);
-        setRescanNote(rec.rescanNote);
+        setScanAreaLabel(typeof rec.scanAreaLabel === 'string' ? rec.scanAreaLabel : '');
+        setRescanNote(typeof rec.rescanNote === 'string' ? rec.rescanNote : '');
         setEnrichProgress(null);
         setLoading(false);
         setError('');
         setRestoredRun(rec);
         setCloudMatch(null);
-      } catch { /* corrupt payload — ignore */ }
+        setViewMode('analysis');
+      } catch (e) {
+        // v6.9.110: never silent again.
+        setError(`Could not open that run: ${String((e as Error)?.message || e).slice(0, 120)}`);
+        setViewMode('analysis');
+      }
     });
   };
 
@@ -1867,24 +1947,48 @@ export default function App() {
       onRestore={(r) => {
         // Restore the exact post-run state: city, category, businesses,
         // opportunities, signals, AI, badges — then show the results view.
+        // v6.9.110: DEFENSIVE — a malformed record used to throw inside the
+        // setter chain and the blanket catch swallowed it SILENTLY, leaving
+        // the user on the History list wondering why nothing loaded. Now:
+        // every field is guarded, and a broken record shows a visible error.
         try {
           sanitizeRunRecord(r as unknown as Parameters<typeof sanitizeRunRecord>[0]); // v6.9.94: drop poison from old captures
-          setSelectedCity({ name: r.city.name, country: r.city.country, countryCode: r.city.countryCode, lat: r.city.lat, lon: r.city.lon, population: r.city.population, populationSource: undefined, bbox: r.city.bbox });
-          setBusinesses(new Map(r.businesses as [string, Business[]][]));
-          setOpportunities(r.opportunities as OpportunityResult[]);
-          setDemandSignals(new Map(r.demandSignals as [string, DemandSignal][]));
-          setAiInsights(r.aiInsights);
-          setAiAnalysis(r.aiAnalysis as AIAnalysis | null);
-          setSelectedOppCategory(r.selectedOppCategory);
+          const rc = r.city || ({} as RunRecord['city']);
+          const city = {
+            name: rc.name || 'Unknown city',
+            country: rc.country || '',
+            countryCode: rc.countryCode || '',
+            lat: typeof rc.lat === 'number' ? rc.lat : 0,
+            lon: typeof rc.lon === 'number' ? rc.lon : 0,
+            population: typeof rc.population === 'number' ? rc.population : null,
+            populationSource: undefined,
+            bbox: (Array.isArray(rc.bbox) && rc.bbox.length === 4 ? rc.bbox : [rc.lat - 0.05, rc.lon - 0.05, rc.lat + 0.05, rc.lon + 0.05]) as [number, number, number, number],
+          };
+          const bizPairs: [string, Business[]][] = Array.isArray(r.businesses)
+            ? (r.businesses as [string, Business[]][]).filter(p => Array.isArray(p) && Array.isArray(p[1]))
+            : [];
+          const opps: OpportunityResult[] = Array.isArray(r.opportunities) ? (r.opportunities as OpportunityResult[]) : [];
+          const dsPairs: [string, DemandSignal][] = Array.isArray(r.demandSignals) ? (r.demandSignals as [string, DemandSignal][]) : [];
+          setSelectedCity(city);
+          setBusinesses(new Map(bizPairs));
+          setOpportunities(opps);
+          setDemandSignals(new Map(dsPairs));
+          setAiInsights(typeof r.aiInsights === 'string' ? r.aiInsights : '');
+          setAiAnalysis((r.aiAnalysis as AIAnalysis) || null);
+          setSelectedOppCategory(r.selectedOppCategory ?? null);
           if (r.kind === 'analyze' && r.category) setSelectedCategory(r.category);
-          setScanAreaLabel(r.scanAreaLabel);
-          setRescanNote(r.rescanNote);
+          setScanAreaLabel(typeof r.scanAreaLabel === 'string' ? r.scanAreaLabel : '');
+          setRescanNote(typeof r.rescanNote === 'string' ? r.rescanNote : '');
           setEnrichProgress(null);
           setLoading(false);
           setError('');
           setRestoredRun(r);
           setViewMode('analysis');
-        } catch { /* corrupt record — ignore */ }
+        } catch (e) {
+          // v6.9.110: never silent again.
+          setError(`Could not open that run: ${String((e as Error)?.message || e).slice(0, 120)}`);
+          setViewMode('analysis');
+        }
       }}
     />;
   }
@@ -1971,10 +2075,85 @@ export default function App() {
               >
                 ⚙️ Settings
               </button>
+              {/* v6.9.110: account — sign in / sign up / signed-in state */}
+              {authSession ? (
+                <button
+                  onClick={() => { signOut(); setAuthSession(null); }}
+                  title={`Signed in as ${authSession.email} — click to sign out`}
+                  className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-emerald-500/40 text-emerald-400/90 hover:text-emerald-300 hover:border-emerald-500/60 transition-all max-w-[180px] truncate"
+                >
+                  👤 {authSession.email.split('@')[0]} · Sign out
+                </button>
+              ) : (
+                <button
+                  onClick={() => { setAuthPanelOpen(s => !s); setAuthMsg(null); }}
+                  title="Sign in to sync your history and preferences across devices"
+                  className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-primary/50 text-primary hover:border-primary transition-all"
+                >
+                  👤 Sign in
+                </button>
+              )}
             </div>
           </div>
         </div>
       </header>
+
+      {/* ── v6.9.110: Sign in / Sign up panel ─────────────────────────── */}
+      {authPanelOpen && !authSession && (
+        <section className="mx-auto max-w-md px-4 pt-4">
+          <div className="rounded-xl border border-border bg-card/60 p-4">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-sm font-bold text-foreground">
+                {authMode === 'in' ? '👤 Sign in' : '✨ Create account'}
+              </div>
+              <button onClick={() => setAuthPanelOpen(false)} className="text-xs text-muted-foreground hover:text-foreground">✕ close</button>
+            </div>
+            <p className="text-xs text-muted-foreground mb-3">
+              {authMode === 'in'
+                ? 'Your run history and preferences sync across devices while signed in.'
+                : 'One free account: your scans are backed up to the cloud and preferences follow you to any device.'}
+            </p>
+            {authMsg && (
+              <div className={`mb-3 rounded-lg border px-3 py-2 text-xs ${authMsg.kind === 'err' ? 'border-red-500/30 bg-red-500/10 text-red-300' : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'}`}>
+                {authMsg.text}
+              </div>
+            )}
+            <div className="space-y-2">
+              <input
+                type="email"
+                value={authEmail}
+                onChange={e => setAuthEmail(e.target.value)}
+                placeholder="you@example.com"
+                autoComplete="email"
+                className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+              />
+              <input
+                type="password"
+                value={authPw}
+                onChange={e => setAuthPw(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') void handleAuthSubmit(); }}
+                placeholder={authMode === 'up' ? 'Password (6+ characters)' : 'Password'}
+                autoComplete={authMode === 'up' ? 'new-password' : 'current-password'}
+                className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+              />
+              <button
+                onClick={() => void handleAuthSubmit()}
+                disabled={authBusy}
+                className="h-10 w-full rounded-lg bg-gradient-to-r from-indigo-500 to-violet-500 text-sm font-semibold text-white shadow-lg hover:from-indigo-600 hover:to-violet-600 disabled:opacity-40 transition-all"
+              >
+                {authBusy ? '…' : authMode === 'in' ? 'Sign in' : 'Create account'}
+              </button>
+            </div>
+            <div className="mt-3 text-center text-xs text-muted-foreground">
+              {authMode === 'in' ? (
+                <>No account? <button onClick={() => { setAuthMode('up'); setAuthMsg(null); }} className="text-primary hover:underline">Sign up</button></>
+              ) : (
+                <>Already registered? <button onClick={() => { setAuthMode('in'); setAuthMsg(null); }} className="text-primary hover:underline">Sign in</button></>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* v6.9.13: Settings — backup API-key manager */}
       {showSettings && (
@@ -2653,7 +2832,7 @@ export default function App() {
       </section>
 
       {/* Results */}
-      {opportunities.length > 0 && selectedCity && (
+      {selectedCity && (opportunities.length > 0 || businesses.size > 0) && (
         <div className="mx-auto max-w-7xl space-y-6 px-4 pb-12">
           {/* Summary */}
           <div className="rounded-xl border border-border bg-card p-5">

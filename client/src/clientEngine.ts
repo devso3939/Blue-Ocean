@@ -15,6 +15,8 @@ import { parsePhoneNumberFromString, AsYouType } from 'libphonenumber-js';
 // Native-language scan context (country → language/ccTLD/category terms)
 import { setScanContext, getScanContext, buildScanContext, categoryInNative, countryTld, contactTermsNative, type ScanContext } from './lang';
 import { APP_VERSION } from './version';
+import { currentUserId } from './auth'; // v6.9.110: user-scoped prefs/archive
+import { storedAccessToken } from './authFetch';
 async function scrapeWordPressAPI(b: Business): Promise<void> {
   if (!b.website || (b.email && b.phone)) return;
   const base = b.website.replace(/\/$/, '');
@@ -2789,6 +2791,19 @@ async function directFetch(url: string, init?: RequestInit): Promise<Response> {
   return fetch(url, { ...init, headers: { 'User-Agent': 'BlueOcean/5.0.0 (https://devso3939.github.io/Blue-Ocean; contact@blueocean.app)', ...init?.headers } });
 }
 
+// v6.9.110: user preferences sync (signed-in users only — anon is a no-op
+// on the server). Fire-and-forget; preferences are cosmetic.
+export async function saveUserPrefs(prefs: Record<string, unknown>): Promise<boolean> {
+  if (!currentUserId()) return false;
+  try { return (await supabaseRpc<string>('rpc_user_prefs_put', { p_prefs: prefs }, 10000)) === 'ok'; }
+  catch { return false; }
+}
+export async function loadUserPrefs(): Promise<Record<string, unknown> | null> {
+  if (!currentUserId()) return null;
+  try { return await supabaseRpc<Record<string, unknown>>('rpc_user_prefs_get', {}, 10000); }
+  catch { return null; }
+}
+
 // Map category IDs to OSM tag filters for focused queries
 // ── v6.9 — filters aligned with categorizeBusiness's expanded tag map.
 // A focused query must return every tag value that categorizes into the
@@ -3028,11 +3043,19 @@ let _proxyDisabledUntil = 0; // circuit breaker when Supabase is unreachable
 const PROXY_COOLDOWN_MS = 120000;
 
 async function supabaseRpc<T>(fn: string, body: Record<string, unknown>, timeoutMs: number): Promise<T | null> {
+  // v6.9.110: when a user is signed in, the JWT rides along so PostgREST's
+  // auth.uid() resolves and user-scoped RPCs (prefs, run archive) work.
+  // Sync read of the stored session — null when signed out, so anonymous
+  // scans keep their zero-latency header set. Token refresh happens lazily
+  // in getAccessToken() before any signed-in caller fires an RPC.
+  const token = storedAccessToken();
+  const authHeaders: Record<string, string> = token ? { 'Authorization': `Bearer ${token}` } : {};
   const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
     method: 'POST',
     headers: {
       'apikey': SUPABASE_ANON_KEY,
       'Content-Type': 'application/json',
+      ...authHeaders,
     },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
@@ -3445,7 +3468,10 @@ export async function archiveRunToServer(rec: {
 }
 export async function listServerRuns(limit = 100): Promise<RunArchiveMeta[] | null> {
   try {
-    return await supabaseRpc<RunArchiveMeta[]>('rpc_run_archive_list', { p_limit: limit }, 15000);
+    // v6.9.110: signed-in users see their own runs first (p_mine_only=false
+    // still includes the shared anonymous pool); anon callers are scoped to
+    // the shared pool server-side regardless of the flag.
+    return await supabaseRpc<RunArchiveMeta[]>('rpc_run_archive_list', { p_limit: limit, p_mine_only: false }, 15000);
   } catch { return null; }
 }
 export async function fetchServerRunPayload(runId: string): Promise<Record<string, unknown> | null> {
