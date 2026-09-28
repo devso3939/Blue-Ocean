@@ -208,6 +208,19 @@ export async function requestPasswordReset(email: string): Promise<{ sent: boole
 }
 
 /**
+ * v6.9.115: resend the sign-up confirmation email (GoTrue /auth/v1/resend).
+ * Rate-limited server-side (~60s); the UI enforces a cooldown as well.
+ */
+export async function resendConfirmation(email: string): Promise<{ sent: boolean; error?: string }> {
+  try {
+    await postAuthEmail('resend', { email, type: 'signup' });
+    return { sent: true };
+  } catch (e) {
+    return { sent: false, error: String((e as Error)?.message || e).slice(0, 120) };
+  }
+}
+
+/**
  * Set a new password using the recovery session created by the email link.
  * Returns the (possibly refreshed) session — GoTrue rotates the access and
  * refresh tokens on a password change, so callers must adopt the result.
