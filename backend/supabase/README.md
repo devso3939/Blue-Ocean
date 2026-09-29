@@ -117,11 +117,15 @@ alongside `serve_prod.py` whenever auth emails are tested locally:
     python serve_prod.py            # app on :3199
     python serve_confirm_relay.py   # Site-URL fallback relay on :3000
 
-Status as of 2026-09-30: the dashboard allow-list honors
-`http://localhost:3199/*` (verified via /auth/v1/verify probes and a live
-confirmation landing), but the GitHub Pages entries still fall back and the
-Site URL itself remains unchanged — until both are fixed in the dashboard,
-the relay is what makes local confirm links work.
+Status as of 2026-09-30 (FIXED in the dashboard): Site URL is
+`https://devso3939.github.io/Blue-Ocean/` and the allow-list holds
+`https://devso3939.github.io/Blue-Ocean/*` plus
+`http://localhost:3199/Blue-Ocean/*` (verified via /auth/v1/verify probes and
+live confirmation-link landings on both targets — users land back signed-in).
+Gotcha discovered en route: GoTrue globs do NOT match across `/`, so a bare
+`http://localhost:3199/*` never matches the app's subpath — patterns must be
+path-shaped (a stale `http://localhost:3199/*` entry is harmless). The relay
+below remains useful whenever a project's Site URL still points at :3000.
 
 ## Verified end-to-end (2026-09-09)
 
