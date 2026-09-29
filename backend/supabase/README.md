@@ -104,6 +104,25 @@ this repo):
 
 The same list governs magic-link, invite, and (any future) OAuth redirects.
 
+## Local fallback relay (v6.9.118)
+
+When GoTrue cannot honor a link's requested redirect it falls back to the
+project **Site URL** — still the default `http://localhost:3000`, which used
+to be a dead `ERR_CONNECTION_REFUSED` page. `client/serve_confirm_relay.py`
+is a 15-line server that listens on 3000 and 302s every landing (fragment
+included, via the browser) to the real app on `http://localhost:3199/Blue-Ocean/`,
+where the normal confirmation/recovery consumption runs. Keep it running
+alongside `serve_prod.py` whenever auth emails are tested locally:
+
+    python serve_prod.py            # app on :3199
+    python serve_confirm_relay.py   # Site-URL fallback relay on :3000
+
+Status as of 2026-09-30: the dashboard allow-list honors
+`http://localhost:3199/*` (verified via /auth/v1/verify probes and a live
+confirmation landing), but the GitHub Pages entries still fall back and the
+Site URL itself remains unchanged — until both are fixed in the dashboard,
+the relay is what makes local confirm links work.
+
 ## Verified end-to-end (2026-09-09)
 
 - Tbilisi: 68 ranked opportunities, 5 live peers, 8 anomaly warnings
