@@ -290,7 +290,7 @@ export default function AuthPanel(props: AuthPanelProps) {
                   {props.sentKind === 'reset' ? (
                     <>We sent a password-reset link to <b className="text-foreground">{sentEmailRef.current || emailTrim}</b>. Open it on this device to choose a new password. Didn’t get it? Check spam, or <button type="button" onClick={() => onView('forgot')} className="text-primary hover:underline">request a new link</button>.</>
                   ) : (
-                    <>We sent a confirmation link to <b className="text-foreground">{sentEmailRef.current || emailTrim}</b>. Click it to activate your account, then sign in. Didn’t get it? Check spam, or resend below.</>
+                    <>We sent a confirmation link to <b className="text-foreground">{sentEmailRef.current || emailTrim}</b>. <b className="text-foreground">Open it on this device and you’re signed in instantly</b> — no extra step. Didn’t get it? Check spam, or resend below.</>
                   )}
                 </p>
               </div>

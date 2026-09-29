@@ -86,3 +86,13 @@ body {
   border-radius: 3px;
 }
 .livefeed-scroll::-webkit-scrollbar-thumb:hover { background: hsl(226 18% 32%); }
+
+/* v6.9.116: toast entrance */
+@keyframes fadein {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes bo-toast-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}

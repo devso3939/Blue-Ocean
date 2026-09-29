@@ -11,7 +11,7 @@
 //     so PostgREST's auth.uid() resolves server-side
 //   • prefs + run archive sync ride the existing RPC surface (migration 019)
 
-import { supabaseAuthFetch, detectRecoveryToken } from './authFetch';
+import { supabaseAuthFetch, detectRecoveryToken, detectAuthLinkToken } from './authFetch';
 
 const SB_URL = 'https://bfoagnqjkoqhogxvkvkw.supabase.co';
 const SB_ANON = 'sb_publishable_UtCOExOHddCZ0UbTxbruWg_3m1U7a-0';
@@ -263,7 +263,8 @@ export async function updatePassword(password: string): Promise<{ session: BoSes
  * reports whether a password-reset form should be shown.
  */
 export async function consumeRecoveryLink(): Promise<boolean> {
-  const token = detectRecoveryToken();
+  const t = detectAuthLinkToken();
+  const token = t?.type === 'recovery' ? t.refreshToken : null;
   if (!token) return false;
   // Scrub the hash immediately so a refresh / share can't replay the token.
   try { history.replaceState(null, '', location.pathname + location.search); } catch { location.hash = ''; }
@@ -291,6 +292,47 @@ export async function consumeRecoveryLink(): Promise<boolean> {
     recordRecoveryLanding(); // v6.9.113: diagnostics saw the landing
     return true;
   } catch { return false; }
+}
+
+/**
+ * v6.9.116: consume a SIGN-UP CONFIRMATION link landing
+ * (`#…&type=signup`). Same exchange as the recovery landing — the user
+ * ends up signed in immediately, no separate sign-in step. Returns the
+ * fresh session so the caller can greet them, or null (not a signup
+ * landing / expired or used token).
+ */
+export async function consumeSignupLink(): Promise<BoSession | null> {
+  const t = detectAuthLinkToken();
+  const token = t?.type === 'signup' ? t.refreshToken : null;
+  if (!token) return null;
+  // Scrub the hash immediately so a refresh / share can't replay the token.
+  try { history.replaceState(null, '', location.pathname + location.search); } catch { location.hash = ''; }
+  try {
+    const r = await supabaseAuthFetch<AuthResponse>(`${SB_URL}/auth/v1/token?grant_type=refresh_token`, {
+      method: 'POST',
+      headers: { 'apikey': SB_ANON, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: token }),
+    });
+    if (r.error_description || r.error) return null;
+    if (!r.access_token) return null;
+    const claims = jwtClaims(r.access_token);
+    const session: BoSession = {
+      accessToken: r.access_token,
+      refreshToken: r.refresh_token || '',
+      expiresAt: Math.floor(Date.now() / 1000) + (r.expires_in || 3600),
+      userId: r.user?.id || claims.sub || '',
+      email: r.user?.email || claims.email || '',
+    };
+    if (!session.userId) return null;
+    // v6.9.116: queue the confirmation toast in sessionStorage BEFORE the
+    // session — the app can remount between the exchange and the toast
+    // render (observed live), so the signal must survive that. The App
+    // bootstrap polls this flag and shows the toast on the live instance.
+    try { sessionStorage.setItem('bo_auth_confirm_toast_v1', '✅ Email confirmed — you are signed in!'); } catch { /* private mode */ }
+    storeSession(session);
+    try { window.dispatchEvent(new CustomEvent('bo-auth-toast', { detail: '✅ Email confirmed — you are signed in!' })); } catch { /* belt-and-braces for the no-remount path */ }
+    return session;
+  } catch { return null; }
 }
 
 // ── v6.9.113: auth redirect diagnostics (Settings panel) ─────────────

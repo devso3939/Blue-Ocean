@@ -40,9 +40,10 @@ import {
 import { saveRun, listRuns, deleteRuns, clearRuns, historyStats, importRuns, type RunRecord } from './runHistory';
 import { archiveRunToServer, listServerRuns, fetchServerRunPayload, type RunArchiveMeta } from './clientEngine';
 import { getStoredSession, signUp, signIn, signOut, sessionExpired } from './auth'; // v6.9.110: user accounts
+import { startAuthToastPoll, showAuthToast } from './authToast'; // v6.9.116: imperative confirmation toast
 import AuthPanel, { friendlyAuthError, type AuthView } from './AuthPanel';
 import type { BoSession, RedirectDiagnostics } from './auth';
-import { refreshSession, consumeRecoveryLink, requestPasswordReset, updatePassword, resendConfirmation, getRedirectDiagnostics, redirectAllows } from './auth'; // v6.9.111/115: password reset + resend
+import { refreshSession, consumeRecoveryLink, consumeSignupLink, requestPasswordReset, updatePassword, resendConfirmation, getRedirectDiagnostics, redirectAllows } from './auth'; // v6.9.111/116: password reset + resend + confirm landing
 import { saveUserPrefs, loadUserPrefs } from './clientEngine';
 import CompareView from './CompareView';
 import CountryView from './CountryView';
@@ -927,6 +928,22 @@ export default function App() {
   useEffect(() => {
     let dead = false;
     (async () => {
+      // v6.9.116: a SIGN-UP CONFIRMATION link landing signs the user in
+      // directly — no "confirm, then sign in again" hoop.
+      const confirmed = await consumeSignupLink();
+      if (confirmed) {
+        if (!dead) {
+          setAuthSession(confirmed);
+          showAuthToast('✅ Email confirmed — you are signed in!');
+          // Pull their saved prefs now that the session exists.
+          const prefs = await loadUserPrefs();
+          if (!dead && prefs) {
+            if (typeof prefs.country === 'string' && prefs.country) setSelectedCountry(prefs.country);
+            if (typeof prefs.category === 'string' && prefs.category) setSelectedCategory(prefs.category);
+          }
+        }
+        return;
+      }
       if (await consumeRecoveryLink()) {
         if (!dead) {
           setRecoverySession(getStoredSession());
@@ -935,6 +952,8 @@ export default function App() {
         }
         return;
       }
+      // v6.9.116: the confirmation toast rides a window event (dispatched by
+      // consumeSignupLink) — observed reliably regardless of effect timing.
       if (sessionExpired()) {
         const fresh = await refreshSession();
         if (!dead) setAuthSession(fresh);
@@ -1041,6 +1060,12 @@ export default function App() {
     setAuthMsg(null);
   };
 
+  // v6.9.116: confirmation toast — the imperative helper appends outside
+  // React (state-based toasts were torn down by an observed App re-render
+  // storm), so nothing here is tied to component lifecycle.
+  useEffect(() => {
+    startAuthToastPoll();
+  }, []);
   // Listen for map pin clicks
   const bizPanelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {

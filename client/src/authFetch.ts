@@ -22,12 +22,24 @@ export async function supabaseAuthFetch<T = unknown>(url: string, init: RequestI
  * Returns the refresh_token when this is a recovery landing, else null.
  */
 export function detectRecoveryToken(): string | null {
+  const t = detectAuthLinkToken();
+  return t?.type === 'recovery' ? t.refreshToken : null;
+}
+
+/**
+ * v6.9.116: detect any auth-email link landing in the URL fragment.
+ * Supabase's implicit flow puts the grant in the hash (never sent to a
+ * server): #access_token=…&refresh_token=<one-time>&type=recovery|signup
+ * Returns the refresh token + link type, or null when this isn't a landing.
+ */
+export function detectAuthLinkToken(): { refreshToken: string; type: 'recovery' | 'signup' } | null {
   try {
     if (!location.hash || location.hash.length < 8) return null;
     const p = new URLSearchParams(location.hash.startsWith('#') ? location.hash.slice(1) : location.hash);
-    if (p.get('type') !== 'recovery') return null;
+    const type = p.get('type');
+    if (type !== 'recovery' && type !== 'signup') return null;
     const rt = p.get('refresh_token');
-    return rt ? rt : null;
+    return rt ? { refreshToken: rt, type } : null;
   } catch { return null; }
 }
 
