@@ -32,6 +32,8 @@ export interface AuthPanelProps {
   onSignUp: (email: string, pw: string) => Promise<void>;
   onForgot: (email: string) => Promise<void>;
   onResend: (email: string) => Promise<void>;
+  /** v6.9.117: unconfirmed-email sign-in → show the confirmation inbox screen (parent owns sentKind). */
+  onShowInboxConfirm: (email: string) => void;
   onSetNewPassword: (pw: string) => Promise<void>;
   onChangePassword: (pw: string) => Promise<void>;
   onSignOut: () => void;
@@ -194,6 +196,16 @@ export default function AuthPanel(props: AuthPanelProps) {
   const [resendIn, setResendIn] = useState(0);
   const sentEmailRef = useRef('');
 
+  // v6.9.117: remember WHICH address the sent screen refers to. The parent
+  // owns the email field and may clear/change it (or the user may edit it
+  // on another view) — "We sent a link to …" must stay accurate and Resend
+  // must target the address that actually triggered the email.
+  useEffect(() => {
+    if (view === 'sent') {
+      if (email.trim()) sentEmailRef.current = email.trim().toLowerCase();
+    }
+  }, [view, email]);
+
   useEffect(() => {
     if (view !== 'sent') return;
     setResendIn(60);
@@ -217,7 +229,11 @@ export default function AuthPanel(props: AuthPanelProps) {
 
   const submit = async () => {
     setTouched({ email: true, pw: true, pw2: true });
-    if (emailErr(email) || (isPwView && (pwErr(pw) || ((view === 'setpw' || view === 'changepw') && pw2 !== pw)))) return;
+    // v6.9.117: password-only views (setpw/changepw) render NO email field —
+    // validating the shared email state there silently blocked submission
+    // whenever it was empty (e.g. a recovery link opened in a fresh browser).
+    const needsEmail = view !== 'setpw' && view !== 'changepw';
+    if ((needsEmail && emailErr(email)) || (isPwView && (pwErr(pw) || ((view === 'setpw' || view === 'changepw') && pw2 !== pw)))) return;
     try {
       if (view === 'signin') await props.onSignIn(emailTrim, pw);
       else if (view === 'signup') await props.onSignUp(emailTrim, pw);
@@ -390,7 +406,7 @@ export default function AuthPanel(props: AuthPanelProps) {
                 </button>
               )}
               {message?.kind === 'err' && /hasn’t been confirmed|not been confirmed/i.test(message.text) && (
-                <button type="button" onClick={() => { sentEmailRef.current = emailTrim; onView('sent'); }} className="w-full text-center text-xs text-primary hover:underline">
+                <button type="button" onClick={() => props.onShowInboxConfirm(emailTrim)} className="w-full text-center text-xs text-primary hover:underline">
                   Open “check your inbox” →
                 </button>
               )}

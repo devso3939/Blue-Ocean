@@ -335,6 +335,27 @@ export async function consumeSignupLink(): Promise<BoSession | null> {
   } catch { return null; }
 }
 
+/**
+ * v6.9.117: consume a FAILED auth-link landing. GoTrue redirects here with
+ * `#error=<code>&error_description=<urlencoded msg>` when a confirmation or
+ * recovery link is expired, already used, or revoked — previously this hash
+ * matched neither consume path and the user was left on a dead URL with no
+ * explanation. Scrubs the hash and returns the parsed message, or null.
+ */
+export function consumeAuthLinkError(): { error: string; description: string } | null {
+  try {
+    if (!location.hash || location.hash.length < 8) return null;
+    const p = new URLSearchParams(location.hash.startsWith('#') ? location.hash.slice(1) : location.hash);
+    if (!p.get('error')) return null;
+    const out = {
+      error: p.get('error') || 'unknown_error',
+      description: p.get('error_description') || 'The link is invalid, expired, or was already used.',
+    };
+    try { history.replaceState(null, '', location.pathname + location.search); } catch { location.hash = ''; }
+    return out;
+  } catch { return null; }
+}
+
 // ── v6.9.113: auth redirect diagnostics (Settings panel) ─────────────
 // Makes the GoTrue redirect allow-list problem visible in-app: what the
 // client requests, what the project is configured with, and where the last

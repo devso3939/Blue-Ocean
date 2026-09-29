@@ -43,7 +43,7 @@ import { getStoredSession, signUp, signIn, signOut, sessionExpired } from './aut
 import { startAuthToastPoll, showAuthToast } from './authToast'; // v6.9.116: imperative confirmation toast
 import AuthPanel, { friendlyAuthError, type AuthView } from './AuthPanel';
 import type { BoSession, RedirectDiagnostics } from './auth';
-import { refreshSession, consumeRecoveryLink, consumeSignupLink, requestPasswordReset, updatePassword, resendConfirmation, getRedirectDiagnostics, redirectAllows } from './auth'; // v6.9.111/116: password reset + resend + confirm landing
+import { refreshSession, consumeRecoveryLink, consumeSignupLink, consumeAuthLinkError, requestPasswordReset, updatePassword, resendConfirmation, getRedirectDiagnostics, redirectAllows } from './auth'; // v6.9.111/116/117: password reset + resend + confirm landing + error landings
 import { saveUserPrefs, loadUserPrefs } from './clientEngine';
 import CompareView from './CompareView';
 import CountryView from './CountryView';
@@ -928,6 +928,18 @@ export default function App() {
   useEffect(() => {
     let dead = false;
     (async () => {
+      // v6.9.117: a FAILED auth-link landing (#error=access_denied&… —
+      // expired, already-used, or revoked link) must not leave the user on
+      // a dead URL. Surface it in the auth panel instead.
+      const linkErr = consumeAuthLinkError();
+      if (linkErr) {
+        if (!dead) {
+          setAuthMsg({ kind: 'err', text: `This email link didn't work: ${linkErr.description}` });
+          setAuthPanelOpen(true);
+          setAuthView('signin');
+        }
+        return;
+      }
       // v6.9.116: a SIGN-UP CONFIRMATION link landing signs the user in
       // directly — no "confirm, then sign in again" hoop.
       const confirmed = await consumeSignupLink();
@@ -949,6 +961,16 @@ export default function App() {
           setRecoverySession(getStoredSession());
           setAuthPanelOpen(true);
           setAuthView('setpw');
+          // v6.9.117: pull the server's saved prefs NOW — the session is
+          // already in localStorage, so this works before any React state
+          // lands, and the values are in place by the time set-password
+          // completes (otherwise the sync effect would clobber them with
+          // this browser's pre-link local values).
+          const prefs = await loadUserPrefs();
+          if (!dead && prefs) {
+            if (typeof prefs.country === 'string' && prefs.country) setSelectedCountry(prefs.country);
+            if (typeof prefs.category === 'string' && prefs.category) setSelectedCategory(prefs.category);
+          }
         }
         return;
       }
@@ -967,8 +989,17 @@ export default function App() {
     return () => { dead = true; };
   }, []);
   // Persist the country/category whenever the signed-in user changes them.
+  // v6.9.117: skip the FIRST fire per user — it runs before hydration has
+  // applied the server's saved values, so saving then would clobber them
+  // with this browser's pre-sign-in local values (the load-after-set calls
+  // above shrink the window to zero; this closes it entirely).
+  const hydratedUserRef = useRef<string | null>(null);
   useEffect(() => {
     if (!authSession) return;
+    if (hydratedUserRef.current !== authSession.userId) {
+      hydratedUserRef.current = authSession.userId;
+      return;
+    }
     void saveUserPrefs({ country: selectedCountry, category: selectedCategory });
   }, [authSession, selectedCountry, selectedCategory]);
 
@@ -992,14 +1023,22 @@ export default function App() {
     setAuthBusy(false);
   };
 
+  // v6.9.117: remember why we're showing "check your inbox". sentKind lives
+  // above the handlers, but a sign-in attempt with an unconfirmed address
+  // routes here too — without this, that screen showed stale reset copy.
+  const showSentConfirm = (em?: string) => {
+    if (em) setAuthEmail(em);
+    setSentKind('confirm');
+    setAuthView('sent');
+  };
+
   const handleSignUp = async (email: string, pw: string) => {
     setAuthBusy(true); setAuthMsg(null);
     const r = await signUp(email, pw);
     if (r.error) {
       setAuthMsg({ kind: 'err', text: friendlyAuthError(r.error).text });
     } else if (r.needsConfirm) {
-      setSentKind('confirm');
-      setAuthView('sent');
+      showSentConfirm();
     } else {
       setAuthSession(r.session);
       setAuthPanelOpen(false);
@@ -1036,6 +1075,12 @@ export default function App() {
       setRecoverySession(null);
       setAuthPanelOpen(false);
       setAuthMsg(null);
+      // v6.9.117: same race as sign-in — the server's saved prefs must be
+      // in the fields before the sync effect's first fire, or a returning
+      // user's saved country/category get clobbered by local values.
+      const prefs = await loadUserPrefs();
+      if (typeof prefs?.country === 'string' && prefs.country) setSelectedCountry(prefs.country);
+      if (typeof prefs?.category === 'string' && prefs.category) setSelectedCategory(prefs.category);
     }
     setAuthBusy(false);
   };
@@ -1058,6 +1103,9 @@ export default function App() {
     setAuthSession(null);
     setAuthPanelOpen(false);
     setAuthMsg(null);
+    // v6.9.117: reset the view too — reopening the panel after sign-out
+    // showed the stale "Change password" screen with an empty identity.
+    setAuthView('signin');
   };
 
   // v6.9.116: confirmation toast — the imperative helper appends outside
@@ -2234,6 +2282,7 @@ export default function App() {
           onSignUp={handleSignUp}
           onForgot={handleForgot}
           onResend={handleResend}
+          onShowInboxConfirm={showSentConfirm}
           onSetNewPassword={handleSetNewPassword}
           onChangePassword={handleChangePassword}
           onSignOut={handleAccountSignOut}
