@@ -1137,6 +1137,15 @@ export default function App() {
     const handler = () => {
       const b = (window as any).__selectedBiz;
       if (b) {
+        // v6.9.123: belt-and-braces — panel state must never carry a
+        // non-array `branches` (tile stringification or a stale producer).
+        if (!Array.isArray(b.branches)) {
+          let arr: any[] = [];
+          if (typeof b.branches === 'string' && b.branches) {
+            try { const v = JSON.parse(b.branches); if (Array.isArray(v)) arr = v; } catch { /* not JSON — empty */ }
+          }
+          b.branches = arr;
+        }
         setSelectedBiz(b);
         // Scroll panel into view after render
         setTimeout(() => {
@@ -1297,6 +1306,17 @@ export default function App() {
             .setHTML(html)
             .addTo(map);
           // Also set state for the panel below (compact)
+          // v6.9.123: vector-tile properties stringify complex values — an
+          // array-of-objects property (branches) comes back as a JSON string
+          // ("[{...}]"). A string passes the length>0 render guard but has no
+          // .map, crashing the whole app into the ErrorBoundary (observed
+          // live). Parse it back into a real array here, the source of truth
+          // for the panel state.
+          let clickBranches: {url:string;title?:string;phone?:string;email?:string;address?:string}[] = [];
+          if (Array.isArray(p.branches)) clickBranches = p.branches.slice(0, 12);
+          else if (typeof p.branches === 'string' && p.branches) {
+            try { const v = JSON.parse(p.branches); if (Array.isArray(v)) clickBranches = v.slice(0, 12); } catch { /* not JSON — leave empty */ }
+          }
           (window as any).__selectedBiz = {
             name: p.name || '', category: p.category || '', categoryLabel: p.categoryLabel || '',
             color: p.color || '#64748b', phone: p.phone || '', email: p.email || '',
@@ -1306,7 +1326,7 @@ export default function App() {
             rating: p.rating || 0, reviewCount: p.reviewCount || 0, hours: p.hours || '',
             lat: coords[1], lon: coords[0],
             image: p.image || '',
-            branches: p.branches || [],
+            branches: clickBranches,
           };
           window.dispatchEvent(new CustomEvent('biz-click'));
         };
@@ -3423,7 +3443,7 @@ export default function App() {
                         {selectedBiz.pinterest && <a href={selectedBiz.pinterest} target="_blank" className="text-red-400 hover:underline">Pin</a>}
                         <a href={`https://www.google.com/maps/search/?api=1&query=${selectedBiz.lat},${selectedBiz.lon}`} target="_blank" className="text-emerald-400 hover:underline ml-auto">📍 Maps</a>
                       </div>
-                      {selectedBiz.branches && selectedBiz.branches.length > 0 && (
+                      {Array.isArray(selectedBiz.branches) && selectedBiz.branches.length > 0 && (
                         <details className="mt-1.5 group">
                           <summary className="cursor-pointer select-none text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors">
                             🏪 Branches ({selectedBiz.branches.length})
@@ -3469,7 +3489,7 @@ export default function App() {
                       {selectedBiz.email && <a href={'mailto:' + selectedBiz.email} className="text-blue-400 hover:underline truncate">✉️ {selectedBiz.email}</a>}
                       {selectedBiz.website && <a href={selectedBiz.website} target="_blank" className="text-blue-400 hover:underline truncate">🌐 {selectedBiz.website.replace(/^https?:\/\//, '').substring(0, 35)}</a>}
                     </div>
-                    {selectedBiz.branches && selectedBiz.branches.length > 0 && (
+                    {Array.isArray(selectedBiz.branches) && selectedBiz.branches.length > 0 && (
                       <details className="mt-1 pl-4">
                         <summary className="cursor-pointer select-none text-[11px] font-medium text-muted-foreground">🏪 Branches ({selectedBiz.branches.length})</summary>
                         <div className="mt-1 max-h-36 overflow-y-auto rounded-md border border-border/60 divide-y divide-border/40">
