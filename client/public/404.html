@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Blue Ocean</title>
+<script>
+/*
+ * SPA fallback for GitHub Pages (v6.9.120).
+ *
+ * Pages serves static files only, so deep links like /Blue-Ocean/admin hit
+ * this 404 page. The admin console is a client route: rewriting to the SPA
+ * entry (index.html) WITHOUT changing the URL lets main.tsx's route check
+ * (location.pathname) render the right view. The reload-once guard prevents
+ * a loop if the SPA itself 404s again.
+ */
+(function () {
+  if (sessionStorage.getItem('bo_404_reload') === '1') return; // loop guard
+  sessionStorage.setItem('bo_404_reload', '1');
+  var base = location.pathname.replace(/[^/]*$/, '');
+  location.replace(base + 'index.html' + location.search + location.hash);
+})();
+</script>
+<noscript><meta http-equiv="refresh" content="0; url=/"></noscript>
+</head>
+<body style="font-family: system-ui, sans-serif; background:#0b1d33; color:#e8f0fa;">
+Loading Blue Ocean…
+</body>
+</html>

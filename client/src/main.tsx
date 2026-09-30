@@ -1,18 +1,22 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
+import AdminPanel from './AdminPanel'
 import ErrorBoundary from './ErrorBoundary'
 import './index.css'
 
-// v6.9.28: ErrorBoundary wraps the app — a render crash or a failed dynamic
-// import (stale deploy chunk 404) now shows a recovery screen instead of a
-// permanent black screen. It also pre-warms the maplibre chunk: if THAT import
-// fails (old cached index.html pointing at deleted assets), we hard-reload
-// once so the fresh index.html + assets load together.
+// v6.9.120: /admin route — the Pages SPA is served from /Blue-Ocean/, so the
+// admin console lives at /Blue-Ocean/admin (also reachable as /admin on the
+// bare domain via the redirector's 404 forward). Render it WITHOUT the app
+// chrome so the console stays isolated from user sessions.
+const ADMIN_ROUTE = /\/(blue-ocean)?\/?admin\/?$/i.test(location.pathname);
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ErrorBoundary>
-      <App />
+      {ADMIN_ROUTE
+        ? <AdminPanel />
+        : <App />}
     </ErrorBoundary>
   </React.StrictMode>,
 )

@@ -772,6 +772,8 @@ const CAT_COLORS: Record<string, string> = {
 };
 
 import { APP_VERSION } from './version'; // v6.9.29: shared stamp — visible on every view
+// v6.9.120: boot traffic logging + suspension enforcement (admin console lives in main.tsx router)
+import { logBootEvent, checkSuspension } from './telemetry';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country' | 'coverage' | 'history'>('analysis');
@@ -781,6 +783,21 @@ export default function App() {
     return s && !sessionExpired() ? s : null;
   });
   const [authPanelOpen, setAuthPanelOpen] = useState(false);
+  // v6.9.120: server-side suspension of this account (admin action)
+  const [suspendedMsg, setSuspendedMsg] = useState<string | null>(null);
+
+  // v6.9.120: boot traffic log (fire-and-forget; never delays or breaks boot)
+  // and a server-side suspension check for signed-in sessions.
+  useEffect(() => {
+    logBootEvent(location.pathname + location.search, APP_VERSION, authSession?.accessToken ?? null);
+    if (!authSession?.accessToken) return;
+    let dead = false;
+    void checkSuspension(authSession.accessToken).then(s => {
+      if (!dead && s?.suspended) setSuspendedMsg(s.reason || 'Your account has been suspended.');
+    });
+    return () => { dead = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authSession?.accessToken]);
   // v6.9.115: single AuthPanel component replaces the three ad-hoc panels.
   const [authView, setAuthView] = useState<AuthView>('signin');
   const [sentKind, setSentKind] = useState<'confirm' | 'reset'>('confirm');
@@ -2078,6 +2095,12 @@ export default function App() {
   if (viewMode === 'compare') {
     return (
       <div className="min-h-screen bg-background">
+        {suspendedMsg && (
+          <div className="border-b border-rose-500/40 bg-rose-500/15 px-4 py-2 text-center text-xs text-rose-300">
+            ⛔ {suspendedMsg} — cloud sync is paused for this account.{' '}
+            <button className="underline" onClick={() => { signOut(); setAuthSession(null); setSuspendedMsg(null); }}>Sign out</button>
+          </div>
+        )}
         <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md">
           <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4">
             <div className="flex items-center gap-2">
@@ -2304,6 +2327,12 @@ export default function App() {
             </p>
             {bkToast && (
               <div className="mb-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">{bkToast}</div>
+            )}
+            {suspendedMsg && (
+              <div className="mb-3 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+                ⛔ {suspendedMsg} — cloud sync and run backup are paused for this account.{' '}
+                <button className="underline" onClick={() => { signOut(); setAuthSession(null); setSuspendedMsg(null); }}>Sign out</button>
+              </div>
             )}
             <div className="grid gap-3 sm:grid-cols-2">
               {(['brave', 'serper', 'tavily', 'openrouter'] as const).map(provider => (
