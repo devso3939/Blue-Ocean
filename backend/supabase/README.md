@@ -83,11 +83,37 @@ GoTrue only honors `email_redirect_to` values that appear in the project's
 **Redirect URLs allow-list** (Dashboard → Authentication → URL Configuration →
 Redirect URLs). Anything else silently falls back to the **Site URL** default.
 
-**Current state (observed 2026-09-28):** the allow-list only contains
-`http://localhost:3199`, so a recovery link requested from the live site
-redirected to `http://localhost:3199/` — the bare Site URL root, ignoring the
-requested `https://devso3939.github.io/Blue-Ocean/` path. It still works
-(Site URL serves the SPA), but not on the exact page.
+**Current state (2026-09-30, FIXED & verified live):** Site URL is
+`https://devso3939.github.io/Blue-Ocean/` and the allow-list holds
+`https://devso3939.github.io/Blue-Ocean/*` plus
+`http://localhost:3199/Blue-Ocean/*`. Probe facts (via `/auth/v1/verify?token=…`):
+
+- requested app path → **honored**; no `redirect_to` param → **Site URL** (app path);
+- foreign host → **rejected**, falls back to Site URL;
+- **same-host gotcha:** any URL on the Site URL's own host is honored even
+  without an allow-list hit — `https://devso3939.github.io/<anything>` passes.
+  A request made from a stale tab at the **bare domain** therefore bakes
+  `redirect_to=https://devso3939.github.io/` into the email, and that landing
+  is a GitHub Pages 404 (no SPA there) with the token stranded in `#hash`.
+- stale `http://localhost:3000` links from old emails are now **rejected** →
+  GoTrue falls back to the live Site URL, so old emails degrade gracefully to
+  an "expired link" panel on the app instead of `ERR_CONNECTION_REFUSED`.
+
+**Bare-root safety net (2026-09-30):** the user-site repo
+`devso3939/devso3939.github.io` (Pages at the bare domain) serves a tiny
+redirector (`index.html` + `404.html`) that forwards every landing — hash
+included — to `/Blue-Ocean/`, where the normal link consumption runs. NOTE:
+the forwarder must NOT call `history.replaceState` before `location.replace` —
+rewriting the URL first turns the navigation into a same-document no-op and
+strands the user (observed in the field; fixed in commit f475636).
+
+**Client hardening (v6.9.119):** `postAuthEmail` detects a bare-root origin
+and requests the app path instead, so even a stale tab can no longer bake a
+bad redirect into auth emails.
+
+Real-email E2E on the live site (2026-09-30): signup confirmation clicked
+from Gmail landed on the live app signed-in; recovery link → set-new-password
+panel → old password rejected → new password signs in.
 
 **Required dashboard change** (manual, one-time — no Management API token in
 this repo):
@@ -117,11 +143,12 @@ alongside `serve_prod.py` whenever auth emails are tested locally:
     python serve_prod.py            # app on :3199
     python serve_confirm_relay.py   # Site-URL fallback relay on :3000
 
-Status as of 2026-09-30 (FIXED in the dashboard): Site URL is
-`https://devso3939.github.io/Blue-Ocean/` and the allow-list holds
-`https://devso3939.github.io/Blue-Ocean/*` plus
-`http://localhost:3199/Blue-Ocean/*` (verified via /auth/v1/verify probes and
-live confirmation-link landings on both targets — users land back signed-in).
+Status as of 2026-09-30: the dashboard fallback no longer points at
+localhost (Site URL = the live Pages app), so the relay is only needed when
+`redirect_to` explicitly targets `http://localhost:3199/Blue-Ocean/*`. Old
+emails with `localhost:3000` links self-heal to the live Site URL (rejected
+→ fallback) — no relay required. Keep it running anyway when testing auth
+locally so those links keep working offline.
 Gotcha discovered en route: GoTrue globs do NOT match across `/`, so a bare
 `http://localhost:3199/*` never matches the app's subpath — patterns must be
 path-shaped (a stale `http://localhost:3199/*` entry is harmless). The relay

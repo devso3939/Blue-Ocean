@@ -178,6 +178,13 @@ export async function getAccessToken(): Promise<string | null> {
  * redirects", for the dashboard allow-list this depends on).
  */
 async function postAuthEmail(path: string, body: Record<string, unknown>): Promise<unknown> {
+  // v6.9.119: guard against requests from pages OUTSIDE the app path (a stale
+  // tab at the bare domain would bake redirect_to=<bare root> into every auth
+  // email — GoTrue honors same-host redirects even without an allow-list hit,
+  // and that landing is a GitHub Pages 404). The bare root now serves a
+  // redirector (devso3939.github.io repo), but never asking for it is better.
+  const onBareRoot = /^https:\/\/devso3939\.github\.io\/(Blue-Ocean\/)?$/.test(location.origin + location.pathname);
+  const redirectToPage = onBareRoot ? 'https://devso3939.github.io/Blue-Ocean/' : location.origin + location.pathname;
   const post = (redirectTo?: string) => supabaseAuthFetch(`${SB_URL}/auth/v1/${path}`, {
     method: 'POST',
     headers: { 'apikey': SB_ANON, 'Content-Type': 'application/json' },
@@ -185,7 +192,7 @@ async function postAuthEmail(path: string, body: Record<string, unknown>): Promi
   });
   try {
     noteRedirectRequest(); // v6.9.113: remember for redirect diagnostics
-    return await post(location.origin + location.pathname);
+    return await post(redirectToPage);
   } catch (e) {
     if (/redirect/i.test(String((e as Error)?.message))) return await post();
     throw e;
