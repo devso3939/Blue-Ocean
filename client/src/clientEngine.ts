@@ -372,17 +372,32 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
             if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(mdP[1])) b.phone = mdP[1].trim();
           }
         }
-        if (!b.email) {
+        {
+          // v6.9.124: microdata email may UPGRADE a template-hosted email
+          // (info@schema.org from boilerplate) but never displaces a real one.
           const mdE = full.match(/itemprop=["']email["'][^>]*>([^<]{6,80})</i) || full.match(/<meta[^>]*itemprop=["']email["'][^>]*content=["']([^"']{6,80})/i);
-          if (mdE && mdE[1].includes('@') && plausibleEmail(mdE[1].trim())) b.email = mdE[1].trim();
+          if (mdE && mdE[1].includes('@')) {
+            const up = preferEmail(b.email, mdE[1].trim());
+            if (up && up !== b.email) b.email = up;
+          }
         }
       }
 
       // 3. Phone from tel: links or structured text
       if (!b.phone) {
-        const telMatch = full.match(/href="tel:([^"]+)"/);
-        if (telMatch && plausiblePhone(telMatch[1])) b.phone = telMatch[1].trim();
-        else {
+        // v6.9.124: tolerate single-quoted attrs + junk inside the tel: value
+        const telMatch = full.match(/href\s*=\s*["']tel:([^"']+)["']/i);
+        if (telMatch) {
+          const telRaw = (() => { try { return decodeURIComponent(telMatch[1]); } catch { return telMatch[1]; } })().replace(/[^\d+\-\s().]/g, '').trim();
+          if (telRaw && plausiblePhone(telRaw)) b.phone = telRaw;
+        }
+        if (!b.phone) {
+          // v6.9.124: labeled plain-text phone fallback ("Phone: +995 …" as
+          // visible text — no tel: link, no itemprop).
+          const ltPh = extractLabeledPhone(full);
+          if (ltPh && plausiblePhone(ltPh)) b.phone = ltPh.trim();
+        }
+        if (!b.phone) {
           // Look for phone in structured areas (footer, header, contact section)
           const phoneText = full.match(/\+?[\d][\d\s\-\.()]{7,18}/g);
           if (phoneText) {
@@ -414,16 +429,14 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
             }
           }
         }
-        // c. Cloudflare encoded emails
-        if (!b.email) {
-          const encoded = full.match(/data-cfemail="([a-f0-9]+)"/i);
-          if (encoded) {
-            try {
-              const bytes = encoded[1].match(/.{2}/g)!.map(h => parseInt(h, 16));
-              const key = bytes[0];
-              const decoded = bytes.slice(1).map(b => b ^ key).map(b => String.fromCharCode(b)).join('');
-              if (decoded.includes('@') && !EXCLUDE.test(decoded)) b.email = decoded;
-            } catch {}
+        // c. Cloudflare encoded emails — v6.9.124: data-cfemail AND the
+        // /cdn-cgi/l/email-protection#hex href form; a decoded owner-placed
+        // address upgrades a template-hosted email.
+        {
+          const decoded = extractCfEmail(full);
+          if (decoded) {
+            const up = preferEmail(b.email, decoded);
+            if (up && up !== b.email) b.email = up;
           }
         }
         // d. Encoded with &#64; (HTML entity for @)
@@ -5369,7 +5382,13 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
 // collects INTERNAL links that smell like contact-bearing pages, and
 // follows the top few with the full extractor.
 async function deepCrawlWebsite(b: Business): Promise<void> {
-  if (!b.website || (b.email && b.phone)) return;
+  if (!b.website) return;
+  // v6.9.124: a business whose phone exists but whose email is a template
+  // placeholder (info@schema.org from site boilerplate) is worth one pass —
+  // the shared extractor's microdata/Cloudflare decoders often recover the
+  // real address. Fully-contacted businesses still skip the crawl.
+  const emailIsTemplate = !!b.email && _EMAIL_PLATFORM_RE.test((b.email.split('@')[1] || ''));
+  if (b.email && b.phone && !emailIsTemplate) return;
   try {
     const base = b.website.replace(/\/$/, '');
     let host = '';
@@ -9557,7 +9576,7 @@ __internals.extractFromHtml = extractFromHtmlModule;
 // mailto vs Cloudflare etc. Module-level so both scrape sites (deep crawler
 // and this module extractor) feed the same tally. Purely additive telemetry:
 // no extraction behavior changes, reset at every scan start.
-export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl' | 'wayback' | 'render' | 'rnav' | 'rsearch' | 'rbing' | 'rsocial' | 'rinfer' | 'rcms';
+export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'labeltext' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl' | 'wayback' | 'render' | 'rnav' | 'rsearch' | 'rbing' | 'rsocial' | 'rinfer' | 'rcms';
 export interface ExtractionYieldEntry { found: number; tries: number; }
 export interface ExtractionYieldMap { [k: string]: ExtractionYieldEntry; }
 const _extractYield: ExtractionYieldMap = {};
@@ -9606,14 +9625,72 @@ export function getExtractionYield(): ExtractionYieldMap { return JSON.parse(JSO
 // (module-scope utility: pure parsing, no closure state — used by the
 // enrichment pipeline inside queryBusinesses and by the parsing test harness)
 // v6.9.59: every extraction point now reports hits/tries to _extractYield.
+// ── v6.9.124: shared contact decoders + microdata bridge ─────────────
+// Cloudflare email-protection decode. The classic small-site obfuscation:
+// <a href="/cdn-cgi/l/email-protection#3f4a…"><span class="__cf_email__" data-cfemail="3f4a…">[email protected]</span></a>
+// The hex payload is XOR'd with its first byte. The old regex only matched
+// data-cfemail="…" — the /cdn-cgi/l/email-protection#HEX href form (and the
+// <span class="__cf_email__"> variant) were invisible, so Cloudflare-armed
+// sites (a large share of small-business sites) yielded NO email at all.
+function decodeCfEmailHex(hex: string): string {
+  try {
+    const bytes = hex.match(/.{2}/g)!.map(h => parseInt(h, 16));
+    const key = bytes[0];
+    return bytes.slice(1).map(x => String.fromCharCode(x ^ key)).join('');
+  } catch { return ''; }
+}
+function extractCfEmail(html: string): string {
+  const hexes = [
+    ...html.matchAll(/data-cfemail="([a-f0-9]{16,})"/gi),
+    ...html.matchAll(/email-protection#([a-f0-9]{16,})/gi),
+  ];
+  for (const m of hexes) {
+    const decoded = decodeCfEmailHex(m[1]);
+    if (decoded.includes('@') && plausibleEmail(decoded)) return decoded;
+  }
+  return '';
+}
+// Labeled plain-text phone: many sites render "Phone: +995 322 …" as visible
+// text with NO tel: link and NO itemprop — only the label regex path could
+// see it, and it demanded [\d\s\-\.()]{7,18} right after the label, missing
+// forms like "Tel.: +995(32) 219-66-69" (colon-adjacent parens) or
+// "Телефон: +995 322 19 66 69 доб. 1". Relaxed to accept any chars and let
+// plausiblePhone do the judgement.
+function extractLabeledPhone(html: string): string {
+  const m = html.match(/(?:phone|tel|telephone|mobile|cell|whatsapp|viber|hotline|call(?:\s+us)?|contact(?:\s+us)?|teléfono|teléfonos|móvil|móviles|telefone|téléphone|téléphones|telefon(?:o|i|ul)?|telefoon|телефон|телефоны|τηλέφωνο|τηλέφωνα|ტელეფონი|تلفن|هاتف)[^+\n]{0,20}(\+?[\d][\d\s\-\(\)\.]{6,18}\d)/i);
+  return m ? m[1] : '';
+}
+
+// ── v6.9.124: prefer real contact rows over schema.org template junk.
+// Template boilerplate (<itemprop="email">info@schema.org, JSON-LD
+// Organization placeholders) previously filled emails the final validation
+// sweep then had to purge. First-WIN now prefers any candidate that isn't a
+// template placeholder; template-hosted candidates still fill the field so
+// the final sweep retains its purge ability.
+function preferEmail(current: string | undefined, candidate: string): string | undefined {
+  const cur = (current || '').trim();
+  const cand = (candidate || '').trim();
+  if (!cand || !plausibleEmail(cand)) return current;
+  if (!cur) return cand;
+  const curTempl = _EMAIL_PLATFORM_RE.test(cur.split('@')[1] || '');
+  const candTempl = _EMAIL_PLATFORM_RE.test(cand.split('@')[1] || '');
+  if (curTempl && !candTempl) return cand; // upgrade: real domain replaces template junk
+  return cur;
+}
+
 function extractFromHtmlModule(html: string, b: Business): void {
   const JUNK = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|duckduckgo|schema\.org|privacy.*policy|terms.*service|cookie/i;
   const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;    // Phone: tel: links, then text regex
   if (!b.phone) {
-    // 1. tel: links (most reliable — tolerate single quotes & spacing)
+    // 1. tel: links (most reliable). v6.9.124: tolerate single-quoted
+    // attributes and any junk inside the value — decode, strip non-phone
+    // chars, then let plausiblePhone judge.
     yieldTry('tel');
     const telM = html.match(/href\s*=\s*["']tel:([^"']+)["']/i);
-    if (telM) { b.phone = (() => { try { return decodeURIComponent(telM[1]).trim(); } catch { return telM[1].trim(); } })(); yieldBump('tel'); }
+    if (telM) {
+      const telRaw = (() => { try { return decodeURIComponent(telM[1]); } catch { return telM[1]; } })().replace(/^(?:\s|&nbsp;)+/, '').replace(/[^\d+\-\s().]/g, '').trim();
+      if (telRaw && plausiblePhone(telRaw)) { b.phone = telRaw; yieldBump('tel'); }
+    }
     // 1b. WhatsApp click-to-chat links — wa.me/995… or api.whatsapp.com/send?phone=…
     if (!b.phone) {
       yieldTry('wa');
@@ -9649,6 +9726,15 @@ function extractFromHtmlModule(html: string, b: Business): void {
     if (!b.phone) {
       const ruM = html.match(/\+7\s?\d{3}\s?\d{3}\s?\d{2}\s?\d{2}/);
       if (ruM) b.phone = ruM[0].trim();
+    }
+    // 2a. v6.9.124: labeled plain-text phone — sites that render "Phone:
+    // +995 …" as visible text with no tel: link and no itemprop. The old
+    // single-line label regex demanded a tight char class right after the
+    // label and missed colon-adjacent parens and extension suffixes.
+    if (!b.phone) {
+      yieldTry('labeltext');
+      const ltPh = extractLabeledPhone(html);
+      if (ltPh && plausiblePhone(ltPh)) { b.phone = ltPh.trim(); yieldBump('labeltext'); }
     }
     // 2b. JSON-LD telephone — many sites embed the phone ONLY in structured
     // data. v6.9.58: the walker reaches @graph + contactPoint nodes.
@@ -9768,17 +9854,17 @@ function extractFromHtmlModule(html: string, b: Business): void {
         }
       }
     }
-    // 5. Cloudflare encoded emails
-    if (!b.email) {
+    // 5. Cloudflare encoded emails — v6.9.124: also the /cdn-cgi/l/
+    // email-protection#hex href form and the __cf_email__ span, which the
+    // data-cfemail-only regex never saw. A CF-encoded address is placed by
+    // the site owner deliberately, so it UPGRADES a template-hosted email
+    // (info@schema.org from boilerplate) but never displaces a real win.
+    {
       yieldTry('cfdecode');
-      const cfM = html.match(/data-cfemail="([a-f0-9]+)"/i);
-      if (cfM) {
-        try {
-          const bytes = cfM[1].match(/.{2}/g)!.map(h => parseInt(h, 16));
-          const key = bytes[0];
-          const decoded = bytes.slice(1).map(x => x ^ key).map(x => String.fromCharCode(x)).join('');
-          if (decoded.includes('@') && plausibleEmail(decoded)) { b.email = decoded; yieldBump('cfdecode'); }
-        } catch {}
+      const cfDecoded = extractCfEmail(html);
+      if (cfDecoded) {
+        const up = preferEmail(b.email, cfDecoded);
+        if (up && up !== b.email) { b.email = up; yieldBump('cfdecode'); }
       }
     }
     // 6. HTML entity encoded (@)
@@ -9926,5 +10012,55 @@ function extractFromHtmlModule(html: string, b: Business): void {
       const val = parseInt(revM[1].replace(/,/g, ''));
       if (val > 0 && val < 100000) b.reviewCount = val;
     }
+  }
+}
+
+// ── v6.9.124: contact enrichment for Discover Opportunities ──────────────
+// Discover mode deliberately skips the full enrichment queue (a full-city
+// scan can surface thousands of businesses; the 8-pass pipeline is built
+// for hundreds). But skipping EVERYTHING meant discover pins carried raw
+// OSM tags only — no phone/email hunt at all. This lane gives every
+// website-owning business a bounded, site-first shot:
+//   1. enrichFromWebsiteDeep — homepage + nav-discovered contact pages +
+//      fixed-path probes (JSON-LD, microdata, tel:/mailto:, Cloudflare
+//      decoders, labeled-text phone, branch rows)
+//   2. deepCrawlWebsite for the stubborn remainder — ranked internal-link
+//      follow-up (cap 5 fetches)
+// All polite-delay machinery (hostIsOpen circuit breaker, per-fetch
+// timeouts, surge guards) is inherited unchanged. Cancel-aware so closing
+// the view or starting a new run stops the lane immediately.
+export async function enrichDiscoverContacts(
+  biz: Map<string, Business[]>,
+  opts?: { signal?: AbortSignal; onProgress?: (msg: string, done: number, total: number) => void },
+): Promise<void> {
+  const all: Business[] = [];
+  biz.forEach(arr => { for (const b of arr) all.push(b); });
+  // Candidates: has a website AND missing at least one real contact field.
+  // A template-hosted email (info@schema.org boilerplate) counts as missing.
+  const need = all.filter(b => b.website && (!b.phone || !b.email || _EMAIL_PLATFORM_RE.test((b.email.split('@')[1] || ''))));
+  if (need.length === 0) return;
+
+  const BATCH = 6;
+  const t0 = Date.now();
+  let done = 0;
+  for (let i = 0; i < need.length; i += BATCH) {
+    if (opts?.signal?.aborted) return;
+    const batch = need.slice(i, i + BATCH);
+    await Promise.all(batch.map(async (b) => {
+      if (opts?.signal?.aborted) return;
+      try {
+        // v6.9.124: enrichFromWebsiteDeep already includes nav-discovered
+        // contact pages + fixed-path probes; the internal deepCrawlWebsite
+        // lives inside queryBusinesses' scope, so no second-layer call here.
+        await enrichFromWebsiteDeep(b);
+      } catch { /* per-business failures never break the lane */ }
+    }));
+    done += batch.length;
+    opts?.onProgress?.(`Finding phones & emails… ${done}/${need.length}`, done, need.length);
+    // Hard budget: 6 minutes — discover mode's core promise is fast results;
+    // this lane tops up contacts without ever hijacking the run.
+    if (Date.now() - t0 > 360_000) break;
+    // Polite inter-batch pause; a 5xx-struck host backs off via hostIsOpen.
+    await new Promise(r => setTimeout(r, 200));
   }
 }

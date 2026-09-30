@@ -17,6 +17,7 @@ import {
   type SanityCheck,
   runDiscoveryPhases,
   runAIPhase,
+  enrichDiscoverContacts,
   getSmartCategoryAnalysis,
   sanityCheckOpportunities,
   aiVerifyOpportunities,
@@ -1417,6 +1418,7 @@ export default function App() {
   // Discover all opportunities
   const runAnalysis = useCallback(async () => {
     if (!selectedCity) return;
+    const runStartTs = Date.now(); // v6.9.124: stable history id for the post-lane re-capture
     const ac = new AbortController();
     abortRef.current = ac;
     setCancelSignal(ac.signal);
@@ -1546,6 +1548,23 @@ export default function App() {
       // hangs on "thinking" — timeout surfaces the honest fallback.
       void (async () => {
         try {
+          // ── v6.9.124: contact top-up for discover mode ──
+          // The scan itself skipped enrichment (fast results first); now that
+          // the UI is interactive, give website-owning businesses a bounded
+          // site-first contact pass (JSON-LD, tel:/mailto:, Cloudflare
+          // decoders, labeled-text phones). Re-renders the map/table and
+          // re-captures the SAME history record when done.
+          try {
+            await enrichDiscoverContacts(biz, {
+              signal: ac.signal,
+              onProgress: (msg) => setRescanNote(msg),
+            });
+            if (!ac.signal.aborted) {
+              setBusinesses(new Map(biz));
+              setTimeout(() => captureRun('discover', `discover-${selectedCity.name}-${runStartTs}`), 120);
+            }
+          } catch { /* contact lane best-effort */ }
+          if (ac.signal.aborted) return;
           setLoadingStage('AI analyzing in background…');
           const { aiInsights: insights, aiAnalysis: analysis } = await runAIPhase(
             biz, selectedCity.population || 0,
@@ -1669,7 +1688,9 @@ export default function App() {
       setLoading(false);
       setLoadingStage('');
       // v6.9.88: capture the completed run into History (best-effort).
-      captureRun('discover');
+      // v6.9.124: deterministic id — the background contact-lane re-capture
+      // overwrites this same record with the enriched business data.
+      captureRun('discover', `discover-${selectedCity.name}-${runStartTs}`);
     }
   }, [selectedCity]);
 
@@ -1679,7 +1700,7 @@ export default function App() {
   // v6.9.88: always-fresh state mirror for captureRun (stale-closure fix)
   const captureStateRef = useRef({ city: selectedCity, businesses, opportunities, demandSignals, aiInsights, aiAnalysis, selectedOppCategory, scanAreaLabel, rescanNote });
   useEffect(() => { captureStateRef.current = { city: selectedCity, businesses, opportunities, demandSignals, aiInsights, aiAnalysis, selectedOppCategory, scanAreaLabel, rescanNote }; });
-  const captureRun = (kind: 'analyze' | 'discover') => {
+  const captureRun = (kind: 'analyze' | 'discover', fixedId?: string) => {
     try {
       // Read the LATEST state via ref — the flow's useCallback pinned this
       // closure at run start, when `businesses` was still empty (the stale-
@@ -1690,7 +1711,10 @@ export default function App() {
       const cnt = (pred: (b: Business) => boolean) => bizArr.reduce((s, [, arr]) => s + arr.filter(pred).length, 0);
       const tot = bizArr.reduce((s, [, arr]) => s + arr.length, 0);
       const rec: RunRecord = {
-        id: `${kind}-${S.city.name}-${(kind === 'analyze' ? selectedCategory : S.selectedOppCategory) || 'all'}-${Date.now()}`,
+        // v6.9.124: fixedId lets the discover contact-lane re-capture update
+        // the SAME record (contacts found after the first save) instead of
+        // duplicating it in history.
+        id: fixedId || `${kind}-${S.city.name}-${(kind === 'analyze' ? selectedCategory : S.selectedOppCategory) || 'all'}-${Date.now()}`,
         kind, ts: Date.now(), version: APP_VERSION,
         city: { name: S.city.name, country: S.city.country, countryCode: S.city.countryCode, lat: S.city.lat, lon: S.city.lon, population: S.city.population, bbox: S.city.bbox },
         category: kind === 'analyze' ? selectedCategory : null,
