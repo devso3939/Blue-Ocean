@@ -16,8 +16,12 @@
 (function () {
   if (sessionStorage.getItem('bo_404_reload') === '1') return; // loop guard
   sessionStorage.setItem('bo_404_reload', '1');
-  var base = location.pathname.replace(/[^/]*$/, '');
-  var route = location.pathname + (location.search || '');
+  // v6.9.122: normalize a trailing slash FIRST — for /Blue-Ocean/admin/ the
+  // naive base would keep /admin/ and look for admin/index.html (missing →
+  // second 404 → stuck on this page).
+  var clean = location.pathname.replace(/\/+$/, '');
+  var base = clean.replace(/[^/]*$/, '') + '/';
+  var route = clean + (location.search || '');
   location.replace(base + 'index.html?__route=' + encodeURIComponent(route) + location.hash);
 })();
 </script>
