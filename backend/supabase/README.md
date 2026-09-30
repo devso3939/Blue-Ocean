@@ -161,3 +161,30 @@ below remains useful whenever a project's Site URL still points at :3000.
   68 opportunities in 15s
 - `analyze` stores a full `MarketAnalysis` (626 cafes, density grid, World
   Bank market context, score + label) retrievable by `analysis_id`
+
+## Admin panel (v6.9.120+, migration 021)
+
+- URLs: the app route `/admin` — live at
+  `https://devso3939.github.io/Blue-Ocean/admin` (bare-root
+  `https://devso3939.github.io/admin` forwards there via the user-site 404).
+  Locally, `serve_prod.py` serves the same route through its SPA fallback.
+- Login: the email field is fixed to the owner account
+  (`bo.is_admin()` hardcodes it, re-checked in every admin RPC — anon calls
+  fail with P0001 "forbidden"). Password is user-chosen and set server-side
+  via the Supabase admin API; rotate it in Dashboard → Authentication → Users.
+- Tabs:
+  - **Overview** — visitors 24h/7d (distinct `coalesce(user_id, session_id)`
+    from `bo.traffic_events` boot rows), registered users, total/guest/user
+    runs, businesses scanned.
+  - **Traffic** — boot-event log with a CSS bar chart per hour.
+  - **Runs** — every archived run with Guest/User attribution (guest =
+    `bo.run_archive.user_id IS NULL`), scope filter.
+  - **Users** — registered users with email, run count, businesses scanned
+    (usage = run count + `sum(biz_count)`), last seen; **Suspend/Unsuspend**
+    (revokes sessions; server rejects the user's run uploads and prefs writes
+    with "account suspended") and **Delete** (cascades auth user + data).
+- Data comes from `bo.rpc_admin_overview/_traffic/_runs/_users` +
+  `rpc_admin_set_suspended` / `rpc_admin_delete_user`, all gated by
+  `bo.is_admin()`; traffic is written by `bo.rpc_event_log` (called
+  fire-and-forget by the client on boot).
+- See `backend/migrations/021_admin_panel.sql` for the full schema.
