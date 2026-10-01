@@ -863,7 +863,7 @@ export default function App() {
   const [showAllOpps, setShowAllOpps] = useState(false);
   const [aiInsights, setAiInsights] = useState('');
   const [aiAnalysis, setAiAnalysis] = useState<AIAnalysis | null>(null);
-  const [selectedBiz, setSelectedBiz] = useState<{name:string;category:string;categoryLabel:string;color:string;phone:string;email:string;website:string;address:string;facebook:string;instagram:string;linkedin:string;youtube:string;tiktok:string;twitter:string;pinterest:string;rating:number;reviewCount:number;hours:string;lat:number;lon:number;image?:string;branches?:{url:string;title?:string;phone?:string;email?:string;address?:string}[]}|null>(null);
+  const [selectedBiz, setSelectedBiz] = useState<{name:string;category:string;categoryLabel:string;color:string;phone:string;email:string;website:string;address:string;facebook:string;instagram:string;linkedin:string;youtube:string;tiktok:string;twitter:string;pinterest:string;rating:number;reviewCount:number;hours:string;lat:number;lon:number;image?:string;whatsapp?:string;viber?:string;telegram?:string;branches?:{url:string;title?:string;phone?:string;email?:string;address?:string}[]}|null>(null);
   const [enrichProgress, setEnrichProgress] = useState<EnrichmentProgress | null>(null);
   // v6.9.2: engine health (quota / fallback banners) + AI verification notes
   const [engineHealth, setEngineHealth] = useState<EngineHealthEntry[]>([]);
@@ -1287,6 +1287,10 @@ export default function App() {
           if (p.address) contactParts.push(`<span style="color:#94a3b8;font-size:11px">📍 ${escapeHtml(p.address)}</span>`);
           const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${coords[1]},${coords[0]}`;
           contactParts.push(`<a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#34d399;text-decoration:none;font-size:11px">📍 Open in Maps</a>`);
+          // v6.9.125: direct chat links in the popup
+          if (p.whatsapp) contactParts.push(`<a href="${escapeHtml(p.whatsapp)}" target="_blank" rel="noopener noreferrer" style="color:#4ade80;text-decoration:none;font-size:11px">💬 WhatsApp</a>`);
+          if (p.telegram) contactParts.push(`<a href="${escapeHtml(p.telegram)}" target="_blank" rel="noopener noreferrer" style="color:#38bdf8;text-decoration:none;font-size:11px">✈️ Telegram</a>`);
+          if (p.viber) contactParts.push(`<a href="${escapeHtml(p.viber)}" style="color:#c084fc;text-decoration:none;font-size:11px">🟣 Viber</a>`);
           // v6.9.94: real business photo in the popup header (fallback: letter avatar)
           const imgHtml = p.image
             ? `<img src="${escapeHtml(String(p.image))}" alt="" referrerpolicy="no-referrer" style="width:40px;height:40px;border-radius:8px;object-fit:cover;flex-shrink:0" onerror="this.style.display='none'">`
@@ -1327,6 +1331,9 @@ export default function App() {
             rating: p.rating || 0, reviewCount: p.reviewCount || 0, hours: p.hours || '',
             lat: coords[1], lon: coords[0],
             image: p.image || '',
+            whatsapp: typeof p.whatsapp === 'string' ? p.whatsapp : '',
+            viber: typeof p.viber === 'string' ? p.viber : '',
+            telegram: typeof p.telegram === 'string' ? p.telegram : '',
             branches: clickBranches,
           };
           window.dispatchEvent(new CustomEvent('biz-click'));
@@ -1394,6 +1401,7 @@ export default function App() {
         youtube: b.youtube || '',
         tiktok: b.tiktok || '',
         twitter: b.twitter || '', pinterest: b.pinterest || '',
+        whatsapp: b.whatsapp || '', viber: b.viber || '', telegram: b.telegram || '',
         rating: b.rating || 0, reviewCount: b.reviewCount || 0, hours: b.hours || '',
         image: b.image || '',
         branches: (b.branches || []).slice(0, 12),
@@ -3457,6 +3465,13 @@ export default function App() {
                         {selectedBiz.email && <a href={'mailto:' + selectedBiz.email} className="text-blue-400 hover:underline truncate max-w-[180px]">✉️ {selectedBiz.email}</a>}
                         {selectedBiz.website && <a href={selectedBiz.website} target="_blank" className="text-blue-400 hover:underline truncate max-w-[180px]">🌐 {selectedBiz.website.replace(/^https?:\/\//, '').substring(0, 30)}</a>}
                       </div>
+                      {(selectedBiz.whatsapp || selectedBiz.viber || selectedBiz.telegram) && (
+                        <div className="flex gap-1.5 mt-1 flex-wrap">
+                          {selectedBiz.whatsapp && <a href={selectedBiz.whatsapp} target="_blank" rel="noopener noreferrer" title={selectedBiz.whatsapp} className="text-[10px] px-1.5 py-0.5 rounded-full bg-green-500/15 text-green-400 hover:bg-green-500/25 transition-colors">💬 WhatsApp</a>}
+                          {selectedBiz.viber && <a href={selectedBiz.viber} title={selectedBiz.viber} className="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/15 text-purple-400 hover:bg-purple-500/25 transition-colors">🟣 Viber</a>}
+                          {selectedBiz.telegram && <a href={selectedBiz.telegram} target="_blank" rel="noopener noreferrer" title={selectedBiz.telegram} className="text-[10px] px-1.5 py-0.5 rounded-full bg-sky-500/15 text-sky-400 hover:bg-sky-500/25 transition-colors">✈️ Telegram</a>}
+                        </div>
+                      )}
                       <div className="flex gap-2 mt-0.5">
                         {selectedBiz.facebook && <a href={selectedBiz.facebook} target="_blank" className="text-blue-500 hover:underline">FB</a>}
                         {selectedBiz.instagram && <a href={selectedBiz.instagram} target="_blank" className="text-pink-400 hover:underline">IG</a>}
@@ -3513,6 +3528,13 @@ export default function App() {
                       {selectedBiz.email && <a href={'mailto:' + selectedBiz.email} className="text-blue-400 hover:underline truncate">✉️ {selectedBiz.email}</a>}
                       {selectedBiz.website && <a href={selectedBiz.website} target="_blank" className="text-blue-400 hover:underline truncate">🌐 {selectedBiz.website.replace(/^https?:\/\//, '').substring(0, 35)}</a>}
                     </div>
+                    {(selectedBiz.whatsapp || selectedBiz.viber || selectedBiz.telegram) && (
+                      <div className="flex gap-1.5 mt-1 pl-4 flex-wrap">
+                        {selectedBiz.whatsapp && <a href={selectedBiz.whatsapp} target="_blank" rel="noopener noreferrer" className="text-[10px] px-1.5 py-0.5 rounded-full bg-green-500/15 text-green-400 hover:bg-green-500/25 transition-colors">💬 WhatsApp</a>}
+                        {selectedBiz.viber && <a href={selectedBiz.viber} className="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/15 text-purple-400 hover:bg-purple-500/25 transition-colors">🟣 Viber</a>}
+                        {selectedBiz.telegram && <a href={selectedBiz.telegram} target="_blank" rel="noopener noreferrer" className="text-[10px] px-1.5 py-0.5 rounded-full bg-sky-500/15 text-sky-400 hover:bg-sky-500/25 transition-colors">✈️ Telegram</a>}
+                      </div>
+                    )}
                     {Array.isArray(selectedBiz.branches) && selectedBiz.branches.length > 0 && (
                       <details className="mt-1 pl-4">
                         <summary className="cursor-pointer select-none text-[11px] font-medium text-muted-foreground">🏪 Branches ({selectedBiz.branches.length})</summary>

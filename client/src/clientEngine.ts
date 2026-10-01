@@ -306,6 +306,10 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
         } catch { /* image is cosmetic — never break the scrape */ }
       }
 
+      // v6.9.125: direct messenger links (WhatsApp/Viber/Telegram) — chat
+      // channels are distinct from the phone slot, captured separately.
+      extractMessengerLinks(full, b);
+
       // v6.9.68: per-branch contact capture — every successfully fetched
       // non-homepage page contributes distinct phone/email/address as a
       // branch row (deduped by URL; capped at 12 per business).
@@ -1100,6 +1104,10 @@ export interface Business {
   image?: string;
   /** v6.9.68: per-branch contacts harvested from crawled location/branch pages */
   branches?: Branch[];
+  /** v6.9.125: direct messenger contacts (click-to-chat links from their site) */
+  whatsapp?: string;
+  viber?: string;
+  telegram?: string;
   /** v6.9.68: internal dedup of branch-crawled URLs */
   _branchSeen?: Set<string>;
 }
@@ -4048,6 +4056,9 @@ out center body;`;
       twitter: extractTwitter(tags),
       pinterest: '',
     };
+    // v6.9.125: OSM messenger tags (contact:whatsapp/viber/telegram, wa.me,
+    // t.me links inside tag values) → direct chat links on the business.
+    extractMessengerLinks(JSON.stringify(tags), business);
 
     if (!results.has(category)) results.set(category, []);
     results.get(category)!.push(business);
@@ -5399,6 +5410,7 @@ async function deepCrawlWebsite(b: Business): Promise<void> {
     const html = await r.text();
     // Mine the homepage itself first (cheap — already fetched)
     extractFromHtml(html, b);
+    extractMessengerLinks(html, b);
     if (b.email && b.phone) return;
     // Collect internal candidate links, ranked by contact-smell.
     // v6.9.60: match full <a> tags so ANCHOR TEXT counts too — many CMS
@@ -5431,7 +5443,9 @@ async function deepCrawlWebsite(b: Business): Promise<void> {
         const cr = await corsFetch(u, { signal: AbortSignal.timeout(3000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
         fetched++;
         if (!cr.ok) continue;
-        extractFromHtml(await cr.text(), b);
+        const pageHtml = await cr.text();
+        extractFromHtml(pageHtml, b);
+        extractMessengerLinks(pageHtml, b);
       } catch {}
     }
   } catch {}
@@ -8852,7 +8866,9 @@ export async function rescanWideNet(
           hours: tags.opening_hours || '',
           twitter: extractTwitter(tags),
           pinterest: '',
-        });
+        } as Business);
+        // v6.9.125: OSM messenger tags → direct chat links
+        extractMessengerLinks(JSON.stringify(tags), existing[existing.length - 1]);
         added++;
       }
       if (added > 0) {
@@ -9625,6 +9641,54 @@ export function getExtractionYield(): ExtractionYieldMap { return JSON.parse(JSO
 // (module-scope utility: pure parsing, no closure state — used by the
 // enrichment pipeline inside queryBusinesses and by the parsing test harness)
 // v6.9.59: every extraction point now reports hits/tries to _extractYield.
+// ── v6.9.125: direct messenger (WhatsApp/Viber/Telegram) capture ──────────
+// Extracts canonical, deduped chat links from fetched HTML. Distinct from
+// b.phone: a business's WhatsApp/Viber/Telegram is a CHAT channel (often a
+// different number or an @username), so it gets its own field + UI chip
+// instead of being folded into the phone slot. Telegram usernames are kept
+// as links; number-based forms are normalized to +E.164.
+function extractMessengerLinks(html: string, b: Business): void {
+  try {
+    if (!b.whatsapp) {
+      const wa = html.match(/(?:https?:\/\/)?(?:wa\.me\/|api\.whatsapp\.com\/send\?[^\s"\'<>]*?phone=)(\+?\d{7,15})/i);
+      if (wa) {
+        const d = wa[1].replace(/\D/g, '');
+        if (d.length >= 8 && d.length <= 15 && plausiblePhone('+' + d)) b.whatsapp = 'https://wa.me/' + d;
+      }
+    }
+    if (!b.whatsapp) {
+      // OSM-style contact:whatsapp tag value (e.g. "+995 599 12 34 56")
+      const waTag = html.match(/contact:whatsapp["\'=\:\s]+([+\d][\d\s\-()]{7,18})/i);
+      if (waTag) {
+        const norm = normalizePhone(waTag[1], getScanContext()?.countryCode);
+        const d = norm.replace(/\D/g, '');
+        if (d.length >= 8 && d.length <= 15) b.whatsapp = 'https://wa.me/' + d;
+      }
+    }
+    if (!b.viber) {
+      const vb = html.match(/viber:\/\/chat\?number=%2B(\d{7,15})/i)
+        || html.match(/viber:\/\/(?:chat|forward)\?number=\+(\d{7,15})/i);
+      if (vb) b.viber = 'viber://chat?number=%2B' + vb[1];
+    }
+    if (!b.telegram) {
+      // t.me/+9955... number-based form
+      // (?:elegram) without the leading t — the 'i' flag made a bare
+      // t(?:elegram)\.me match its own 't.me' prefix and then fail.
+      const tg = html.match(/(?:https?:\/\/)?(?:t|telegram)\.me\/\+?(\d{7,15})/i);
+      if (tg) {
+        const d = tg[1].replace(/\D/g, '');
+        if (d.length >= 8 && d.length <= 15 && plausiblePhone('+' + d)) b.telegram = 'https://t.me/+' + d;
+      }
+    }
+    if (!b.telegram) {
+      // t.me/username - the common business form; skip share/join paths
+      const tgu = html.match(/(?:https?:\/\/)?(?:t|telegram)\.me\/([A-Za-z][A-Za-z0-9_]{3,31})/i);
+      if (tgu && !/^(share|joinchat|shareurl)$/i.test(tgu[1])) {
+        b.telegram = 'https://t.me/' + tgu[1];
+      }
+    }
+  } catch { /* messenger capture is cosmetic - never break the scrape */ }
+}
 // ── v6.9.124: shared contact decoders + microdata bridge ─────────────
 // Cloudflare email-protection decode. The classic small-site obfuscation:
 // <a href="/cdn-cgi/l/email-protection#3f4a…"><span class="__cf_email__" data-cfemail="3f4a…">[email protected]</span></a>
