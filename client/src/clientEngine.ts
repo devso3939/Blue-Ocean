@@ -2680,14 +2680,14 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
 
   // 0) Circuit breaker: this host is currently known-dead at the network
   //    level — fail instantly instead of burning 5-30s on every request.
-  if (hostIsOpen(url)) return new Response('', { status: 0, statusText: 'Host unreachable (circuit open)' });
+  if (hostIsOpen(url)) return new Response('', { status: 598, statusText: 'Host unreachable (circuit open)' });
 
   // 0b) v6.9.8 scan-wide failure budget: once enough proxied requests have
   //     failed, stop spending new ones on non-allowlist hosts (they are the
   //     source of the uncatchable console errors). CORS-open APIs stay
   //     available so core data (OSM, AI, Wikidata) keeps flowing.
   if (_netFails >= MAX_NET_FAILS && !hostAllowsDirect(url)) {
-    return new Response('', { status: 0, statusText: 'Network budget exhausted' });
+    return new Response('', { status: 598, statusText: 'Network budget exhausted' });
   }
 
   // 1) Try direct fetch — instant for CORS-enabled, instant error for others.
@@ -2713,16 +2713,21 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   }
   if (callerSignal?.aborted) throw new Error('Cancelled');
 
-  // 2) If proxy failed recently (30s cooldown), skip
-  if (Date.now() - _lastProxyFail < 30000) {
-    return new Response('', { status: 0, statusText: 'CORS unavailable' });
-  }
+  // 2) Public-proxy cooldown (30s after a full-chain failure): skip the
+  //    three public proxy arms below, but NEVER skip the server lane —
+  //    one dead third-party proxy must not poison the guaranteed arm too.
+  //    (v6.9.127: previously this early-returned before arm 6, so a single
+  //    jina/allorigins outage blacked out ALL fetching for 30s at a time.)
+  //    v6.9.127: status-0 sentinel Responses THROW RangeError in browsers
+  //    (invalid ResponseInit.status) — sentinels are now valid 598s so the
+  //    reason actually reaches the caller instead of an exception.
+  const proxyCooldown = Date.now() - _lastProxyFail < 30000;
 
   // 3) Try cors.sh (working as of 2026, keyless). v6.9.6: it rate-limits
   //    keyless traffic hard (429 / connection resets) — track consecutive
   //    failures and skip it for 5 minutes after 3, instead of re-failing
   //    (and printing a console error) on every single proxied request.
-  if ((_corsshFails < 3 || Date.now() - _corsshLastFail > 300_000) && !_cfHosts.has(urlHostOf(url))) {
+  if (!proxyCooldown && (_corsshFails < 3 || Date.now() - _corsshLastFail > 300_000) && !_cfHosts.has(urlHostOf(url))) {
     try {
       const r = await fetch('https://cors.sh/' + url, { headers, signal: anySignal(callerSignal, chainCap, AbortSignal.timeout(5000)) });
       if (r.ok) { hostRecordSuccess(url); _corsshFails = 0; return r; }
@@ -2738,7 +2743,7 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   // extraction; works from real browser sessions). v6.9.9: failure memory —
   // when Jina refuses (401/429) or times out repeatedly, skip it for 5 min
   // instead of printing one console error per proxied request.
-  if ((_jinaFails < 3 || Date.now() - _jinaLastFail > 300_000) && !_cfHosts.has(urlHostOf(url))) {
+  if (!proxyCooldown && (_jinaFails < 3 || Date.now() - _jinaLastFail > 300_000) && !_cfHosts.has(urlHostOf(url))) {
     try {
       const r = await fetch('https://r.jina.ai/' + url, { headers, signal: anySignal(callerSignal, chainCap, AbortSignal.timeout(12000)) });
       if (r.ok) {
@@ -2759,7 +2764,7 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   // per wave; now only ONE in-flight request exists and the rest reuse its
   // outcome (success clones the payload, failure skips the arm).
   if (callerSignal?.aborted) throw new Error('Cancelled');
-  if ((_alloFails < 3 || Date.now() - _alloLastFail > 300_000) && !_cfHosts.has(urlHostOf(url))) {
+  if (!proxyCooldown && (_alloFails < 3 || Date.now() - _alloLastFail > 300_000) && !_cfHosts.has(urlHostOf(url))) {
     if (_alloInFlight) {
       const ok = await _alloInFlight.catch(() => false);
       if (ok) return new Response('', { status: 501, statusText: 'allorigins single-flight: refetch needed' });
@@ -2788,7 +2793,10 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   // 6) v6.9.64: Server-side page fetch (the guaranteed lane). Supabase
   //    pg_net has no CORS, no browser IP, no third-party proxy — it succeeds
   //    exactly when the target site is up. GET-only (Tavily POST skipped).
-  if ((!init?.method || init.method === 'GET') && url.startsWith('https://')) {
+  //    v6.9.127: http:// URLs are served too — a Tbilisi audit showed ALL
+  //    plain-http sites (taglaura.ge, samikitno.ge, gtm.ge, …) died through
+  //    the dead public-proxy arms because this gate required https://.
+  if ((!init?.method || init.method === 'GET') && /^https?:\/\//.test(url)) {
     const srvText = await pageFetchViaServer(url);
     if (srvText) {
       hostRecordSuccess(url);
@@ -2804,7 +2812,7 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
   _netFails++;
   hostRecordFail(url);
   _lastProxyFail = Date.now();
-  return new Response('', { status: 0, statusText: 'CORS unavailable' });
+  return new Response('', { status: 598, statusText: 'CORS unavailable' });
 }
 
 // Direct fetch for services that support CORS (Nominatim, Overpass)
@@ -3063,24 +3071,49 @@ const SUPABASE_ANON_KEY = 'sb_publishable_UtCOExOHddCZ0UbTxbruWg_3m1U7a-0';
 let _proxyDisabledUntil = 0; // circuit breaker when Supabase is unreachable
 const PROXY_COOLDOWN_MS = 120000;
 
+// v6.9.127: a stored JWT that has EXPIRED used to ride along on every rpc
+// call → PostgREST 401 → the guaranteed server lane (page fetch, Brave,
+// render, run archive) silently died for signed-in users until re-login.
+// Now: expired tokens are skipped up front, and a 401 retries once with the
+// anon key only (public RPCs like rpc_fetch_* work keyless).
+function usableStoredAccessToken(): string | null {
+  const token = storedAccessToken();
+  if (!token) return null;
+  try {
+    const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(atob(b64));
+    if (typeof payload?.exp === 'number' && payload.exp * 1000 < Date.now() + 30_000) return null;
+  } catch { /* opaque token — let the server decide */ }
+  return token;
+}
+
 async function supabaseRpc<T>(fn: string, body: Record<string, unknown>, timeoutMs: number): Promise<T | null> {
   // v6.9.110: when a user is signed in, the JWT rides along so PostgREST's
   // auth.uid() resolves and user-scoped RPCs (prefs, run archive) work.
   // Sync read of the stored session — null when signed out, so anonymous
   // scans keep their zero-latency header set. Token refresh happens lazily
   // in getAccessToken() before any signed-in caller fires an RPC.
-  const token = storedAccessToken();
-  const authHeaders: Record<string, string> = token ? { 'Authorization': `Bearer ${token}` } : {};
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+  const token = usableStoredAccessToken();
+  const headers: Record<string, string> = {
+    'apikey': SUPABASE_ANON_KEY,
+    'Content-Type': 'application/json',
+    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+  };
+  let res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
     method: 'POST',
-    headers: {
-      'apikey': SUPABASE_ANON_KEY,
-      'Content-Type': 'application/json',
-      ...authHeaders,
-    },
+    headers,
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   });
+  if (res.status === 401 && token) {
+    // Stale/invalid user JWT — the anon key still serves public RPCs.
+    res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+      method: 'POST',
+      headers: { 'apikey': SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  }
   if (!res.ok) throw new Error(`rpc ${fn} HTTP ${res.status}`);
   return res.json() as Promise<T>;
 }
@@ -3215,13 +3248,22 @@ async function serverFetchRaw(url: string, timeoutMs = 30000): Promise<string | 
   if (Date.now() < _srvFetchDisabledUntil) return null;
   try {
     const start = await supabaseRpc<{ rid?: number; error?: string }>('rpc_fetch_start', { p_url: url }, 15000);
-    if (!start?.rid) return null;
+    if (!start?.rid) { srvLaneFail(); return null; }
     const res = await pollServerFetch(start.rid, timeoutMs);
+    _srvLaneFails = 0; // a poll timeout is per-URL, not an infra outage
     return res?.text ?? null;
   } catch {
-    _srvFetchDisabledUntil = Date.now() + PROXY_COOLDOWN_MS;
+    // v6.9.127: ONE transient rpc error (PostgREST blip, 15s race under
+    // batch load) used to blackout the guaranteed lane for 2 minutes —
+    // every later site in the batch then fast-failed through dead public
+    // proxies. Now it takes 3 consecutive infra failures to disable.
+    srvLaneFail();
     return null;
   }
+}
+let _srvLaneFails = 0;
+function srvLaneFail(): void {
+  if (++_srvLaneFails >= 3) { _srvFetchDisabledUntil = Date.now() + PROXY_COOLDOWN_MS; _srvLaneFails = 0; }
 }
 
 // ─── v6.9.70: Headless render lane (urlscan.io, key in Vault) ──────
@@ -5091,7 +5133,7 @@ async function enrichFromTavily(businesses: Business[], onProgress?: (pct: numbe
           body: JSON.stringify({ api_key: key, query: q, max_results: 5, search_depth: 'basic' }),
           signal: AbortSignal.timeout(12000),
         });
-        if (r.status === 0) { engineNoteFail('tavily', 'Tavily', 'net', 'CORS/proxy unavailable'); return; }
+        if (r.status === 0 || r.status === 598) { engineNoteFail('tavily', 'Tavily', 'net', 'CORS/proxy unavailable'); return; }
         if (r.status === 402 || r.status === 429 || r.status === 401) {
           // v6.9.13: rotate to the next backup key before giving up
           const next = _poolRotate('tavily');
@@ -9524,6 +9566,19 @@ const _EMAIL_JUNK_RE = /example\.com|noreply|no-reply|donotreply|wixpress|sentry
 // Organization block). Also w3.org, ogp.me, and webmaster spamtrap hosts.
 const _EMAIL_PLATFORM_RE = /(duckduckgo|bing|google|yahoo|microsoft|outlook|hotmail|gmail|icloud|proton|yandex|mail\.ru|zoho|fastmail|startpage|mojeek|brave|ecosia|qwant|search|cloudfront|akamai|amazonaws|azureedge|wix|shopify|squarespace|webflow|godaddy|namecheap|hostinger|siteground|bluehost|wordpress|schema|w3|ogp|whatwg|mozilla|wikipedia|wikimedia|webcache|translate)\.(com|co|io|net|org|me|ge|ru|de|fr)$/i;
 
+// v6.9.127: TLD gate — the final domain label must be a REAL TLD. Scraped
+// page text yields fragments like "v-applic@ion.primary" (CSS class debris)
+// or "bpg-n@eli-mtavruli.min" (split Georgian glyphs) that pass every
+// structural rule; no business owns .primary or .min.
+const _EMAIL_TLDS = new Set(('com org net edu gov mil int info biz eu io co me tel ' +
+  'ge am az ru su ua by kz uz kg tj tm tr gr cy mt is li lu ' +
+  'de fr it es pt nl be ch at se no dk fi pl cz sk hu ro bg hr si rs ba mk al md ' +
+  'ie uk gg je im gi ' +
+  'ae sa qa kw om bh jo il ps lb in pk bd lk np cn hk tw jp kr sg my th vn ph id ' +
+  'au nz ca us mx br ar cl ve ec uy py bo pe ' +
+  'za ng ke gh eg ma dz tn ly et tz ug zw ' +
+  'app dev ai cloud shop store online site tech xyz club top space website solutions company group digital agency studio design media events email consulting travel restaurant cafe bar hotel pizza fitness yoga photo care auto property estate capital finance law legal medical health dental clinic vip blog wiki fun games').split(/\s+/).filter(Boolean));
+
 // v6.9.37: structural email validation for the final data-quality pass.
 // Checks the stored email still looks like a real address after every
 // extraction layer has run — no network calls, pure rules.
@@ -9537,6 +9592,12 @@ export function plausibleEmail(e: string): boolean {
   // Domain needs a dot and a 2+ TLD; no file extensions posing as TLDs
   if (!domain.includes('.') || /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|webm|mp[34])$/i.test(domain)) return false;
   if (domain.startsWith('.') || domain.endsWith('.') || domain.includes('..')) return false;
+  // v6.9.127: TLD must be real (see _EMAIL_TLDS above)
+  const tld = domain.slice(domain.lastIndexOf('.') + 1);
+  if (!_EMAIL_TLDS.has(tld)) return false;
+  // v6.9.127: CMS/CSS class fragments ("wp-block-l@est-posts.is") harvested
+  // from split style/class text — real business locals never start with these.
+  if (/^(wp|div|span|col|row|btn|nav|header|footer|menu|item|entry|widget|block)[-.]/.test(local)) return false;
   // Local part: no leading/trailing dot, no consecutive dots
   if (local.startsWith('.') || local.endsWith('.') || local.includes('..')) return false;
   if (!/^[a-z0-9._%+-]+$/.test(local)) return false;
@@ -10128,3 +10189,470 @@ export async function enrichDiscoverContacts(
     await new Promise(r => setTimeout(r, 200));
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// ║  v6.9.127: AI WEB AGENT — user-keyed agentic enrichment lane   ║
+// ╠══════════════════════════════════════════════════════════════════╣
+// ║ The user pastes an OpenAI-compatible API key in Settings       ║
+// ║ (provider / base URL / model). During scans, for businesses    ║
+// ║ that are still missing contact fields, the agent reasons over  ║
+// ║ a compact evidence pack built from already-fetched pages and   ║
+// ║ proposes up to 2 site URLs to fetch next. Fetched HTML is      ║
+// ║ re-scanned by the same extractors the engine already trusts,   ║
+// ║ and every AI-proposed value passes plausiblePhone/plausible-   ║
+// ║ Email validation BEFORE it is written to a business.           ║
+// ║                                                                ║
+// ║ Safety rails:                                                  ║
+// ║  • fetch/page/skill budgets (default 40 pages, 300 s)          ║
+// ║  • per-scan fetch cache (shared across businesses)             ║
+// ║  • same-origin-first; cross-origin requires same eTLD+1        ║
+// ║  • prompt-injection hardening: page text is stripped of        ║
+// ║    tags/scripts and size-capped; only whitelisted JSON keys    ║
+// ║    are read back; values are validated before use              ║
+// ║  • never runs without a user key (keyless AI providers are     ║
+// ║    not used for agent navigation)                              ║
+// ╚══════════════════════════════════════════════════════════════════╝
+
+export interface AiAgentConfig {
+  enabled: boolean;
+  provider: 'openai-compatible' | 'openrouter';
+  baseUrl: string;   // e.g. https://api.openai.com/v1
+  apiKey: string;
+  model: string;     // e.g. gpt-4o-mini / llama-3.1-8b-instruct
+  budgetPages: number;   // max agent-driven fetches per scan (1-150)
+  budgetSeconds: number; // wall-clock budget per scan (30-900)
+}
+
+const _AI_AGENT_LS_KEY = 'bo.aiAgent.v1';
+
+export function loadAiAgentConfig(): AiAgentConfig {
+  try {
+    const raw = localStorage.getItem(_AI_AGENT_LS_KEY);
+    if (raw) {
+      const p = JSON.parse(raw);
+      return {
+        enabled: !!p?.enabled,
+        provider: p?.provider === 'openrouter' ? 'openrouter' : 'openai-compatible',
+        baseUrl: typeof p?.baseUrl === 'string' ? p.baseUrl.replace(/\/+$/, '') : 'https://api.openai.com/v1',
+        apiKey: typeof p?.apiKey === 'string' ? p.apiKey : '',
+        model: typeof p?.model === 'string' ? p.model : 'gpt-4o-mini',
+        budgetPages: Math.max(1, Math.min(150, Number(p?.budgetPages) || 40)),
+        budgetSeconds: Math.max(30, Math.min(900, Number(p?.budgetSeconds) || 300)),
+      };
+    }
+  } catch { /* malformed config — defaults */ }
+  return { enabled: false, provider: 'openai-compatible', baseUrl: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini', budgetPages: 40, budgetSeconds: 300 };
+}
+
+export function saveAiAgentConfig(cfg: AiAgentConfig): void {
+  try {
+    localStorage.setItem(_AI_AGENT_LS_KEY, JSON.stringify({
+      enabled: !!cfg.enabled,
+      provider: cfg.provider,
+      baseUrl: String(cfg.baseUrl || '').replace(/\/+$/, ''),
+      apiKey: String(cfg.apiKey || ''),
+      model: String(cfg.model || 'gpt-4o-mini'),
+      budgetPages: Math.max(1, Math.min(150, Number(cfg.budgetPages) || 40)),
+      budgetSeconds: Math.max(30, Math.min(900, Number(cfg.budgetSeconds) || 300)),
+    }));
+  } catch { /* storage full / blocked */ }
+}
+
+export function aiAgentReady(): boolean {
+  const c = loadAiAgentConfig();
+  return !!(c.enabled && c.apiKey && c.baseUrl && c.model);
+}
+
+// Live test from the Settings panel: one minimal chat completion.
+export async function aiAgentTest(cfg?: Partial<AiAgentConfig>): Promise<{ ok: boolean; detail: string }> {
+  const c = { ...loadAiAgentConfig(), ...(cfg || {}) };
+  if (!c.apiKey || !c.baseUrl) return { ok: false, detail: 'Paste a key and base URL first.' };
+  try {
+    const r = await fetch(c.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(c.apiKey ? { Authorization: `Bearer ${c.apiKey}` } : {}) },
+      body: JSON.stringify({
+        model: c.model || 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: 'Reply with exactly: PONG' },
+          { role: 'user', content: 'ping' },
+        ],
+        max_tokens: 20,
+        temperature: 0,
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!r.ok) {
+      const body = await r.text().catch(() => '');
+      return { ok: false, detail: `HTTP ${r.status}${body ? ` — ${body.slice(0, 120)}` : ''}` };
+    }
+    const d = await r.json();
+    const text = String(d?.choices?.[0]?.message?.content || '').trim();
+    return { ok: true, detail: `model replied: ${text.slice(0, 60) || '(empty)'}` };
+  } catch (e: any) {
+    return { ok: false, detail: String(e?.message || e).slice(0, 120) };
+  }
+}
+
+// One chat completion against the user-configured endpoint. Returns the
+// message content, or null on any failure (never throws — the agent lane
+// must not be able to break a scan).
+async function agentChat(
+  c: AiAgentConfig,
+  system: string,
+  user: string,
+  opts?: { signal?: AbortSignal; maxTokens?: number },
+): Promise<string | null> {
+  try {
+    const r = await fetch(c.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.apiKey}` },
+      body: JSON.stringify({
+        model: c.model,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+        max_tokens: opts?.maxTokens ?? 300,
+        temperature: 0.2,
+      }),
+      signal: anySignal(opts?.signal, AbortSignal.timeout(25_000)),
+    });
+    if (!r.ok) return null;
+    const d = await r.json();
+    const text = d?.choices?.[0]?.message?.content;
+    return typeof text === 'string' && text.trim() ? text.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+// Pull the first JSON object out of a reply (handles ```json fences and
+// chatter around the object). Only whitelisted keys are read by callers.
+function agentJson(text: string): Record<string, unknown> | null {
+  const m = text.match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  try { const v = JSON.parse(m[0]); return (v && typeof v === 'object' && !Array.isArray(v)) ? v as Record<string, unknown> : null; }
+  catch { return null; }
+}
+
+// Absolute-URL whitelist for agent-proposed links.
+function agentAbsUrl(u: unknown, base?: string): string | null {
+  if (typeof u !== 'string' || !u.trim()) return null;
+  try {
+    const url = new URL(u.trim(), base || undefined);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return url.toString();
+  } catch { return null; }
+}
+
+// Keep agent navigation on the business's own site (eTLD+1 level). The
+// pre-agent enrichment lanes already crawl inside the site; the agent's
+// edge is choosing WHICH pages to fetch, not roaming the open web.
+function sameSite(a: string, b: string): boolean {
+  try {
+    const h1 = new URL(a).hostname.replace(/^www\./, '');
+    const h2 = new URL(b).hostname.replace(/^www\./, '');
+    const s1 = h1.split('.'); const s2 = h2.split('.');
+    const e1 = s1.slice(-2).join('.'); const e2 = s2.slice(-2).join('.');
+    return e1 === e2 && e1.includes('.');
+  } catch { return false; }
+}
+
+// Convert fetched HTML into compact text evidence for the model: title,
+// headings, visible text (tags/scripts/styles stripped), and candidate
+// contact-bearing lines. Size-capped so a huge page cannot blow the
+// context — and so injected instructions stay negligible.
+function agentEvidence(html: string, url: string, cap = 3200): string {
+  const title = (html.match(/<title[^>]*>([\s\S]{2,160}?)<\/title>/i)?.[1] || '').replace(/\s+/g, ' ').trim();
+  // v6.9.127: same-site candidate links FIRST — hrefs are invisible in the
+  // stripped text, and without them the model can only guess /contact.
+  // With the real nav/footer URLs in evidence, a model can propose exact
+  // contact / branch / about pages instead of common-path guesses.
+  const links: string[] = [];
+  try {
+    const seenL = new Set<string>();
+    const anchors = html.match(/<a\b[^>]*href\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi) || [];
+    for (const a of anchors) {
+      const m = a.match(/href\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/i);
+      if (!m) continue;
+      const raw = m[1].replace(/^["']|["']$/g, '').trim();
+      if (!raw || /^(javascript:|mailto:|tel:|#)/i.test(raw)) continue;
+      let abs: string | null = null;
+      try { const u = new URL(raw, url); if (u.protocol === 'http:' || u.protocol === 'https:') abs = u.toString(); } catch { abs = null; }
+      if (!abs || seenL.has(abs)) continue;
+      try { if (!sameSite(abs, url)) continue; } catch { continue; }
+      seenL.add(abs);
+      links.push(abs);
+    }
+  } catch { /* link pass is best-effort */ }
+  const linkRank = (u: string) => /contact|kontakt|impresum|impressum|about|branch|filial|office|კონტაქტ|ჩვენ|შესახებ|галерея/i.test(u) ? 0 : 1;
+  links.sort((a, b) => linkRank(a) - linkRank(b));
+  const linksLine = links.length > 0 ? `\nLINKS (same-site, prioritized): ${links.slice(0, 14).join(' ')}` : '';
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
+    .replace(/&#(\d+);/g, (_, n) => { try { return String.fromCharCode(Number(n)); } catch { return ' '; } })
+    .replace(/\s+/g, ' ')
+    .trim();
+  // Prefer lines that smell like contact info so the cap lands on signal.
+  const lines = text.split(/\.\s|\|\s|·\s|,\s/).filter(l => l.length > 3);
+  const contactish = lines.filter(l => /@|\+?\d[\d\s()\-]{7,}|wa\.me|t\.me|viber|tel:|contact|address|ул\.|улица|ქუჩა/i.test(l));
+  const picked: string[] = [];
+  let used = 0;
+  for (const l of (contactish.length > 0 ? [...contactish, ...lines.filter(l => !contactish.includes(l))] : lines)) {
+    if (used >= cap) break;
+    const s = l.slice(0, 220);
+    picked.push(s); used += s.length + 1;
+  }
+  return `URL: ${url}\nTITLE: ${title}${linksLine}\nTEXT: ${picked.join(' | ').slice(0, cap)}`;
+}
+
+// Stats for the UI: how much the agent actually added this scan.
+export interface AiAgentStats {
+  tried: number;      // businesses the agent attempted
+  fetched: number;    // pages fetched
+  aiCalls: number;    // model round-trips
+  businessesImproved: number;
+  fieldsAdded: { phone: number; email: number; whatsapp: number; viber: number; telegram: number; social: number };
+  stopped: 'budget-pages' | 'budget-time' | 'done' | 'no-need' | 'not-configured' | 'error';
+  elapsedMs: number;
+}
+export function getAiAgentStats(): AiAgentStats | null { return _agentStats; }
+let _agentStats: AiAgentStats | null = null;
+
+// Shared per-run cache so two businesses on the same domain never fetch
+// the same page twice, and a page that failed once is not retried.
+const _agentFetchCache = new Map<string, { ok: boolean; html: string }>();
+
+async function agentFetch(
+  url: string,
+  opts?: { signal?: AbortSignal },
+): Promise<{ ok: boolean; html: string }> {
+  const hit = _agentFetchCache.get(url);
+  if (hit) return hit;
+  try {
+    const r = await corsFetch(url, {
+      headers: { 'Accept': 'text/html,*/*' },
+      // 18s: the guaranteed server lane needs 15-20s on big pages (e.g.
+      // 900KB Nuxt stores); 12s was killing exactly the fetches worth
+      // waiting for. Still bounded by corsFetch's own chain cap + deadline.
+      signal: anySignal(opts?.signal, AbortSignal.timeout(18_000)),
+    });
+    let html = '';
+    if (r.ok) {
+      const t = await r.text();
+      // Cap stored HTML at ~300 KB — enough for contact pages.
+      html = t.length > 300_000 ? t.slice(0, 300_000) : t;
+    }
+    const entry = { ok: r.ok && html.length > 200, html };
+    _agentFetchCache.set(url, entry);
+    return entry;
+  } catch {
+    const entry = { ok: false, html: '' };
+    _agentFetchCache.set(url, entry);
+    return entry;
+  }
+}
+
+// Validated write helpers — an agent-proposed value is only applied when
+// it passes the SAME plausibility gates the regex engine uses, and only
+// into EMPTY fields (the agent never overwrites good data).
+function agentApplyContacts(
+  b: Business,
+  found: { phone?: string; email?: string; whatsapp?: string; viber?: string; telegram?: string; social?: string },
+  stats: AiAgentStats,
+): number {
+  let added = 0;
+  if (found.phone && !b.phone && plausiblePhone(found.phone)) { b.phone = found.phone; stats.fieldsAdded.phone++; added++; }
+  if (found.email && !b.email && plausibleEmail(found.email) && !_EMAIL_JUNK_RE.test(found.email) && !_EMAIL_PLATFORM_RE.test(found.email.split('@')[1] || '')) { b.email = found.email; stats.fieldsAdded.email++; added++; }
+  // Messengers are normalized to the engine's canonical forms (same shapes
+  // extractMessengerLinks produces) so the UI chips work unchanged.
+  if (found.whatsapp && !b.whatsapp) {
+    const wd = found.whatsapp.replace(/\D/g, '');
+    if (wd.length >= 8 && wd.length <= 15 && plausiblePhone('+' + wd)) { b.whatsapp = 'https://wa.me/' + wd; stats.fieldsAdded.whatsapp++; added++; }
+  }
+  if (found.viber && !b.viber) {
+    const vd = found.viber.replace(/\D/g, '');
+    if (vd.length >= 8 && vd.length <= 15) { b.viber = 'viber://chat?number=%2B' + vd; stats.fieldsAdded.viber++; added++; }
+  }
+  if (found.telegram && !b.telegram) {
+    const tgu = found.telegram.trim().replace(/\/+$/, '');
+    if (/^https?:\/\/(?:t|telegram)\.me\/\+?\d{7,15}$/i.test(tgu) || /^https?:\/\/(?:t|telegram)\.me\/[A-Za-z][A-Za-z0-9_]{3,31}$/i.test(tgu)) { b.telegram = tgu; stats.fieldsAdded.telegram++; added++; }
+  }
+  if (found.social && !b.facebook && !b.instagram && /https?:\/\//.test(found.social)) {
+    if (/facebook\.com\//i.test(found.social)) { b.facebook = found.social; stats.fieldsAdded.social++; added++; }
+    else if (/instagram\.com\//i.test(found.social)) { b.instagram = found.social; stats.fieldsAdded.social++; added++; }
+  }
+  return added;
+}
+
+// Agent pass over one business. Returns how many contact fields were
+// newly filled (0 = no gain). Keeps its own mini-loop: evidence →
+// proposal → fetch → extract → (once) re-ask with the new evidence.
+async function agentEnrichOne(
+  b: Business,
+  cfg: AiAgentConfig,
+  stats: AiAgentStats,
+  deadline: number,
+  opts?: { signal?: AbortSignal },
+): Promise<number> {
+  if (!b.website) return 0;
+  const before = contactFieldCountOf(b);
+  let fetched = 0;
+  const seen = new Set<string>();
+  const modelUrls: string[] = [];
+
+  const extractAndApply = (html: string, srcUrl: string): number => {
+    if (!html) return 0;
+    const before2 = contactFieldCountOf(b);
+    try { extractFromHtmlModule(html, b); } catch { /* extractor is defensive */ }
+    const after2 = contactFieldCountOf(b);
+    return after2 - before2;
+  };
+
+  for (let hop = 0; hop < 2; hop++) {
+    if (Date.now() >= deadline || opts?.signal?.aborted) break;
+
+    // 1) Build the evidence pack from what we have so far.
+    const evParts: string[] = [];
+    const homeUrl = b.website;
+    if (!seen.has(homeUrl) && hop === 0) {
+      const home = await agentFetch(homeUrl, opts);
+      seen.add(homeUrl); fetched += 1; stats.fetched++;
+      if (home.ok) {
+        extractAndApply(home.html, homeUrl);
+        evParts.push(agentEvidence(home.html, homeUrl));
+      } else {
+        evParts.push(`URL: ${homeUrl}\n(fetch failed — site may block bots)`);
+      }
+    }
+    for (const u of modelUrls) {
+      if (evParts.length >= 3) break;
+      if (seen.has(u)) continue;
+      const pg = await agentFetch(u, opts);
+      seen.add(u); fetched += 1; stats.fetched++;
+      if (pg.ok) {
+        extractAndApply(pg.html, u);
+        evParts.push(agentEvidence(pg.html, u));
+      } else {
+        evParts.push(`URL: ${u}\n(fetch failed)`);
+      }
+    }
+    if (evParts.length === 0) break;
+
+    // Already satisfied? Stop asking the model.
+    if (b.phone && b.email) break;
+
+    // 2) Ask the model which pages to fetch next.
+    stats.aiCalls++;
+    const sys = 'You help extract business contact information from website evidence. Reply with ONLY a JSON object, no markdown, no explanations.';
+    const user = [
+      'Business: ' + (b.name || 'unknown'),
+      'Business website: ' + b.website,
+      b.address ? 'Known address: ' + b.address : '',
+      'Missing fields: ' + [!b.phone && 'phone', !b.email && 'email', !b.whatsapp && 'whatsapp', !b.telegram && 'telegram'].filter(Boolean).join(', '),
+      '',
+      'Page evidence from their website:',
+      evParts.join('\n---\n'),
+      '',
+      'Propose up to 2 ABSOLUTE URLs (pages on this same site most likely to contain the missing contact details, e.g. /contact, /about, branch pages) plus any contact values you can already read IN the evidence.',
+      'When the LINKS list contains a contact-looking page, prefer proposing that exact URL over guessing common paths.',
+      'If a value appears in the evidence, extract it EXACTLY as written (do not invent or reformat numbers).',
+      'Reply format: {"urls":["https://…"],"phone":"… or empty","email":"… or empty","whatsapp":"… or empty","viber":"… or empty","telegram":"… or empty"}',
+    ].filter(Boolean).join('\n');
+    const reply = await agentChat(cfg, sys, user, { signal: opts?.signal, maxTokens: 300 });
+    if (!reply) break;
+    const j = agentJson(reply);
+    if (!j) break;
+
+    // 3) Apply any values the model read straight out of the evidence
+    //    (validated before write — see agentApplyContacts).
+    const candidate = {
+      phone: typeof j.phone === 'string' ? j.phone.trim() : undefined,
+      email: typeof j.email === 'string' ? j.email.trim() : undefined,
+      whatsapp: typeof j.whatsapp === 'string' ? j.whatsapp.trim() : undefined,
+      viber: typeof j.viber === 'string' ? j.viber.trim() : undefined,
+      telegram: typeof j.telegram === 'string' ? j.telegram.trim() : undefined,
+    };
+    agentApplyContacts(b, candidate, stats);
+
+    // 4) Queue proposed URLs (same-site only, cap 2 per hop).
+    const urls = Array.isArray(j.urls)
+      ? (j.urls as unknown[]).map(u => agentAbsUrl(u, b.website)).filter((u): u is string => !!u && !seen.has(u) && sameSite(u, b.website)).slice(0, 2)
+      : [];
+    if (urls.length === 0) break;
+    modelUrls.push(...urls);
+    if (Date.now() >= deadline || opts?.signal?.aborted) break;
+  }
+
+  stats.tried++;
+  const gained = contactFieldCountOf(b) - before;
+  if (gained > 0) stats.businessesImproved++;
+  void fetched;
+  return gained;
+}
+
+function contactFieldCountOf(b: Business): number {
+  return (b.phone ? 1 : 0) + (b.email ? 1 : 0) + (b.whatsapp ? 1 : 0) + (b.viber ? 1 : 0) + (b.telegram ? 1 : 0) + (b.facebook ? 1 : 0) + (b.instagram ? 1 : 0);
+}
+
+// ── The lane: run after the regular enrichment lanes, budgeted ──
+export async function enrichWithAiAgent(
+  biz: Map<string, Business[]>,
+  opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void },
+): Promise<AiAgentStats> {
+  const t0 = Date.now();
+  const cfg = loadAiAgentConfig();
+  const stats: AiAgentStats = {
+    tried: 0, fetched: 0, aiCalls: 0, businessesImproved: 0,
+    fieldsAdded: { phone: 0, email: 0, whatsapp: 0, viber: 0, telegram: 0, social: 0 },
+    stopped: 'done', elapsedMs: 0,
+  };
+  _agentStats = stats;
+  if (!aiAgentReady()) { stats.stopped = 'not-configured'; stats.elapsedMs = Date.now() - t0; return stats; }
+
+  const all: Business[] = [];
+  biz.forEach(arr => { for (const b of arr) all.push(b); });
+  const need = all.filter(b => b.website && (!b.phone || !b.email || _EMAIL_PLATFORM_RE.test((b.email.split('@')[1] || ''))));
+  // Highest value first: businesses with a website but NO contacts at all.
+  need.sort((a, b) => (contactFieldCountOf(a) - contactFieldCountOf(b)) || ((b.name || '').length - (a.name || '').length));
+  if (need.length === 0) { stats.stopped = 'no-need'; stats.elapsedMs = Date.now() - t0; return stats; }
+
+  const deadline = t0 + cfg.budgetSeconds * 1000;
+  const BATCH = 4;
+  for (let i = 0; i < need.length; i += BATCH) {
+    if (opts?.signal?.aborted) { stats.stopped = 'done'; break; }
+    if (Date.now() >= deadline) { stats.stopped = 'budget-time'; break; }
+    if (stats.fetched >= cfg.budgetPages) { stats.stopped = 'budget-pages'; break; };
+    const batch = need.slice(i, i + BATCH);
+    await Promise.all(batch.map(async b => {
+      if (opts?.signal?.aborted || Date.now() >= deadline || stats.fetched >= cfg.budgetPages) return;
+      try { await agentEnrichOne(b, cfg, stats, deadline, opts); } catch { /* per-business failures never break the lane */ }
+    }));
+    opts?.onProgress?.(`AI agent: ${stats.tried}/${need.length} sites · ${stats.fieldsAdded.phone + stats.fieldsAdded.email + stats.fieldsAdded.whatsapp + stats.fieldsAdded.viber + stats.fieldsAdded.telegram + stats.fieldsAdded.social} fields found`);
+    await new Promise(r => setTimeout(r, 150));
+  }
+  stats.elapsedMs = Date.now() - t0;
+  return stats;
+}
+
+// Reset the shared fetch cache at scan start (it is per-run by design).
+export function resetAiAgentCache(): void { _agentFetchCache.clear(); }
+
+// Debug/test exposure — the same live objects the app uses internally.
+// Lets E2E probes and support sessions exercise the agent lane directly.
+__internals.aiAgent = {
+  enrichWithAiAgent,
+  aiAgentReady,
+  aiAgentTest,
+  loadAiAgentConfig,
+  saveAiAgentConfig,
+  resetAiAgentCache,
+  getAiAgentStats,
+};
+try { (window as unknown as { __internals?: unknown }).__internals = __internals; } catch { /* non-browser */ }

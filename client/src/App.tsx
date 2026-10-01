@@ -18,6 +18,8 @@ import {
   runDiscoveryPhases,
   runAIPhase,
   enrichDiscoverContacts,
+  enrichWithAiAgent, aiAgentReady, aiAgentTest, loadAiAgentConfig, saveAiAgentConfig, resetAiAgentCache,
+  type AiAgentConfig,
   getSmartCategoryAnalysis,
   sanityCheckOpportunities,
   aiVerifyOpportunities,
@@ -913,6 +915,13 @@ export default function App() {
     } catch {}
     refreshBkStatus();
   }, [refreshBkStatus]);
+  // v6.9.127: AI web agent (Settings panel) — user-pasted OpenAI-compatible
+  // key drives an agentic enrichment lane during scans.
+  const [aiAgentCfg, setAiAgentCfgState] = useState<AiAgentConfig>(() => loadAiAgentConfig());
+  const [aiAgentTestMsg, setAiAgentTestMsg] = useState('');
+  const updateAiAgent = (patch: Partial<AiAgentConfig>) => {
+    setAiAgentCfgState(prev => { const next = { ...prev, ...patch }; saveAiAgentConfig(next); return next; });
+  };
   // v6.9.113: auth redirect diagnostics (Settings panel) — makes the GoTrue
   // allow-list problem visible in-app: what the client requests vs what the
   // project is configured with, plus where the last recovery email landed.
@@ -1567,6 +1576,19 @@ export default function App() {
               signal: ac.signal,
               onProgress: (msg) => setRescanNote(msg),
             });
+            // v6.9.127: AI web agent — when the user configured a key, let it
+            // navigate the stubborn sites (contact/branch pages the fixed
+            // crawlers missed) and top up contacts, within its own budget.
+            resetAiAgentCache();
+            const agent = await enrichWithAiAgent(biz, {
+              signal: ac.signal,
+              onProgress: (msg) => setRescanNote(msg),
+            });
+            if (agent.tried > 0) {
+              const f = agent.fieldsAdded;
+              const total = f.phone + f.email + f.whatsapp + f.viber + f.telegram + f.social;
+              setRescanNote(`🤖 AI agent browsed ${agent.fetched} pages on ${agent.tried} sites — ${total} new contact fields${total > 0 ? ` (${f.phone}📞 ${f.email}✉️ ${f.whatsapp + f.viber + f.telegram}💬)` : ''}`);
+            }
             if (!ac.signal.aborted) {
               setBusinesses(new Map(biz));
               setTimeout(() => captureRun('discover', `discover-${selectedCity.name}-${runStartTs}`), 120);
@@ -1952,6 +1974,25 @@ export default function App() {
         }
       }
 
+      // ── v6.9.127: AI web agent — top up contacts the parsers missed ──
+      // Only acts when the user enabled it in Settings (own API key); the
+      // lane returns immediately otherwise. Bounded by pages/time budgets.
+      if (!ac.signal.aborted) {
+        try {
+          resetAiAgentCache();
+          const agent = await enrichWithAiAgent(biz, {
+            signal: ac.signal,
+            onProgress: (msg) => setRescanNote(msg),
+          });
+          if (agent.tried > 0) {
+            const f = agent.fieldsAdded;
+            const total = f.phone + f.email + f.whatsapp + f.viber + f.telegram + f.social;
+            setRescanNote(`🤖 AI agent browsed ${agent.fetched} pages on ${agent.tried} sites — ${total} new contact fields${total > 0 ? ` (${f.phone}📞 ${f.email}✉️ ${f.whatsapp + f.viber + f.telegram}💬)` : ''}`);
+            setBusinesses(new Map(biz));
+          }
+        } catch { /* agent lane best-effort */ }
+      }
+
       // ── AI verification pass (v6.9.2) ──
       if (!ac.signal.aborted) {
         try {
@@ -1981,6 +2022,13 @@ export default function App() {
 
   // Businesses for the selected category
   const categoryBusinesses = selectedOppCategory ? (businesses.get(selectedOppCategory) || []) : [];
+  // v6.9.127: branches render guard — the ONLY shape the panel maps over.
+  // The click path already normalizes (v6.9.123); this makes the render
+  // itself immune to any future producer handing state a string/object.
+  const selBranches = useMemo(
+    () => (Array.isArray(selectedBiz?.branches) ? selectedBiz.branches : []),
+    [selectedBiz],
+  );
 
   // ── v6.9.49: data-source provenance ────────────────────────────────
   // Every business knows whether OSM found it or the web-registry
@@ -2422,6 +2470,104 @@ export default function App() {
               Get free keys: <a className="underline hover:text-foreground" href="https://api-dashboard.search.brave.com/register" target="_blank" rel="noreferrer">Brave</a> · <a className="underline hover:text-foreground" href="https://serper.dev/signup" target="_blank" rel="noreferrer">Serper</a> · <a className="underline hover:text-foreground" href="https://app.tavily.com/home" target="_blank" rel="noreferrer">Tavily</a> · <a className="underline hover:text-foreground" href="https://openrouter.ai/keys" target="_blank" rel="noreferrer">OpenRouter</a>
               — when ALL keys for a provider are exhausted the engine banner shows
               <span className="text-red-300"> "backups exceeded"</span> and the scan continues on backup engines.
+            </p>
+          </div>
+        </section>
+      )}
+
+      {/* ── v6.9.127: AI Web Agent (Settings) ─────────────────────────── */}
+      {showSettings && (
+        <section className="mx-auto max-w-3xl px-4 pt-4">
+          <div className="rounded-xl border border-border bg-card/60 p-4">
+            <div className="flex items-center justify-between mb-1">
+              <div className="text-sm font-bold text-foreground">🤖 AI Web Agent</div>
+              <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
+                <input type="checkbox" checked={aiAgentCfg.enabled} onChange={e => updateAiAgent({ enabled: e.target.checked })} className="accent-violet-500" />
+                Enable during scans
+              </label>
+            </div>
+            <p className="text-xs text-muted-foreground mb-3">
+              Paste an <b>OpenAI-compatible</b> API key. During scans, for businesses whose contacts
+              regular parsing missed, the agent reads the fetched page text, decides which pages to
+              open next (contact/about/branches), and extracts phones, emails and messenger links —
+              every value is re-validated before it is saved. The key stays in this browser.
+            </p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">Provider</label>
+                <select
+                  value={aiAgentCfg.provider}
+                  onChange={e => updateAiAgent({ provider: e.target.value as AiAgentConfig['provider'] })}
+                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-primary/50"
+                >
+                  <option value="openai-compatible">OpenAI-compatible (OpenAI, Groq, Together, local…)</option>
+                  <option value="openrouter">OpenRouter</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">Model</label>
+                <input
+                  type="text"
+                  value={aiAgentCfg.model}
+                  onChange={e => updateAiAgent({ model: e.target.value })}
+                  placeholder="gpt-4o-mini"
+                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary/50"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">Base URL</label>
+                <input
+                  type="text"
+                  value={aiAgentCfg.baseUrl}
+                  onChange={e => updateAiAgent({ baseUrl: e.target.value })}
+                  placeholder="https://api.openai.com/v1"
+                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary/50"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">API key</label>
+                <input
+                  type="password"
+                  value={aiAgentCfg.apiKey}
+                  onChange={e => updateAiAgent({ apiKey: e.target.value })}
+                  onKeyDown={e => { if (e.key === 'Enter') { aiAgentTest({ ...aiAgentCfg }).then(r => setAiAgentTestMsg(r.detail)); } }}
+                  placeholder="sk-…"
+                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary/50"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">Max pages per scan</label>
+                <input
+                  type="number" min={1} max={150}
+                  value={aiAgentCfg.budgetPages}
+                  onChange={e => updateAiAgent({ budgetPages: Number(e.target.value) })}
+                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-primary/50"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">Time budget (s)</label>
+                <input
+                  type="number" min={30} max={900}
+                  value={aiAgentCfg.budgetSeconds}
+                  onChange={e => updateAiAgent({ budgetSeconds: Number(e.target.value) })}
+                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-primary/50"
+                />
+              </div>
+            </div>
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                onClick={() => aiAgentTest({ ...aiAgentCfg }).then(r => setAiAgentTestMsg(`${r.ok ? '✓' : '✕'} ${r.detail}`))}
+                className="rounded-md border border-primary/40 bg-primary/10 px-2.5 py-1.5 text-xs font-semibold text-primary hover:bg-primary/20 transition-all"
+              >
+                Test connection
+              </button>
+              {aiAgentTestMsg && <span className="text-[11px] text-muted-foreground">{aiAgentTestMsg}</span>}
+            </div>
+            <p className="mt-3 text-[11px] text-muted-foreground">
+              Works with any OpenAI-compatible endpoint: OpenAI, OpenRouter (https://openrouter.ai/api/v1),
+              Groq (https://api.groq.com/openai/v1), Together, Ollama (http://localhost:11434/v1), etc.
+              The agent runs <b>after</b> the regular lanes, within the page/time budgets above, and only
+              fills <b>empty</b> fields — it never overwrites data the parsers already found.
             </p>
           </div>
         </section>
@@ -3482,13 +3628,13 @@ export default function App() {
                         {selectedBiz.pinterest && <a href={selectedBiz.pinterest} target="_blank" className="text-red-400 hover:underline">Pin</a>}
                         <a href={`https://www.google.com/maps/search/?api=1&query=${selectedBiz.lat},${selectedBiz.lon}`} target="_blank" className="text-emerald-400 hover:underline ml-auto">📍 Maps</a>
                       </div>
-                      {Array.isArray(selectedBiz.branches) && selectedBiz.branches.length > 0 && (
+                      {selBranches.length > 0 && (
                         <details className="mt-1.5 group">
                           <summary className="cursor-pointer select-none text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors">
-                            🏪 Branches ({selectedBiz.branches.length})
+                            🏪 Branches ({selBranches.length})
                           </summary>
                           <div className="mt-1 max-h-40 overflow-y-auto rounded-md border border-border/60 divide-y divide-border/40">
-                            {selectedBiz.branches.map((br, i) => (
+                            {selBranches.map((br, i) => (
                               <div key={i} className="px-2 py-1">
                                 <div className="flex items-center gap-1.5">
                                   {/* v6.9.109: guarded URL parse — a malformed/relative
@@ -3535,11 +3681,11 @@ export default function App() {
                         {selectedBiz.telegram && <a href={selectedBiz.telegram} target="_blank" rel="noopener noreferrer" className="text-[10px] px-1.5 py-0.5 rounded-full bg-sky-500/15 text-sky-400 hover:bg-sky-500/25 transition-colors">✈️ Telegram</a>}
                       </div>
                     )}
-                    {Array.isArray(selectedBiz.branches) && selectedBiz.branches.length > 0 && (
+                    {selBranches.length > 0 && (
                       <details className="mt-1 pl-4">
-                        <summary className="cursor-pointer select-none text-[11px] font-medium text-muted-foreground">🏪 Branches ({selectedBiz.branches.length})</summary>
+                        <summary className="cursor-pointer select-none text-[11px] font-medium text-muted-foreground">🏪 Branches ({selBranches.length})</summary>
                         <div className="mt-1 max-h-36 overflow-y-auto rounded-md border border-border/60 divide-y divide-border/40">
-                          {selectedBiz.branches.map((br, i) => (
+                          {selBranches.map((br, i) => (
                             <div key={i} className="px-2 py-1">
                               <div className="text-[11px] font-medium text-foreground/90 truncate">{br.title || 'Branch'}</div>
                               <div className="flex flex-wrap gap-x-3 text-[10px]">
