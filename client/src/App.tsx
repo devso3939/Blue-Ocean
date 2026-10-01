@@ -50,6 +50,7 @@ import { refreshSession, consumeRecoveryLink, consumeSignupLink, consumeAuthLink
 import { saveUserPrefs, loadUserPrefs } from './clientEngine';
 import CompareView from './CompareView';
 import CountryView from './CountryView';
+import BusinessDatabase from './BusinessDatabase'; // v6.9.128: deduped business sheet in the main header
 
 function fmtNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return '—';
@@ -779,7 +780,8 @@ import { APP_VERSION } from './version'; // v6.9.29: shared stamp — visible on
 import { logBootEvent, checkSuspension } from './telemetry';
 
 export default function App() {
-  const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country' | 'coverage' | 'history'>('analysis');
+  // v6.9.128: 'database' — every scanned business, one deduped sheet (was admin-only)
+  const [viewMode, setViewMode] = useState<'analysis' | 'compare' | 'country' | 'coverage' | 'history' | 'database'>('analysis');
   // ── v6.9.110: user accounts — session state + auth panel ──────────
   const [authSession, setAuthSession] = useState(() => {
     const s = getStoredSession();
@@ -2192,6 +2194,11 @@ export default function App() {
     URL.revokeObjectURL(url);
   }, [filteredBiz, selectedOppCategory, selectedCity]);
 
+  // ── v6.9.128: Business Database (header button) ────────────────────
+  if (viewMode === 'database') {
+    return <BusinessDatabase onBack={() => setViewMode('analysis')} />;
+  }
+
   if (viewMode === 'compare') {
     return (
       <div className="min-h-screen bg-background">
@@ -2314,12 +2321,17 @@ export default function App() {
     <div className="min-h-screen bg-background">
       {/* Header */}
       <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md">
-        <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4">
-          <div className="flex items-center gap-2">
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 text-white">
-              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
-            </div>
-            <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v{APP_VERSION}</span></span>
+        <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4">          <div className="flex items-center gap-2">
+              <button
+                onClick={() => setViewMode('analysis')}
+                title="Blue Ocean — home"
+                className="flex items-center gap-2 rounded-lg px-1 py-0.5 hover:opacity-80 transition-all"
+              >
+                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 text-white">
+                  <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                </div>
+                <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Market Gap Intelligence</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v{APP_VERSION}</span></span>
+              </button>
           </div>
           <div className="flex items-center gap-3">
             <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>
@@ -2338,11 +2350,14 @@ export default function App() {
               >
                 🏙️ Compare
               </button>
+              {/* v6.9.128: Database replaces Country in the header — Country Finder
+                  moved to the main page next to the search buttons. */}
               <button
-                onClick={() => setViewMode('country')}
+                onClick={() => setViewMode('database')}
+                title="Every business ever scanned — one deduped sheet with contacts, export to Excel"
                 className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-border text-muted-foreground hover:text-foreground hover:border-emerald-500/50 transition-all"
               >
-                🌍 Country
+                🗄️ Database
               </button>
               <button
                 onClick={() => setViewMode('coverage')}
@@ -2745,6 +2760,14 @@ export default function App() {
               className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-border bg-background px-6 py-2.5 text-sm font-semibold hover:bg-muted/50 disabled:opacity-40 transition-all"
             >
               🎯 Discover Opportunities
+            </button>
+            {/* v6.9.128: Country Finder moved here from the header */}
+            <button
+              onClick={() => setViewMode('country')}
+              title="Compare whole countries — business counts per category across cities"
+              className="flex items-center justify-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/5 px-6 py-2.5 text-sm font-semibold text-emerald-400 hover:bg-emerald-500/15 transition-all"
+            >
+              🌍 Country
             </button>
           </div>
 
