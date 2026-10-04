@@ -4263,7 +4263,9 @@ async function enrichFromSocialBio(b: Business): Promise<void> {
         if (d.length >= 8 && d.length <= 15 && plausiblePhone('+' + wa[1])) { b.phone = norm; touched = true; }
       }
     }
-    // Run the module extractor (strict, Cloudflare/entity/JSON-LD aware)
+    // Run the module extractor (strict, Cloudflare/entity/JSON-LD aware).
+    // v6.9.132: NO baseUrl — this fetch is a social/bio page; its host must
+    // never become "the business's website" via own-host ranking.
     if (!b.email || !b.phone) {
       try { extractFromHtmlModule(html, b); } catch {}
     }
@@ -5381,7 +5383,7 @@ async function tryAMPVersion(b: Business): Promise<void> {
     });
     if (r.ok) {
       const html = await r.text();
-      extractFromHtml(html, b);
+      extractFromHtml(html, b, ampUrl); // v6.9.132: own site — base for relative hrefs
     }
   } catch {}
 }
@@ -5425,7 +5427,8 @@ async function scrapeContactPageForEmail(b: Business): Promise<void> {
         // Cloudflare decode, obfuscated emails, labeled phones, socials,
         // ratings) — this crawler previously re-implemented a weak subset
         // and missed everything the homepage scrape already handled.
-        extractFromHtml(html, b);
+        // v6.9.132: pass the fetched contact page URL (own site by construction)
+        extractFromHtml(html, b, base + path);
       } catch {}
     }
   } catch {}
@@ -5455,7 +5458,7 @@ async function deepCrawlWebsite(b: Business): Promise<void> {
     if (!r.ok) return;
     const html = await r.text();
     // Mine the homepage itself first (cheap — already fetched)
-    extractFromHtml(html, b);
+    extractFromHtml(html, b, base);
     extractMessengerLinks(html, b);
     if (b.email && b.phone) return;
     // Collect internal candidate links, ranked by contact-smell.
@@ -5490,7 +5493,7 @@ async function deepCrawlWebsite(b: Business): Promise<void> {
         fetched++;
         if (!cr.ok) continue;
         const pageHtml = await cr.text();
-        extractFromHtml(pageHtml, b);
+        extractFromHtml(pageHtml, b, u); // v6.9.132: internal link of the own site
         extractMessengerLinks(pageHtml, b);
       } catch {}
     }
@@ -6341,7 +6344,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                         if (!b.email && res.url && /contact|about|team/i.test(res.url)) {
                           try {
                             const pageR = await corsFetch(res.url, { signal: AbortSignal.timeout(3000) });
-                            if (pageR.ok) extractFromHtml(await pageR.text(), b);
+                            if (pageR.ok) extractFromHtml(await pageR.text(), b, ownSiteBase(res.url, b));
                           } catch {}
                         }
                       }
@@ -6363,7 +6366,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                     if (!b.email && res.url && /contact|about|team/i.test(res.url)) {
                       try {
                         const pageR = await corsFetch(res.url, { signal: AbortSignal.timeout(3000) });
-                        if (pageR.ok) extractFromHtml(await pageR.text(), b);
+                        if (pageR.ok) extractFromHtml(await pageR.text(), b, ownSiteBase(res.url, b));
                       } catch {}
                     }
                   }
@@ -6394,7 +6397,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                     if (!b.email && res.url && /contact|about|team/i.test(res.url)) {
                       try {
                         const pageR = await corsFetch(res.url, { signal: AbortSignal.timeout(3000) });
-                        if (pageR.ok) extractFromHtml(await pageR.text(), b);
+                        if (pageR.ok) extractFromHtml(await pageR.text(), b, ownSiteBase(res.url, b));
                       } catch {}
                     }
                   }
@@ -6720,6 +6723,8 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             if (!r5b.ok) continue;
             const html5b = await r5b.text();
             // IG bio pages embed contact emails in meta description too
+            // v6.9.132: NO baseUrl — social platform pages are never the
+            // business's own site (relative hrefs resolve to instagram.com).
             extractFromHtml(html5b, b);
             // IG embeds emails in JSON meta — mine those explicitly
             if (!b.email && /instagram\.com/i.test(u)) {
@@ -6893,7 +6898,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               const rr = await corsFetch(r.url, { signal: AbortSignal.timeout(6000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
               if (rr.ok) {
                 const html = await rr.text();
-                if (!isCfChallenge(html) && html.length > 500) extractFromHtml(html, b);
+                if (!isCfChallenge(html) && html.length > 500) extractFromHtml(html, b, r.url); // v6.9.132: website just assigned — own site
                 else prefetchRenderDispatch(r.url);
               }
             } catch { /* site fetch failed — website kept, later lanes retry */ }
@@ -6922,7 +6927,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               }
               b.website = ph;
               wdEngine.found++;
-              extractFromHtml(phtml, b);
+              extractFromHtml(phtml, b, ph); // v6.9.132: probe host just assigned — own site
               break;
             } catch { /* next probe host */ }
           }
@@ -7022,7 +7027,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                   const bhost = b.website ? new URL(b.website).host.replace(/^www\./, '') : '';
                   if (bhost && bhost === qhost.replace(/^www\./, '')) {
                     const before = contactFieldCount(b);
-                    extractFromHtml(dom, b);
+                    extractFromHtml(dom, b, q); // v6.9.132: render of this business's own host (gated above)
                     _harvSites.c += Math.max(0, contactFieldCount(b) - before);
                   }
                 } catch { /* skip */ }
@@ -7169,7 +7174,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
               const r = await corsFetch(u, { signal: AbortSignal.timeout(5000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
               if (r.ok) {
                 const html = await r.text();
-                if (!isCfChallenge(html) && html.length > 500) extractFromHtml(html, b);
+                if (!isCfChallenge(html) && html.length > 500) extractFromHtml(html, b, u); // v6.9.132: discovered from own origin
                 if (!b.phone && isSpaShell(html)) prefetchRenderDispatch(u);
               }
             } catch { /* next discovered url */ }
@@ -7186,7 +7191,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             if (!r.ok) continue;
             const html = await r.text();
             if (isCfChallenge(html)) { _cfHosts.add(urlHostOf(u)); break; }
-            if (html.length > 500) extractFromHtml(html, b);
+            if (html.length > 500) extractFromHtml(html, b, u); // v6.9.132: own-site retry path
             if (!b.phone && isSpaShell(html)) prefetchRenderDispatch(u);
             if (b.email && b.phone) break;
           } catch { /* next path */ }
@@ -7241,7 +7246,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                 const rr = await corsFetch(r.url, { signal: AbortSignal.timeout(5000), headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlueOcean/1.0)' } });
                 if (rr.ok) {
                   const pageHtml = await rr.text();
-                  if (!isCfChallenge(pageHtml) && pageHtml.length > 500) extractFromHtml(pageHtml, b);
+                  if (!isCfChallenge(pageHtml) && pageHtml.length > 500) extractFromHtml(pageHtml, b, ownSiteBase(r.url, b));
                   // Only render own-site shells — a followed search result on
                   // a third-party SPA is not worth headless minutes.
                   if (!b.phone && isSpaShell(pageHtml)) { try { if (urlHostOf(r.url) === urlHostOf(b.website)) prefetchRenderDispatch(r.url); } catch {} }
@@ -9713,9 +9718,23 @@ export interface RunLike { businesses?: [string, unknown[]][]; [k: string]: unkn
 
 // ─── Test-only exports (corsFetch is module-scope; extractFromHtml is
 // published inside queryBusinesses, which owns its scope) ───
+
+// v6.9.132: baseUrl is only sound when the fetched page is on the BUSINESS'S
+// own site — relative-href resolution and the +8 own-host ranking would
+// otherwise turn a SERP/directory/social page's own host into "the website".
+// Search-result fetches pass through this guard; own-site crawls (deep
+// crawl, contact pages, AMP, render harvest) pass their URL directly.
+function ownSiteBase(pageUrl: string | undefined, b: Business): string | undefined {
+  if (!pageUrl || !b.website) return undefined;
+  const norm = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; } };
+  const a = norm(pageUrl); const c = norm(b.website);
+  return a && c && a === c ? pageUrl : undefined;
+}
+
 export const __internals: any = {};
 __internals.corsFetch = corsFetch;
 __internals.extractFromHtml = extractFromHtmlModule;
+__internals.ownSiteBase = ownSiteBase;
 
 // ─── v6.9.59: Per-extraction-layer yield counters ───────────────
 // Answers "which layers actually find contacts?" — JSON-LD vs microdata vs

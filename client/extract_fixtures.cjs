@@ -95,6 +95,14 @@ run('phone-15-digit-id-rejected', `<script type="application/ld+json">{"@type":"
 //    year-looking prefixes) must survive the new date-stamp rule.
 run('phone-bare-10-keeps-working', `<a href="tel:2025051515">Call</a>`, { phone: '2025051515' });
 
+// ── v6.9.132: baseUrl guard — only the business's OWN site may supply a
+// base for relative-href resolution and own-host ranking ───────────────────
+const osb = __internals.ownSiteBase;
+vrun('ownsite-base-same-host-www', () => osb('https://www.cafe.ge/contact', { website: 'https://cafe.ge/' }) === 'https://www.cafe.ge/contact');
+vrun('ownsite-base-foreign-host', () => osb('https://directory.com/contact', { website: 'https://cafe.ge/' }) === undefined);
+vrun('ownsite-base-no-website', () => osb('https://cafe.ge/', { website: '' }) === undefined);
+vrun('ownsite-base-invalid-url', () => osb('not a url', { website: 'https://cafe.ge/' }) === undefined);
+
 // ── Websites: ranking over first-match, hygiene, base URL ────────────────
 run('website-canonical-beats-first', [
   '<html><head><link rel="canonical" href="https://cafeorient.ge/"></head><body>',
