@@ -225,7 +225,7 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
               if (!b.phone && entity.telephone) {
                 const tp = Array.isArray(entity.telephone) ? String(entity.telephone[0]) : String(entity.telephone);
                 const digits = tp.replace(/\D/g, '');
-                if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(tp)) { b.phone = tp.trim(); yieldBump('jsonld'); }
+                if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(tp, false)) { b.phone = tp.trim(); yieldBump('jsonld'); }
               }
               if (!b.email && typeof entity.email === 'string' && entity.email && plausibleEmail(entity.email)) { b.email = entity.email; yieldBump('jsonld'); }
               const types = (Array.isArray(entity['@type']) ? entity['@type'] : [entity['@type']]) as unknown[];
@@ -322,8 +322,10 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
             const title = titleM ? titleM[1].replace(/\s+/g, ' ').trim().slice(0, 80) : undefined;
             let bPhone: string | undefined;
             const telM = full.match(/href\s*=\s*["']tel:([^"']+)["']/i);
-            if (telM) { try { bPhone = decodeURIComponent(telM[1]).trim(); } catch { bPhone = telM[1].trim(); } }
-            if (bPhone && !plausiblePhone(bPhone)) bPhone = undefined;
+            if (telM) { try { bPhone = stripTelExtension(decodeURIComponent(telM[1])).trim(); } catch { bPhone = stripTelExtension(telM[1]).trim(); } }
+            // v6.9.130: tel: hrefs are deliberate links — cut RFC extensions,
+            // then judge leniently (bare local numbers are real here).
+            if (bPhone && !plausiblePhone(bPhone, false)) bPhone = undefined;
             let bEmail: string | undefined;
             const emM = full.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
             if (emM && !EXCLUDE.test(emM[0]) && !_EMAIL_FILE_RE.test(emM[0])) bEmail = emM[0];
@@ -361,7 +363,7 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
           if (!b.email && prop === 'og:email') { b.email = val.replace('mailto:', ''); yieldBump('meta'); }
           if (!b.phone && prop === 'og:phone') {
             const digits = val.replace(/\D/g, '');
-            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(val)) { b.phone = val.trim(); yieldBump('meta'); }
+            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(val, false)) { b.phone = val.trim(); yieldBump('meta'); }
           }
         }
       }
@@ -373,7 +375,7 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
           const mdP = full.match(/itemprop=["'](?:telephone|faxNumber)["'][^>]*>([^<]{7,25})</i) || full.match(/<meta[^>]*itemprop=["'](?:telephone|faxNumber)["'][^>]*content=["']([^"']{7,25})/i);
           if (mdP) {
             const digits = mdP[1].replace(/\D/g, '');
-            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(mdP[1])) b.phone = mdP[1].trim();
+            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(mdP[1], false)) b.phone = mdP[1].trim();
           }
         }
         {
@@ -392,14 +394,14 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
         // v6.9.124: tolerate single-quoted attrs + junk inside the tel: value
         const telMatch = full.match(/href\s*=\s*["']tel:([^"']+)["']/i);
         if (telMatch) {
-          const telRaw = (() => { try { return decodeURIComponent(telMatch[1]); } catch { return telMatch[1]; } })().replace(/[^\d+\-\s().]/g, '').trim();
-          if (telRaw && plausiblePhone(telRaw)) b.phone = telRaw;
+          const telRaw = stripTelExtension((() => { try { return decodeURIComponent(telMatch[1]); } catch { return telMatch[1]; } })()).replace(/[^\d+\-\s().]/g, '').trim();
+          if (telRaw && plausiblePhone(telRaw, false)) b.phone = telRaw;
         }
         if (!b.phone) {
           // v6.9.124: labeled plain-text phone fallback ("Phone: +995 …" as
           // visible text — no tel: link, no itemprop).
           const ltPh = extractLabeledPhone(full);
-          if (ltPh && plausiblePhone(ltPh)) b.phone = ltPh.trim();
+          if (ltPh && plausiblePhone(ltPh, false)) b.phone = ltPh.trim();
         }
         if (!b.phone) {
           // Look for phone in structured areas (footer, header, contact section)
@@ -4530,12 +4532,12 @@ async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct:
 // (bottom of file, exported). Both used to be maintained as duplicates; now
 // there is exactly one implementation, so any parsing improvement benefits
 // every call site at once.
-function extractFromHtml(html: string, b: Business): boolean {
+function extractFromHtml(html: string, b: Business, baseUrl?: string): boolean {
   const snap = (x: Business) =>
     `${x.phone}|${x.email}|${x.website}|${x.facebook}|${x.instagram}|${x.twitter}|${x.pinterest}|${x.linkedin}|${x.youtube}|${x.tiktok}|${x.rating ?? ''}|${x.reviewCount ?? ''}`;
   // Snapshot before so caller can know whether anything was extracted
   const before = snap(b);
-  extractFromHtmlModule(html, b);
+  extractFromHtmlModule(html, b, baseUrl);
   return snap(b) !== before;
 }
 
@@ -4878,7 +4880,9 @@ async function wikidataContacts(b: Business): Promise<void> {
       }
       if (!b.phone && row.phone?.value) {
         const p = String(row.phone.value);
-        if (plausiblePhone(p)) b.phone = p;
+        // v6.9.130: Wikidata values are curator-entered — lenient gate so
+        // bare domestic formats (032 219 66 69) survive.
+        if (plausiblePhone(p, false)) b.phone = p;
       }
     } catch (e: any) {
       // v6.9.4: thrown errors (timeout / network / CORS) MUST count as
@@ -4921,7 +4925,7 @@ async function waybackContacts(b: Business): Promise<void> {
       return;
     }
     const html = await r.text();
-    if (html && html.length > 200) extractFromHtmlModule(html, b);
+    if (html && html.length > 200) extractFromHtmlModule(html, b, b.website);
   } catch {
     _waybackFails++;
     engineNoteFail('wayback', 'Wayback', 'net', 'archive.org unreachable');
@@ -6548,7 +6552,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
                     for (const contact of (grp.contacts || [])) {
                       if (contact.type === 'phone' && contact.value) {
                         const digits = String(contact.value).replace(/\D/g, '');
-                        if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(String(contact.value))) b.phone = contact.value;
+                        if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(String(contact.value), false)) b.phone = contact.value;
                       }
                     }
                   }
@@ -7281,7 +7285,7 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
             const snap = j?.archived_snapshots?.closest?.url;
             if (snap && j.archived_snapshots.closest.available) {
               const r = await corsFetch(snap, { signal: AbortSignal.timeout(12000) });
-              if (r.ok) { const html = await r.text(); if (html.length > 200) extractFromHtmlModule(html, b); }
+              if (r.ok) { const html = await r.text(); if (html.length > 200) extractFromHtmlModule(html, b, cUrl); }
             }
           }
         } catch { /* best effort */ }
@@ -9194,7 +9198,9 @@ export async function supplementProServices(
         for (const b of newlyAdded) {
           // v6.9.50: final validation sweep — anything the extractors let
           // through that fails plausibility is dropped, never displayed.
-          if (b.phone && !plausiblePhone(b.phone)) b.phone = '';
+          // v6.9.130: lenient — matches the main validation sweep (7371):
+          // dates/IPs/timestamps still die, bare local numbers survive.
+          if (b.phone && !plausiblePhone(b.phone, false)) b.phone = '';
           if (b.email && !plausibleEmail(b.email)) b.email = '';
           if (b.phone) gotPhone++; if (b.email) gotEmail++;
         }
@@ -9553,6 +9559,55 @@ function plausiblePhone(p: string, strict = true): boolean {
   return true;
 }
 
+// v6.9.130: RFC3966 / legacy extensions in tel: URIs
+// ("tel:+995322196669;ext=1", "tel:5551234,x9") — without cutting the
+// extension the cleanup regex strips the letters and MERGES the extension
+// digits into the number, producing a WRONG phone (…6669;ext=1 → …66691).
+function stripTelExtension(raw: string): string {
+  return raw
+    .replace(/;(?:ext|extension|isn|phone-context)=[^;]*$/i, '')
+    .replace(/[,;](?:x|ext|extension)\s*\d+.*$/i, '');
+}
+
+// v6.9.130: the page's own declared identity (canonical / og:url),
+// attribute-order agnostic. Drives email ranking (prefer an address AT the
+// page's own host) and website ranking (own-host anchors beat credits).
+function declaredPageUrl(html: string): string {
+  const tags = html.match(/<(?:link|meta)\b[^>]*>/gi) || [];
+  for (const t of tags) {
+    if (/rel=["']canonical["']/i.test(t) || /property=["']og:url["']/i.test(t)) {
+      const h = t.match(/(?:href|content)=["']([^"']+)["']/i);
+      if (h && /^https?:\/\//i.test(h[1])) return h[1];
+    }
+  }
+  return '';
+}
+
+// v6.9.130: tracking params + fragments are campaign noise, not identity —
+// strip them so stored websites dedupe and deep-scrape cleanly. Genuine
+// query params (?page_id=42 WordPress permalinks etc.) are kept.
+function cleanWebsiteUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    u.hash = '';
+    for (const k of [...u.searchParams.keys()]) {
+      if (/^utm_|^(fbclid|gclid|msclkid|ref|refsrc|source|igshid|yclid|si|_ga|_gl|mc_cid|mc_eid)$/i.test(k)) u.searchParams.delete(k);
+    }
+    return u.toString();
+  } catch { return raw; }
+}
+
+// v6.9.130: how strongly an email's domain ties to the page's own host.
+// 100 = same host, 60 = subdomain relation, 0 = unrelated (footer credit,
+// author byline, followed widget).
+function emailHostScore(domain: string, pageHost: string): number {
+  if (!pageHost) return 0;
+  const d = (domain || '').replace(/^www\./, '').toLowerCase();
+  if (d === pageHost) return 100;
+  if (d.endsWith('.' + pageHost) || pageHost.endsWith('.' + d)) return 60;
+  return 0;
+}
+
 // Junk emails: asset files and placeholder addresses that regexes pick up
 const _EMAIL_FILE_RE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
 const _EMAIL_JUNK_RE = /example\.com|noreply|no-reply|donotreply|wixpress|sentry\.io|cloudflare|privacy|abuse@|postmaster@|schema\.org|w3\.org|user@|username@|your(name|mail)?@|email@domain/i;
@@ -9564,7 +9619,7 @@ const _EMAIL_JUNK_RE = /example\.com|noreply|no-reply|donotreply|wixpress|sentry
 // with in their JSON-LD/microdata boilerplate — info@schema.org leaked into
 // hundreds of rows from template contact pages (the Wix/WordPress default
 // Organization block). Also w3.org, ogp.me, and webmaster spamtrap hosts.
-const _EMAIL_PLATFORM_RE = /(duckduckgo|bing|google|yahoo|microsoft|outlook|hotmail|gmail|icloud|proton|yandex|mail\.ru|zoho|fastmail|startpage|mojeek|brave|ecosia|qwant|search|cloudfront|akamai|amazonaws|azureedge|wix|shopify|squarespace|webflow|godaddy|namecheap|hostinger|siteground|bluehost|wordpress|schema|w3|ogp|whatwg|mozilla|wikipedia|wikimedia|webcache|translate)\.(com|co|io|net|org|me|ge|ru|de|fr)$/i;
+const _EMAIL_PLATFORM_RE = /(?:^|[.-])(duckduckgo|bing|google|yahoo|microsoft|outlook|hotmail|gmail|icloud|proton|yandex|mail\.ru|zoho|fastmail|startpage|mojeek|brave|ecosia|qwant|search|cloudfront|akamai|amazonaws|azureedge|wix|shopify|squarespace|webflow|godaddy|namecheap|hostinger|siteground|bluehost|wordpress|schema|w3|ogp|whatwg|mozilla|wikipedia|wikimedia|webcache|translate)\.(com|co|io|net|org|me|ge|ru|de|fr)$/i;
 
 // v6.9.127: TLD gate — the final domain label must be a REAL TLD. Scraped
 // page text yields fragments like "v-applic@ion.primary" (CSS class debris)
@@ -9577,6 +9632,11 @@ const _EMAIL_TLDS = new Set(('com org net edu gov mil int info biz eu io co me t
   'ae sa qa kw om bh jo il ps lb in pk bd lk np cn hk tw jp kr sg my th vn ph id ' +
   'au nz ca us mx br ar cl ve ec uy py bo pe ' +
   'za ng ke gh eg ma dz tn ly et tz ug zw ' +
+  // v6.9.130: real trade/generic TLDs small businesses actually own — the
+  // whitelist predated the new-gTLD round, so a plumber's info@x.plumbing
+  // was REJECTED as a fake TLD. Added: verified-real registrations only.
+  'cleaning plumbing roofing contractor construction furniture garden landscaping pestcontrol moving storage solar security locksmith jewelry builder engineering systems network center catering pub rest photography photographer coffee kitchen wedding toys pets fishing golf sports bike cars flights hostel resort villa apartments homes realty properties academy institute university college training coach books gifts flowers cake wine beer ' +
+  'onl mobi aero asia cat jobs post ir ' +
   'app dev ai cloud shop store online site tech xyz club top space website solutions company group digital agency studio design media events email consulting travel restaurant cafe bar hotel pizza fitness yoga photo care auto property estate capital finance law legal medical health dental clinic vip blog wiki fun games').split(/\s+/).filter(Boolean));
 
 // v6.9.37: structural email validation for the final data-quality pass.
@@ -9632,7 +9692,7 @@ export function sanitizeRunRecord(r: RunLike): RunLike {
       if (!Array.isArray(arr)) continue;
       for (const b of arr as Record<string, unknown>[]) {
         if (b && typeof b.email === 'string' && b.email && !plausibleEmail(b.email)) b.email = '';
-        if (b && typeof b.phone === 'string' && b.phone && !plausiblePhone(b.phone)) b.phone = '';
+        if (b && typeof b.phone === 'string' && b.phone && !plausiblePhone(b.phone, false)) b.phone = '';
         if (b && typeof b.phone === 'string' && b.phone && /^\d{1,3}(\.\d{3}){2,}/.test(b.phone)) b.phone = '';
         if (b && typeof b.website === 'string' && b.website && SITE_JUNK.test(b.website)) b.website = '';
       }
@@ -9653,7 +9713,7 @@ __internals.extractFromHtml = extractFromHtmlModule;
 // mailto vs Cloudflare etc. Module-level so both scrape sites (deep crawler
 // and this module extractor) feed the same tally. Purely additive telemetry:
 // no extraction behavior changes, reset at every scan start.
-export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'labeltext' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl' | 'wayback' | 'render' | 'rnav' | 'rsearch' | 'rbing' | 'rsocial' | 'rinfer' | 'rcms';
+export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'labeltext' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl' | 'wayback' | 'render' | 'rnav' | 'rsearch' | 'rbing' | 'rsocial' | 'rinfer' | 'rcms' | 'domainmatch';
 export interface ExtractionYieldEntry { found: number; tries: number; }
 export interface ExtractionYieldMap { [k: string]: ExtractionYieldEntry; }
 const _extractYield: ExtractionYieldMap = {};
@@ -9677,6 +9737,7 @@ export const _EXTRACT_LAYER_META: { key: ExtractionLayerKey; label: string; icon
   { key: 'mailto',    label: 'mailto:',         icon: '✉️' },
   { key: 'cfdecode',  label: 'CF decode',       icon: '☁️' },
   { key: 'entity',    label: '&#64;',           icon: '🔤' },
+  { key: 'domainmatch', label: 'Own-domain',    icon: '🎯' },
   { key: 'obfusc',    label: '[at] forms',      icon: '🔑' },
   { key: 'jslit',     label: 'JS literals',     icon: '📜' },
   { key: 'dataattr',  label: 'data-email',      icon: '🔗' },
@@ -9782,7 +9843,7 @@ function extractCfEmail(html: string): string {
 // "Телефон: +995 322 19 66 69 доб. 1". Relaxed to accept any chars and let
 // plausiblePhone do the judgement.
 function extractLabeledPhone(html: string): string {
-  const m = html.match(/(?:phone|tel|telephone|mobile|cell|whatsapp|viber|hotline|call(?:\s+us)?|contact(?:\s+us)?|teléfono|teléfonos|móvil|móviles|telefone|téléphone|téléphones|telefon(?:o|i|ul)?|telefoon|телефон|телефоны|τηλέφωνο|τηλέφωνα|ტელეფონი|تلفن|هاتف)[^+\n]{0,20}(\+?[\d][\d\s\-\(\)\.]{6,18}\d)/i);
+  const m = html.match(/(?:phone|tel|telephone|mobile|cell|whatsapp|viber|hotline|call(?:\s+us)?|contact(?:\s+us)?|teléfono|teléfonos|móvil|móviles|telefone|téléphone|téléphones|telefon(?:o|i|ul)?|telefoon|телефон|телефоны|τηλέφωνο|τηλέφωνα|ტელეფონი|تلفن|هاتف)[^+\n\d]{0,20}(\+?[\d][\d\s\-\(\)\.]{6,18}\d)/i);
   return m ? m[1] : '';
 }
 
@@ -9803,9 +9864,20 @@ function preferEmail(current: string | undefined, candidate: string): string | u
   return cur;
 }
 
-function extractFromHtmlModule(html: string, b: Business): void {
+function extractFromHtmlModule(html: string, b: Business, baseUrl?: string): void {
   const JUNK = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|duckduckgo|schema\.org|privacy.*policy|terms.*service|cookie/i;
-  const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;    // Phone: tel: links, then text regex
+  const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
+  // v6.9.130: who the page says it is (canonical/og:url, else the URL we
+  // fetched it from). Drives email ranking (prefer an address AT the page's
+  // own host over footer credits) and website ranking (own-host anchors
+  // beat arbitrary external links).
+  const pageHost = (() => {
+    const hostOf = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; } };
+    const declared = declaredPageUrl(html);
+    return (declared ? hostOf(declared) : '') || (baseUrl ? hostOf(baseUrl) : '');
+  })();
+
+  // Phone: tel: links, then text regex
   if (!b.phone) {
     // 1. tel: links (most reliable). v6.9.124: tolerate single-quoted
     // attributes and any junk inside the value — decode, strip non-phone
@@ -9813,8 +9885,11 @@ function extractFromHtmlModule(html: string, b: Business): void {
     yieldTry('tel');
     const telM = html.match(/href\s*=\s*["']tel:([^"']+)["']/i);
     if (telM) {
-      const telRaw = (() => { try { return decodeURIComponent(telM[1]); } catch { return telM[1]; } })().replace(/^(?:\s|&nbsp;)+/, '').replace(/[^\d+\-\s().]/g, '').trim();
-      if (telRaw && plausiblePhone(telRaw)) { b.phone = telRaw; yieldBump('tel'); }
+      const telRaw = stripTelExtension((() => { try { return decodeURIComponent(telM[1]); } catch { return telM[1]; } })()).replace(/^(?:\s|&nbsp;)+/, '').replace(/[^\d+\-\s().]/g, '').trim();
+      // v6.9.130: tel: URIs are deliberate links — the naked-digit-run rule
+      // (written to reject bare IDs in scraped prose) was discarding real
+      // local numbers like tel:0322196669 on the MOST reliable layer.
+      if (telRaw && plausiblePhone(telRaw, false)) { b.phone = telRaw; yieldBump('tel'); }
     }
     // 1b. WhatsApp click-to-chat links — wa.me/995… or api.whatsapp.com/send?phone=…
     if (!b.phone) {
@@ -9833,7 +9908,7 @@ function extractFromHtmlModule(html: string, b: Business): void {
     if (!b.phone) {
       yieldTry('jsonld');
       const ldPhoneM = html.match(/"telephone"\s*:\s*"(\+?[\d\s\-\(\)]{7,20})"/i);
-      if (ldPhoneM && plausiblePhone(ldPhoneM[1])) { b.phone = ldPhoneM[1].trim(); yieldBump('jsonld'); }
+      if (ldPhoneM && plausiblePhone(ldPhoneM[1], false)) { b.phone = ldPhoneM[1].trim(); yieldBump('jsonld'); }
     }
     // 2. Country-specific formats
     if (!b.phone) {
@@ -9859,7 +9934,7 @@ function extractFromHtmlModule(html: string, b: Business): void {
     if (!b.phone) {
       yieldTry('labeltext');
       const ltPh = extractLabeledPhone(html);
-      if (ltPh && plausiblePhone(ltPh)) { b.phone = ltPh.trim(); yieldBump('labeltext'); }
+      if (ltPh && plausiblePhone(ltPh, false)) { b.phone = ltPh.trim(); yieldBump('labeltext'); }
     }
     // 2b. JSON-LD telephone — many sites embed the phone ONLY in structured
     // data. v6.9.58: the walker reaches @graph + contactPoint nodes.
@@ -9873,7 +9948,7 @@ function extractFromHtmlModule(html: string, b: Business): void {
             const tp = Array.isArray(e.telephone) ? String(e.telephone[0]) : (typeof e.telephone === 'string' ? e.telephone : '');
             if (!tp) continue;
             const digits = tp.replace(/\D/g, '');
-            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(tp)) { b.phone = tp.trim(); yieldBump('jsonld'); break; }
+            if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(tp, false)) { b.phone = tp.trim(); yieldBump('jsonld'); break; }
           }
         } catch {}
         if (b.phone) break;
@@ -9885,7 +9960,7 @@ function extractFromHtmlModule(html: string, b: Business): void {
       const mdP = html.match(/itemprop=["'](?:telephone|faxNumber)["'][^>]*>([^<]{7,25})</i) || html.match(/<meta[^>]*itemprop=["'](?:telephone|faxNumber)["'][^>]*content=["']([^"']{7,25})/i);
       if (mdP) {
         const digits = mdP[1].replace(/\D/g, '');
-        if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(mdP[1])) { b.phone = mdP[1].trim(); yieldBump('microdata'); }
+        if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(mdP[1], false)) { b.phone = mdP[1].trim(); yieldBump('microdata'); }
       }
     }
     if (!b.email) {
@@ -9902,7 +9977,7 @@ function extractFromHtmlModule(html: string, b: Business): void {
       const labeledPh = html.match(/(?:phone|tel|telephone|mobile|cell|fax|calls?|whatsapp|viber|contact|teléfono|teléfonos|móvil|móviles|telefone|téléphone|téléphones|telefon(?:o|i|ul)?|telefonnummer|telefoon|телефон|телефоны|τηλέφωνο|τηλέφωνα|تلفن|هاتف)\s*[:;=\s"'>]*([+\d][\d\s\-\.()]{7,18})/i);
       if (labeledPh) {
         const digits = labeledPh[1].replace(/\D/g, '');
-        if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(labeledPh[1])) { b.phone = labeledPh[1].trim(); yieldBump('label'); }
+        if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(labeledPh[1], false)) { b.phone = labeledPh[1].trim(); yieldBump('label'); }
       }
     }
     // 4. General phone regex (fallback). Unlabeled text is noisy: require a
@@ -9995,8 +10070,24 @@ function extractFromHtmlModule(html: string, b: Business): void {
     // 6. HTML entity encoded (@)
     if (!b.email) {
       yieldTry('entity');
-      const entM = html.match(/([a-zA-Z0-9._%+-]+)&#64;([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
-      if (entM && !JUNK.test(entM[0])) { b.email = entM[1] + '@' + entM[2]; yieldBump('entity'); }
+      // v6.9.130: decode numeric entities BEFORE matching — the old
+      // unanchored &#64; regex matched the plain tail after an encoded local
+      // part and stored a TRUNCATED address ("&#105;&#110;fo&#64;orient.ge"
+      // → "fo@orient.ge"). Decode first, fall back to the plain form.
+      if (/&#x?[0-9a-f]{2,6};/i.test(html)) {
+        const decoded = html
+          .replace(/&#(\d{1,6});/g, (m, d) => { const c = Number(d); return c > 31 && c < 0x10000 ? String.fromCharCode(c) : m; })
+          .replace(/&#x([0-9a-f]{1,6});/gi, (m, h) => { const c = parseInt(h, 16); return c > 31 && c < 0x10000 ? String.fromCharCode(c) : m; });
+        const dm = decoded.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+        if (dm) for (const raw of dm) {
+          const clean = raw.replace(/[\s>);,]+$/, '');
+          if (plausibleEmail(clean)) { b.email = clean; yieldBump('entity'); break; }
+        }
+      }
+      if (!b.email) {
+        const entM = html.match(/([a-zA-Z0-9._%+-]+)&#64;([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+        if (entM && plausibleEmail(entM[1] + '@' + entM[2]) && !JUNK.test(entM[0])) { b.email = entM[1] + '@' + entM[2]; yieldBump('entity'); }
+      }
     }
     // 7. Human-obfuscated: name [at] site [dot] com — bracket forms only
     // (unambiguous markers; a bare " at " would false-positive on prose)
@@ -10005,20 +10096,22 @@ function extractFromHtmlModule(html: string, b: Business): void {
       const obM = html.match(/([a-zA-Z0-9._%+-]{2,})\s*(?:\[\s*at\s*\]|\(\s*at\s*\))\s*([a-zA-Z0-9][a-zA-Z0-9.-]{1,60})\s*(?:\[\s*(?:dot|\.|\u2022)\s*\]|\(\s*(?:dot|\.|\u2022)\s*\)|\.)\s*([a-zA-Z]{2,15})/i);
       if (obM) {
         const em = (obM[1] + '@' + obM[2] + '.' + obM[3]).toLowerCase();
-        if (!JUNK.test(em) && !EMAIL_FILE.test(em)) { b.email = em; yieldBump('obfusc'); }
+        // v6.9.130: centralize validation (JS literals / obfuscated forms
+        // previously skipped plausibleEmail and let CSS-class debris through)
+        if (!JUNK.test(em) && !EMAIL_FILE.test(em) && plausibleEmail(em)) { b.email = em; yieldBump('obfusc'); }
       }
     }
     // 7. JavaScript string literals
     if (!b.email) {
       yieldTry('jslit');
       const jsEmailM = html.match(/['"]([\w][\w._%+-]*@[\w.-]+\.[a-zA-Z]{2,})['"]/);
-      if (jsEmailM && !JUNK.test(jsEmailM[1]) && !EMAIL_FILE.test(jsEmailM[1]) && jsEmailM[1].length > 6) { b.email = jsEmailM[1]; yieldBump('jslit'); }
+      if (jsEmailM && !JUNK.test(jsEmailM[1]) && !EMAIL_FILE.test(jsEmailM[1]) && jsEmailM[1].length > 6 && plausibleEmail(jsEmailM[1].trim())) { b.email = jsEmailM[1]; yieldBump('jslit'); }
     }
     // 8. data-email attributes
     if (!b.email) {
       yieldTry('dataattr');
       const dataEmailM = html.match(/data-email\s*=\s*["']([^"']+@[^"']+)/i);
-      if (dataEmailM && !JUNK.test(dataEmailM[1]) && !EMAIL_FILE.test(dataEmailM[1])) { b.email = dataEmailM[1]; yieldBump('dataattr'); }
+      if (dataEmailM && !JUNK.test(dataEmailM[1]) && !EMAIL_FILE.test(dataEmailM[1]) && plausibleEmail(dataEmailM[1].trim())) { b.email = dataEmailM[1].trim(); yieldBump('dataattr'); }
     }
     // 9. Obfuscated forms — "name [at] domain [dot] com", "name(at)domain(dot)com"
     if (!b.email) {
@@ -10026,7 +10119,21 @@ function extractFromHtmlModule(html: string, b: Business): void {
       const obfM = html.match(/([\w][\w._%+-]{1,40})\s*(?:\(|\[|\{)?\s*(?:at|@|&#64;)\s*(?:\)|\]|\})?\s*([\w-]{2,40})\s*(?:\(|\[|\{)?\s*(?:dot|\.|&#46;)\s*(?:\)|\]|\})?\s*([a-zA-Z]{2,12})\b/i);
       if (obfM) {
         const cand = `${obfM[1]}@${obfM[2]}.${obfM[3]}`;
-        if (!JUNK.test(cand) && !EMAIL_FILE.test(cand)) { b.email = cand.toLowerCase(); yieldBump('obfusc'); }
+        if (!JUNK.test(cand) && !EMAIL_FILE.test(cand) && plausibleEmail(cand)) { b.email = cand.toLowerCase(); yieldBump('obfusc'); }
+      }
+    }
+  }
+
+  // v6.9.130: own-domain upgrade — first-wins layers can settle on a footer
+  // credit or author byline (design@pixelcraft.ge) while the page declares
+  // https://cafeorient.ge/ and carries info@cafeorient.ge. The page's
+  // own-host address is almost always the business's real one, so a stored
+  // off-host address is replaced when an on-host candidate exists.
+  if (b.email && pageHost && emailHostScore(b.email.split('@')[1] || '', pageHost) < 60) {
+    for (const raw of html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || []) {
+      const clean = raw.replace(/[\s>);,]+$/, '');
+      if (plausibleEmail(clean) && emailHostScore(clean.split('@')[1] || '', pageHost) >= 60) {
+        b.email = clean; yieldBump('domainmatch'); break;
       }
     }
   }
@@ -10035,31 +10142,62 @@ function extractFromHtmlModule(html: string, b: Business): void {
   // not depend on the nested DIRECTORY_SITES/_EXCLUDE helpers).
   const WEBSITE_DENY = /yelp\.com|tripadvisor|foursquare|booking\.com|expedia|yellowpages|justdial|zomato|opentable|flickr|pinterest\.com|tumblr|reddit\.com|quora|wikipedia\.org|youtube\.com|tiktok\.com|linkedin\.com|facebook\.com|instagram\.com|twitter\.com|x\.com|snapchat|threads|medium\.com|substack|archive\.org|amazon\.|ebay\.|aliexpress|2gis\.|yandex\.|uber\.com|doordash|grubhub|glassdoor|indeed\.com|thumbtack|bbb\.org|trustpilot|google\.|gstatic|apple\.com|microsoft\.com|schema\.org|w3\.org|duckduckgo\.com|bing\.com/i;
   if (!b.website) {
-    const links = html.matchAll(/href="([^"]+)"/g);
-    for (const link of links) {
+    const cands: { url: string; score: number }[] = [];
+    let scanned = 0;
+    for (const link of html.matchAll(/href\s*=\s*["']([^"']+)["']/gi)) {
+      if (++scanned > 600) break; // huge pages: nav links come first anyway
       let url = link[1];
-      const uddg = url.match(/uddg=([^&]+)/);
-      if (uddg) url = decodeURIComponent(uddg[1]);
-      if (!url.startsWith('http')) continue;
-      let host = '';
-      try { host = new URL(url).hostname.replace(/^www\./, ''); } catch { continue; }
+      if (url.startsWith('//')) url = 'https:' + url;
+      else if (!/^https?:\/\//i.test(url)) {
+        // v6.9.130: relative hrefs were invisible (no base to resolve
+        // against) — resolve them when the caller knows the page URL.
+        if (!baseUrl) continue;
+        try { url = new URL(url, baseUrl).toString(); } catch { continue; }
+      }
+      const uddg = url.match(/[?&]uddg=([^&]+)/);
+      if (uddg) { try { url = decodeURIComponent(uddg[1]); } catch { /* keep raw */ } }
+      let u: URL;
+      try { u = new URL(url); } catch { continue; }
+      if (!/^https?:$/.test(u.protocol)) continue;
+      const host = u.hostname.replace(/^www\./, '').toLowerCase();
       if (WEBSITE_DENY.test(host)) continue;
       if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) continue;
-      if (!isLikelyBusinessWebsite(url, b.name)) continue;
-      b.website = url; break;
+      // Files/build artifacts are never a website (menu.pdf, logo.png)…
+      if (/\.(pdf|docx?|xlsx?|pptx?|zip|rar|jpe?g|png|gif|svg|webp|css|js|mp3|mp4)$/i.test(u.pathname)) continue;
+      if (/\/cdn-cgi\//.test(u.pathname)) continue;
+      if (!isLikelyBusinessWebsite(u.toString(), b.name)) continue;
+      // v6.9.130: RANK instead of first-match — the first qualifying anchor
+      // on a page is often a designer/partner credit. Own host (canonical or
+      // base URL) > business-name token in host > shallow path.
+      let score = 0;
+      if (pageHost && host === pageHost) score += 8;
+      else if (pageHost && (host.endsWith('.' + pageHost) || pageHost.endsWith('.' + host))) score += 6;
+      if (extractBizNameTokens(b.name).some(t => host.includes(t))) score += 4;
+      const depth = u.pathname.split('/').filter(Boolean).length;
+      score += depth === 0 ? 2 : depth === 1 ? 1 : -Math.min(3, depth);
+      // A link on the page's own host: the site ROOT is the canonical entry
+      // point for the deep scraper (not a random subpage).
+      const out = pageHost && host === pageHost ? u.origin + '/' : u.toString();
+      cands.push({ url: out, score });
+      if (cands.length >= 40) break;
+    }
+    if (cands.length) {
+      let best = cands[0];
+      for (const c of cands) if (c.score > best.score) best = c;
+      b.website = cleanWebsiteUrl(best.url);
     }
   }
   // Website from meta signals — canonical link & og:url (page's own declared
   // identity, higher-trust than scraping arbitrary anchors; try when anchor
-  // scan came up empty).
+  // scan came up empty). v6.9.130: attribute-order agnostic + tracking-param
+  // stripped.
   if (!b.website) {
-    const canonicalM = html.match(/<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i)
-      || html.match(/<meta[^>]+property=["']og:url["'][^>]+content=["']([^"']+)["']/i);
-    if (canonicalM) {
-      let url = canonicalM[1];
+    const declared = declaredPageUrl(html);
+    if (declared) {
+      let url = declared;
       if (url.startsWith('//')) url = 'https:' + url;
       if (/^https?:\/\//i.test(url) && !WEBSITE_DENY.test(url)) {
-        b.website = url;
+        b.website = cleanWebsiteUrl(url);
       }
     }
   }
@@ -10510,7 +10648,7 @@ async function agentEnrichOne(
   const extractAndApply = (html: string, srcUrl: string): number => {
     if (!html) return 0;
     const before2 = contactFieldCountOf(b);
-    try { extractFromHtmlModule(html, b); } catch { /* extractor is defensive */ }
+    try { extractFromHtmlModule(html, b, srcUrl); } catch { /* extractor is defensive */ }
     const after2 = contactFieldCountOf(b);
     return after2 - before2;
   };

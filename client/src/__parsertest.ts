@@ -8,7 +8,7 @@
  * on real pages?
  */
 import './__shim';
-import { __internals } from './clientEngine';
+import { __internals, plausibleEmail, isLikelyBusinessWebsite } from './clientEngine';
 
 // NOTE: deliberately unique local names — this file is bundled into the same
 // CJS scope as clientEngine, and a name like 'extractFromHtml' here would
@@ -19,7 +19,7 @@ const xFetchPage = (url: string) => __internals.corsFetch(url);
 
 // Re-export internals so `require()` consumers can smoke-test the extractors
 // (esbuild CJS bundles only expose the ENTRY file's exports).
-export { __internals };
+export { __internals, plausibleEmail, isLikelyBusinessWebsite };
 
 interface Target {
   name: string;
