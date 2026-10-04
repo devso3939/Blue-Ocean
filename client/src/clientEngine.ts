@@ -9546,6 +9546,15 @@ function plausiblePhone(p: string, strict = true): boolean {
   // bare 1-prefixed 10-13 digit runs without + are usually timestamps/IDs
   // (real international numbers in our regions carry +995/+374/+90/+7)
   if (/^1\d{9,12}$/.test(digits) && !t.startsWith('+')) return false;
+  // v6.9.131: BARE date stamps — "202511190001" (12 digits, found on the
+  // Holiday Inn homepage), "20251119" (8) — the separator-based rules above
+  // never see these. Length-gated so bare 9-10 digit domestic numbers (US
+  // area codes can start year-looking prefixes like 202-5…) survive.
+  if (!/[-/.()\s]/.test(t) && /^(19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])/.test(t) && (digits.length === 8 || digits.length >= 11)) return false;
+  // v6.9.131: bare 13-15 digit runs without '+' or separators (IMSI, invoice
+  // and order IDs — 274486543027357 from a hotel page) are never phones;
+  // real international numbers carry '+'.
+  if (!t.startsWith('+') && !/[-/.()\s]/.test(t) && digits.length >= 13) return false;
   // v6.9.51: naked digit runs (no separators, no +) are IDs/timestamps in
   // SCRAPED text — but OSM tag values are mapper-curated and DO contain real
   // domestic numbers in bare form (599663300 GE mobile, 0322196669 GE
@@ -10129,10 +10138,18 @@ function extractFromHtmlModule(html: string, b: Business, baseUrl?: string): voi
   // https://cafeorient.ge/ and carries info@cafeorient.ge. The page's
   // own-host address is almost always the business's real one, so a stored
   // off-host address is replaced when an on-host candidate exists.
+  // v6.9.131: live-harness regression — on radissonhotels.com the upgrade
+  // swapped the property's operational GT address (tbilisi.ots@radissonblu.com)
+  // for the corporate footer's data-protection desk. Dead-end roles are
+  // never valid UPGRADE candidates: they are statutory contacts, not the
+  // business's inbox.
+  const _UPGRADE_DEAD_ROLES = /^(dataprotection|dpo|privacy|legal|press|copyright|dmca|abuse|postmaster|noreply|no-reply|donotreply|mailer-daemon|bounce|auto-?reply)\b/i;
   if (b.email && pageHost && emailHostScore(b.email.split('@')[1] || '', pageHost) < 60) {
     for (const raw of html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || []) {
       const clean = raw.replace(/[\s>);,]+$/, '');
-      if (plausibleEmail(clean) && emailHostScore(clean.split('@')[1] || '', pageHost) >= 60) {
+      if (!plausibleEmail(clean)) continue;
+      if (_UPGRADE_DEAD_ROLES.test(clean.split('@')[0] || '')) continue;
+      if (emailHostScore(clean.split('@')[1] || '', pageHost) >= 60) {
         b.email = clean; yieldBump('domainmatch'); break;
       }
     }

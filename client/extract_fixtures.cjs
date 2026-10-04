@@ -77,6 +77,24 @@ vrun('duckduckgo-invalid', () => plausibleEmail('info@duckduckgo.com') === false
 vrun('sub-platform-invalid', () => plausibleEmail('info@sub.duckduckgo.com') === false);
 vrun('noreply-invalid', () => plausibleEmail('noreply@a.ge') === false);
 
+// ── v6.9.131: live-harness regressions (found by running old vs new code
+// against the 60 real targets back-to-back) ───────────────────────────────
+// 1. Radisson: the own-domain upgrade swapped the property's operational
+//    address for the corporate footer's data-protection desk.
+run('email-upgrade-skips-dp-desk', [
+  '<html><head><link rel="canonical" href="https://radissonhotels.com/en-us/hotels/radisson-blu-tbilisi"></head><body>',
+  '<script type="application/ld+json">{"@type":"Hotel","email":"tbilisi.ots@radissonblu.com"}</script>',
+  '<footer>Privacy enquiries: dataprotection@radissonhotels.com</footer>',
+  '</body></html>',
+].join(''), { email: 'tbilisi.ots@radissonblu.com' }, { name: 'Radisson Blu Iveria Hotel' });
+// 2. Holiday Inn homepage: bare YYYYMMDD+seq stamp captured as a phone.
+run('phone-bare-date-stamp-rejected', `<div>Phone: 202511190001</div>`, { phone: '' });
+// 3. Hotel Genio: bare 15-digit order/IMSI-like run captured as a phone.
+run('phone-15-digit-id-rejected', `<script type="application/ld+json">{"@type":"Hotel","telephone":"274486543027357"}</script>`, { phone: '' });
+// 4. Guard against overreach: bare 10-digit numbers (US area codes start
+//    year-looking prefixes) must survive the new date-stamp rule.
+run('phone-bare-10-keeps-working', `<a href="tel:2025051515">Call</a>`, { phone: '2025051515' });
+
 // ── Websites: ranking over first-match, hygiene, base URL ────────────────
 run('website-canonical-beats-first', [
   '<html><head><link rel="canonical" href="https://cafeorient.ge/"></head><body>',
