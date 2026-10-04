@@ -4,7 +4,11 @@
 // comes from the main app session (getAccessToken refreshes when needed), so
 // the signed-in administrator sees the data without visiting /admin. Non-admin
 // sessions get a clear "restricted" message — the RPC gate is the authority.
-import { useCallback, useEffect, useState } from 'react';
+//
+// v6.9.129: filters/sort/page/per persist to localStorage (bo.bizDb.v1) so a
+// visit picks up exactly where the last one left off, and the header shows
+// when the sheet was last synced (stats.last_sync from rpc_biz_db_stats).
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { getAccessToken } from './auth';
 import { APP_VERSION } from './version';
 
@@ -120,23 +124,52 @@ const ago = (iso: string | null) => {
 };
 const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—');
 
+// ── remembered view state: filters + page survive reloads ────────────────
+// Same pattern as bo.aiAgent.v1 — one JSON blob read lazily by the useState
+// initializers below and written back by the persistence effect.
+const LS_KEY = 'bo.bizDb.v1';
+interface BizDbSaved {
+  q?: string; qApplied?: string; country?: string; city?: string;
+  contact?: string; sort?: string; page?: number; per?: number;
+}
+const loadSaved = (): BizDbSaved => {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (raw) return JSON.parse(raw) as BizDbSaved;
+  } catch { /* first visit or storage blocked */ }
+  return {};
+};
+
 export default function BusinessDatabase({ onBack }: { onBack: () => void }) {
   const [stats, setStats] = useState<BizDbStats | null>(null);
   const [rows, setRows] = useState<BizDbRow[] | null>(null);
   const [countries, setCountries] = useState<OptRow[]>([]);
   const [cities, setCities] = useState<OptRow[]>([]);
-  const [q, setQ] = useState('');
-  const [qApplied, setQApplied] = useState('');
-  const [country, setCountry] = useState('');
-  const [city, setCity] = useState('');
-  const [contact, setContact] = useState('any');
-  const [sort, setSort] = useState('newest');
-  const [page, setPage] = useState(1);
-  const [per, setPer] = useState(100);
+  const [q, setQ] = useState(() => loadSaved().q ?? '');
+  const [qApplied, setQApplied] = useState(() => loadSaved().qApplied ?? '');
+  const [country, setCountry] = useState(() => loadSaved().country ?? '');
+  const [city, setCity] = useState(() => loadSaved().city ?? '');
+  const [contact, setContact] = useState(() => loadSaved().contact ?? 'any');
+  const [sort, setSort] = useState(() => loadSaved().sort ?? 'newest');
+  const [page, setPage] = useState(() => {
+    const p = Number(loadSaved().page);
+    return Number.isFinite(p) && p >= 1 ? Math.floor(p) : 1;
+  });
+  const [per, setPer] = useState(() => {
+    const n = Number(loadSaved().per);
+    return Number.isFinite(n) && n > 0 ? n : 100;
+  });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
   const [restricted, setRestricted] = useState(false);
+
+  // Remember filters + page across visits (v6.9.129).
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify({ q, qApplied, country, city, contact, sort, page, per }));
+    } catch { /* storage unavailable */ }
+  }, [q, qApplied, country, city, contact, sort, page, per]);
 
   // getAccessToken() reads the stored session and auto-refreshes it when the
   // access token has expired (v6.9.127 taught us why this matters).
@@ -153,12 +186,21 @@ export default function BusinessDatabase({ onBack }: { onBack: () => void }) {
   const loadRows = useCallback(async (tk: string, opts?: { page?: number }) => {
     setBusy(true); setErr('');
     try {
-      const p = opts?.page ?? page;
-      const r = await rpc<BizDbRow[]>('rpc_biz_db_page', {
+      let p = opts?.page ?? page;
+      let list = (await rpc<BizDbRow[]>('rpc_biz_db_page', {
         p_page: p, p_per: per, p_sort: sort,
         p_q: qApplied, p_country: country, p_city: city, p_contact: contact,
-      }, tk);
-      setRows(r || []); setPage(p);
+      }, tk)) || [];
+      // A remembered page can be past the end after the sheet changes — fall
+      // back to page 1 instead of showing an empty table (v6.9.129).
+      if (list.length === 0 && p > 1) {
+        list = (await rpc<BizDbRow[]>('rpc_biz_db_page', {
+          p_page: 1, p_per: per, p_sort: sort,
+          p_q: qApplied, p_country: country, p_city: city, p_contact: contact,
+        }, tk)) || [];
+        p = 1;
+      }
+      setRows(list); setPage(p);
       setRestricted(false);
     } catch (e) {
       const m = String((e as Error).message || e);
@@ -177,27 +219,42 @@ export default function BusinessDatabase({ onBack }: { onBack: () => void }) {
         const m = String((e as Error).message || e);
         if (/permission|restricted|admin/i.test(m) && alive) setRestricted(true);
       }
-      if (alive) await loadRows(tk, { page: 1 });
+      // v6.9.129: first query restores the remembered page, not page 1.
+      if (alive) await loadRows(tk, { page });
     })();
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Re-query when filters/sort/page-size change (debounced search)
+  // Re-query when filters/sort/page-size change (debounced search). Skipped
+  // on mount: the initial load above already queries the remembered page, and
+  // this effect would otherwise clobber it straight back to page 1 (v6.9.129).
+  const filtersMounted = useRef(false);
   useEffect(() => {
+    if (!filtersMounted.current) { filtersMounted.current = true; return; }
     if (restricted) return;
     const id = setTimeout(async () => { const tk = await token(); if (tk) await loadRows(tk, { page: 1 }); }, 300);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sort, qApplied, country, city, contact, per]);
 
-  // Dependent city list when country changes
+  // Dependent city list when country changes. On mount we only hydrate the
+  // option list — the setCity('') reset applies to real country changes, or it
+  // would wipe the restored city immediately (v6.9.129).
+  const countryMounted = useRef(false);
   useEffect(() => {
     if (restricted) return;
     let alive = true;
     (async () => {
       const tk = await token(); if (!tk) return;
-      try { const cs = await rpc<OptRow[]>('rpc_biz_db_cities', { p_country: country }, tk); if (alive) { setCities(cs || []); setCity(''); } }
+      try {
+        const cs = await rpc<OptRow[]>('rpc_biz_db_cities', { p_country: country }, tk);
+        if (alive) {
+          setCities(cs || []);
+          if (countryMounted.current) setCity('');
+          countryMounted.current = true;
+        }
+      }
       catch { if (alive) setCities([]); }
     })();
     return () => { alive = false; };
@@ -260,12 +317,22 @@ export default function BusinessDatabase({ onBack }: { onBack: () => void }) {
             </div>
             <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Business Database</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v{APP_VERSION}</span></span>
           </div>
-          <button
-            onClick={onBack}
-            className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-border text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all"
-          >
-            ← Back
-          </button>
+          <div className="flex items-center gap-3">
+            {stats && (
+              <span
+                className="whitespace-nowrap text-[11px] text-muted-foreground"
+                title={stats.last_sync ? `Last sync: ${when(stats.last_sync)}` : 'No sync has run yet'}
+              >
+                ⟳ last synced <span className="font-medium text-foreground/80">{ago(stats.last_sync)}</span>
+              </span>
+            )}
+            <button
+              onClick={onBack}
+              className="rounded-lg px-3 py-1.5 text-xs font-semibold border border-border text-muted-foreground hover:text-foreground hover:border-primary/50 transition-all"
+            >
+              ← Back
+            </button>
+          </div>
         </div>
       </header>
 
