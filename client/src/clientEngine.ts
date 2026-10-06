@@ -9957,7 +9957,7 @@ function hoursNormalize(s: string): string {
   const t = s.replace(
     /\b(sunday|saturday|friday|thursday|wednesday|tuesday|monday|thurs|thur|tues|tue|wed|thu|sat|sun|mon|fri|mo|tu|we|th|fr|sa|su)\b/gi,
     m => { const i = hoursDayIdx(m.toLowerCase()); return i == null ? m : _HOURS_DAY_ORDER[i]; });
-  return t.replace(/\s+/g, ' ').trim();
+  return t.replace(/\s+/g, ' ').replace(/,\s+/g, ',').trim();
 }
 /** One JSON-LD entity → compact hours string ('' when it declares none). */
 function hoursFromJsonLd(entity: Record<string, unknown>): string {
@@ -9975,6 +9975,39 @@ function hoursFromJsonLd(entity: Record<string, unknown>): string {
     }
   }
   const out = segs.join('; ');
+  return out.length <= 140 ? out : '';
+}
+
+// v6.9.136: visible-text hours fallback. Probing the 60-target corpus showed
+// 0/12 sites declare structured openingHours — most small businesses render
+// "Mon-Fri 9:00-18:00" only as page copy. STRICT shape required: a day
+// name/range/list followed by an hour range whose sides are ≤24h, so phone
+// numbers (555-1234), dates (2026-06-11) and IDs can never qualify. The
+// scan runs on tag-stripped, script-stripped visible text only.
+function hoursFromVisibleText(html: string): string {
+  const visible = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&[a-z]+;/gi, ' ')
+    .replace(/\s+/g, ' ');
+  const DAY = '(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Thurs|Tue|Sat|Sun|Mon|Wed|Thu|Fri|Mo|Tu|We|Th|Fr|Sa|Su)';
+  const DAYS = `${DAY}(?:\\s*[-–—]\\s*${DAY})?(?:\\s*,\\s*${DAY}(?:\\s*[-–—]\\s*${DAY})?)*`;
+  const TIME = '(\\d{1,2}(?:[:.]\\d{2})?\\s*(?:[ap]\\.?m\\.?)?\\s*(?:[-–—]|\\bto\\b)\\s*\\d{1,2}(?:[:.]\\d{2})?\\s*(?:[ap]\\.?m\\.?)?)';
+  const m = visible.match(new RegExp(`\\b${DAYS}\\s*(?::|[-–—])?\\s*${TIME}`, 'i'));
+  if (!m) return '';
+  // Validate the time range: exactly two sides, hour ≤ 24, minutes ≤ 59,
+  // ≤ 8 raw digits total (a phone number can never pass this gate).
+  const sides = m[1].replace(/[^\d:.]/g, ' ').trim().split(/\s+/);
+  if (sides.length !== 2) return '';
+  const hm = (s: string) => {
+    const [h, mi] = s.split(':');
+    const hh = parseInt(h, 10), mm = mi != null ? parseInt(mi, 10) : 0;
+    return Number.isFinite(hh) && Number.isFinite(mm) && hh <= 24 && mm <= 59 ? hh : null;
+  };
+  if (m[1].replace(/\D/g, '').length > 8) return '';
+  if (hm(sides[0]) == null || hm(sides[1]) == null) return '';
+  const out = hoursNormalize(m[0]);
   return out.length <= 140 ? out : '';
 }
 
@@ -10442,6 +10475,11 @@ function extractFromHtmlModule(html: string, b: Business, baseUrl?: string): voi
         const h = hoursNormalize(mdH[1]);
         if (h) { b.hours = h; yieldBump('microdata'); }
       }
+    }
+    // Visible-text fallback (last resort): "Mon-Fri 9:00-18:00" in page copy
+    if (!b.hours) {
+      const ht = hoursFromVisibleText(html);
+      if (ht) { b.hours = ht; yieldBump('labeltext'); }
     }
   }
 

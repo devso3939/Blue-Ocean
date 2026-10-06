@@ -28,6 +28,7 @@ function run(name, html, expect, opts) {
   const b = Object.assign({
     name: (opts && opts.name) || 'X', email: '', phone: '', facebook: '', instagram: '',
     website: '', twitter: '', pinterest: '', rating: undefined, reviewCount: undefined,
+    hours: '', address: '',
   }, (opts && opts.b) || {});
   try { ex(html, b, opts && opts.baseUrl); }
   catch (e) { console.log(`FAIL ${name}: threw ${e.message}`); fail++; return; }
@@ -163,6 +164,30 @@ run('jsonld-address-postal',
 run('address-osm-wins',
   `<script type="application/ld+json">{"address":{"streetAddress":"Other St"}}</script>`,
   { address: 'OSM Street, Tbilisi' }, { b: { address: 'OSM Street, Tbilisi' } });
+
+// ── v6.9.136: visible-text hours fallback (0/12 probed targets declare
+// structured hours — page copy is where small businesses keep them) ───────
+run('hours-text-basic', `<body>Opening hours: Mon-Fri 9:00-18:00</body>`,
+  { hours: 'Mo-Fr 9:00-18:00' });
+
+run('hours-text-ampm', `<div>Sunday 11am-3pm</div>`, { hours: 'Su 11am-3pm' });
+
+run('hours-text-comma-days', `<div>Tue, Thu 10:00-14:00</div>`,
+  { hours: 'Tu,Th 10:00-14:00' });
+
+// guards: strings in scripts are not visible text, and phone/date shapes
+// next to a day token must never be mistaken for opening hours
+run('hours-text-script-only', `<script>var h = "Mon-Fri 9:00-18:00";</script>`,
+  { hours: '' });
+run('hours-text-phone-rejected', `<div>Mo: 555-1234</div>`, { hours: '' });
+run('hours-text-date-rejected', `<div>Mo 2026-06-11</div>`, { hours: '' });
+
+// structured data wins over page copy (first-source order; entity must be
+// a real schema.org node — collectJsonLdEntities only accepts @type)
+run('hours-text-jsonld-wins', [
+  '<script type="application/ld+json">{"@type":"Store","openingHours":"Mo-Su 10:00-22:00"}</script>',
+  '<body>Also open Mon-Fri 9:00-18:00</body>',
+].join(''), { hours: 'Mo-Su 10:00-22:00' });
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

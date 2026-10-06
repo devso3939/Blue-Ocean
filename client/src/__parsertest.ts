@@ -135,8 +135,11 @@ async function main() {
   console.log(`facebook signals: ${stats.fb}, instagram: ${stats.ig}`);
   console.log(`hours filled: ${stats.hours}, rating filled: ${stats.rating}`);
 
-  console.log('\n--- findings (first 30) ---');
-  console.log(details.slice(0, 30).join('\n'));
+  // v6.9.136: print ALL findings — bench_extract.cjs derives its per-site
+  // comparison from these lines, so the old slice(0,30) silently hid every
+  // site beyond the first 30 (making reachability noise look like a mystery).
+  console.log(`\n--- findings (${details.length}) ---`);
+  console.log(details.join('\n'));
 
   const successRate = stats.reachable ? stats.anyContact / stats.reachable : 0;
   console.log(`\ncontact-extraction success rate on reachable pages: ${Math.round(successRate * 100)}%`);
