@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/%E1%83%A5%E1%83%90%E1%83%9A%E1%83%97%E1%83%90%20%26%20%E1%83%9B%E1%83%90%E1%83%9B%E1%83%90%E1%83%99%E1%83%90%E1%83%AA%E1%83%97%E1%83%90%20%E1%83%A1%E1%83%90%E1%83%9A%E1%83%9D%E1%83%9C%E1%83%98%20%E1%83%94%E1%83%A5%E1%83%95%E1%83%97%E1%83%98%E1%83%9B%E1%83%94%20%E1%83%97%E1%83%90%E1%83%A7%E1%83%90%E1%83%98%E1%83%A8%E1%83%95%E1%83%98%E1%83%9A%E1%83%98%E1%83%A1%20%E1%83%A5%E1%83%A3%E1%83%A9%E1%83%90%2C%2059?hl=en",
+  "ts": "2026-10-06T19:45:42Z",
+  "camoufox_error": "official 156.0.1-beta.34, the browser this camoufox release pairs with, is not installed. Please run `camoufox fetch` to install.",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 334852,
+  "status": "done",
+  "finished_at": "2026-10-06T19:45:53Z"
+}
