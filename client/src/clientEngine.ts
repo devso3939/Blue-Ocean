@@ -6690,7 +6690,10 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   // This lane fetches each found profile page and mines it with the same
   // full extractor used for websites.
   const laneSocial = async () => {
-    const socialNeedies = allBizList.filter(b => (b.facebook || b.instagram) && (!b.email || !b.phone || !b.website));
+    // v6.9.145: tiktok/linkedin profiles count as socials too — their
+    // public pages carry the same contact card (bio phone/email/site link)
+    // and were previously never followed by any lane.
+    const socialNeedies = allBizList.filter(b => (b.facebook || b.instagram || b.tiktok || b.linkedin) && (!b.email || !b.phone || !b.website));
     if (socialNeedies.length === 0) return;
     _ep.activePass = 'Pass 5b: Social profile mining'; _ep.passNumber = 5; bumpPercent(95);
     const socEngine: EngineStatus = { name: 'Social Miner', icon: '👥', status: 'active', found: 0 };
@@ -6710,6 +6713,8 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         if (b.instagram) {
           urls.push(b.instagram + '/');
         }
+        if (b.tiktok) urls.push(b.tiktok.replace(/\/+$/, '') + '/');
+        if (b.linkedin) urls.push(b.linkedin.replace(/\/+$/, '') + '/');
         for (const u of urls) {
           if (b.email && b.phone) break;
           try {
@@ -6976,6 +6981,169 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
   onProgress?.(96, 'Wave A done — Yandex + deep-crawl lanes…');
   await waveWithDeadline(waveB.map(fn => fn().catch(() => {})));
   if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
+
+  // ── v6.9.145: CONTACT SWARM — specialist agents fan out over the two
+  // internet sources the earlier passes only skimmed, in parallel:
+  //   🧾 LISTING AGENT — map/directory listings (Tripadvisor, Yelp,
+  //      Foursquare, restaurantguru, ambebi.ge, nicelocal, 2GIS pages, …).
+  //      Search results have always been SNIPPET-mined, but the listing
+  //      pages themselves were never opened — they publish phone, email,
+  //      socials AND the official-site link.
+  //   📡 SOCIAL SCOUT — businesses with NO social profile get a dedicated
+  //      fb/ig/tiktok/linkedin search, then the found profiles are OPENED
+  //      and mined for bio emails/phones/site links.
+  // Both reuse the strict shared extractors. A third-party page's own
+  // canonical/host can never become b.website (isLikelyBusinessWebsite
+  // guard reverts it), but the official site linked FROM the listing can.
+  // Own wall-clock budget: the swarm always runs even when waves A/B
+  // spent theirs.
+  {
+    const SWARM_BUDGET_MS = CATEGORY_MODE ? 240_000 : 100_000;
+    const swarmDeadline = Date.now() + SWARM_BUDGET_MS;
+    const swarmStop = () => isCancelled() || Date.now() >= swarmDeadline;
+    const swarmFieldCount = (x: Business) =>
+      (x.phone ? 1 : 0) + (x.email ? 1 : 0) + (x.website ? 1 : 0) +
+      (x.facebook ? 1 : 0) + (x.instagram ? 1 : 0) + (x.tiktok ? 1 : 0) + (x.linkedin ? 1 : 0);
+    // Fetchable listing/map-directory hosts — search engines and social
+    // platforms deliberately excluded (socials belong to the scout agent).
+    const LISTING_HOSTS = new RegExp(
+      REVIEW_DIRECTORY.source +
+      '|foursquare\\.com|yellowpages\\.com|justdial\\.com|2gis\\.com|bbb\\.org|trustpilot\\.com|clutch\\.co|goodfirms\\.co|sortlist\\.', 'i');
+
+    const listingCohort = allBizList.filter(b => b.name && (!b.phone || !b.email)).slice(0, CATEGORY_MODE ? 120 : 50);
+    const scoutCohort = allBizList.filter(b => b.name && !b.facebook && !b.instagram && !b.tiktok && !b.linkedin && (!b.phone || !b.email)).slice(0, CATEGORY_MODE ? 120 : 50);
+    if (listingCohort.length > 0 || scoutCohort.length > 0) {
+      const listEngine: EngineStatus = { name: 'Map Listings', icon: '🧾', status: 'active', found: 0 };
+      const scoutEngine: EngineStatus = { name: 'Social Scout', icon: '📡', status: 'active', found: 0 };
+      if (listingCohort.length > 0) _ep.engines.push(listEngine);
+      if (scoutCohort.length > 0) _ep.engines.push(scoutEngine);
+      _ep.activePass = 'Contact swarm: map listings + social platforms'; _ep.passNumber = 6; bumpPercent(96); emitEP();
+      onProgress?.(96, `Contact swarm: ${listingCohort.length} listing · ${scoutCohort.length} social targets…`);
+
+      // Session-level dedupe: two agents (and their parallel batches) never
+      // fetch the same URL twice.
+      const _swarmFetched = new Set<string>();
+      const swarmCity = () => getScanContext()?.cityEn || getScanContext()?.cityNative || '';
+      // Fetch a third-party page (listing or social profile) and mine it
+      // with the shared extractor. NO baseUrl: relative hrefs on a foreign
+      // page resolve to the foreign host, never to the business.
+      const mineForeignPage = async (b: Business, u: string, ua?: string): Promise<void> => {
+        try {
+          const key = u.split('#')[0];
+          if (_swarmFetched.has(key)) return;
+          _swarmFetched.add(key);
+          const rr = await corsFetch(u, {
+            headers: { 'User-Agent': ua || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36' },
+            signal: AbortSignal.timeout(5000),
+          });
+          if (!rr.ok) return;
+          const html = await rr.text();
+          if (html.length < 400 || isCfChallenge(html)) return;
+          const siteSnap = b.website;
+          extractFromHtml(html, b);
+          // The listing's own canonical/host is never the business website;
+          // an official-site link discovered ON the listing survives the
+          // same validator every other website passes through.
+          if (b.website && b.website !== siteSnap && !isLikelyBusinessWebsite(b.website, b.name)) b.website = siteSnap;
+        } catch { /* per-page failures never break the lane */ }
+      };
+
+      const laneSwarmListings = async () => {
+        for (let i = 0; i < listingCohort.length && !swarmStop(); i += _BATCH) {
+          const batch = listingCohort.slice(i, i + _BATCH);
+          const snap = new Map<Business, number>();
+          batch.forEach(x => snap.set(x, swarmFieldCount(x)));
+          await Promise.all(batch.map(async b => {
+            if (swarmStop()) return;
+            try {
+              const city = swarmCity();
+              const urls: string[] = [];
+              // Arm 1: the same "name"+city query website-discovery ran —
+              // served warm from the shared lane cache; directory results
+              // that pass the listing filter get opened below.
+              try {
+                const rs = await searchBing(encodeURIComponent(`"${b.name}" ${city}`.trim()));
+                for (const r of rs) if (r.url && LISTING_HOSTS.test(r.url)) urls.push(r.url);
+              } catch { /* engine down — arm 2 retries */ }
+              // Arm 2: directory-targeted query when the generic search
+              // surfaced no listings (keeps the agent productive in thin
+              // indexes where directories rank below the business site).
+              if (urls.length === 0 && !swarmStop()) {
+                try {
+                  const rs2 = await searchBing(encodeURIComponent(`"${b.name}" ${city} site:tripadvisor.com OR site:yelp.com OR site:foursquare.com OR site:restaurantguru.com`.trim()));
+                  for (const r of rs2) if (r.url && LISTING_HOSTS.test(r.url)) urls.push(r.url);
+                } catch { /* no listing hit — this business stays for later passes */ }
+              }
+              for (const u of urls.slice(0, 2)) {
+                if (swarmStop()) break;
+                await mineForeignPage(b, u);
+                if (b.phone && b.email) break;
+              }
+            } catch { /* per-business failures never break the batch */ }
+          }));
+          let gained = 0;
+          for (const x of batch) if (swarmFieldCount(x) > (snap.get(x) ?? 0)) { gained++; markEngine(x, 'Map Listings'); }
+          if (gained > 0) {
+            listEngine.found += gained;
+            onProgress?.(96, `Contact swarm: listings +${listEngine.found} · socials +${scoutEngine.found}`);
+          }
+          emitEP();
+          if (i + _BATCH < listingCohort.length && !swarmStop()) await wait(700);
+        }
+        listEngine.status = 'done'; emitEP();
+      };
+
+      const laneSwarmSocial = async () => {
+        for (let i = 0; i < scoutCohort.length && !swarmStop(); i += _BATCH) {
+          const batch = scoutCohort.slice(i, i + _BATCH);
+          const snap = new Map<Business, number>();
+          batch.forEach(x => snap.set(x, swarmFieldCount(x)));
+          await Promise.all(batch.map(async b => {
+            if (swarmStop()) return;
+            try {
+              const q = encodeURIComponent(`"${b.name}" ${swarmCity()} facebook instagram tiktok linkedin`.trim());
+              let rs: { title: string; url: string; snippet: string }[] = [];
+              try { rs = await searchBing(q); } catch { /* engine down */ }
+              for (const r of rs.slice(0, 6)) {
+                extractFromText(`${r.title || ''} ${r.snippet || ''}`, b); // snippets run the strict validators
+                if (!b.tiktok) {
+                  const m = (r.url || '').match(/tiktok\.com\/@([A-Za-z0-9._-]+)/i);
+                  if (m) b.tiktok = 'https://tiktok.com/@' + m[1];
+                }
+              }
+              // Follow up to 2 discovered profiles — the public bio/about
+              // pages are contact cards (email, phone, site, link hubs).
+              const profiles = ([b.facebook, b.instagram, b.tiktok, b.linkedin].filter(Boolean) as string[]).slice(0, 2);
+              for (const u of profiles) {
+                if (swarmStop()) break;
+                await mineForeignPage(b, u, /facebook\.com/i.test(u)
+                  ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
+                  : undefined);
+                if (b.phone && b.email && b.website) break;
+              }
+            } catch { /* per-business failures never break the batch */ }
+          }));
+          let gained = 0;
+          for (const x of batch) if (swarmFieldCount(x) > (snap.get(x) ?? 0)) { gained++; markEngine(x, 'Social Scout'); }
+          if (gained > 0) {
+            scoutEngine.found += gained;
+            onProgress?.(96, `Contact swarm: listings +${listEngine.found} · socials +${scoutEngine.found}`);
+          }
+          emitEP();
+          if (i + _BATCH < scoutCohort.length && !swarmStop()) await wait(700);
+        }
+        scoutEngine.status = 'done'; emitEP();
+      };
+
+      // Both agents fan out in parallel, hard-capped by the swarm budget.
+      await Promise.race([
+        Promise.all([laneSwarmListings().catch(() => {}), laneSwarmSocial().catch(() => {})]),
+        new Promise<void>(res => setTimeout(res, Math.max(1000, SWARM_BUDGET_MS))),
+      ]);
+      if (isCancelled()) { onProgress?.(100, 'Cancelled'); return results; }
+    }
+  }
+
   onProgress?.(97, Date.now() >= laneDeadline
     ? 'Lane budget reached — shipping contacts found so far…'
     : 'All enrichment lanes complete…');
