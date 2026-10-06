@@ -255,12 +255,12 @@ function CoverageDashboard({ onBack }: { onBack: () => void }) {
     <div className="min-h-screen bg-background">
       <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md">
         <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4">
-          <div className="flex items-center gap-2">
+          <button onClick={onBack} title="Blue Ocean — home" className="flex items-center gap-2 rounded-lg px-1 py-0.5 hover:opacity-80 transition-all">
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 via-teal-500 to-cyan-500 text-white">
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>
             </div>
             <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Global Coverage</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v{APP_VERSION}</span></span>
-          </div>
+          </button>
           <div className="flex items-center gap-3">
             <button
               onClick={exportCsv}
@@ -555,12 +555,12 @@ function HistoryView({ onBack, onRestore, heavy, onCleanup }: {
     <div className="min-h-screen bg-background">
       <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md">
         <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4">
-          <div className="flex items-center gap-2">
+          <button onClick={onBack} title="Blue Ocean — home" className="flex items-center gap-2 rounded-lg px-1 py-0.5 hover:opacity-80 transition-all">
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-amber-500 via-orange-500 to-rose-500 text-white">
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
             </div>
             <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· History</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v{APP_VERSION}</span></span>
-          </div>
+          </button>
           <div className="flex items-center gap-2">
             <input
               value={q}
@@ -1357,7 +1357,11 @@ export default function App() {
         }
       });
     });
-  }, [selectedCity, opportunities.length]);
+    // v6.9.144: viewMode is a dep — leaving for another page unmounts the map
+    // div, and returning mounts a FRESH div while the old instance still points
+    // at the detached container. Without this, the effect never re-ran on
+    // return and the map stayed permanently blank (header visible, canvas gone).
+  }, [selectedCity, opportunities.length, viewMode]);
 
   // Update map data whenever businesses change
   useEffect(() => {
@@ -2210,12 +2214,12 @@ export default function App() {
         )}
         <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md">
           <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4">
-            <div className="flex items-center gap-2">
+            <button onClick={() => setViewMode('analysis')} title="Blue Ocean — home" className="flex items-center gap-2 rounded-lg px-1 py-0.5 hover:opacity-80 transition-all">
               <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 text-white">
                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
               </div>
               <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Compare Cities</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v{APP_VERSION}</span></span>
-            </div>
+            </button>
             <div className="flex items-center gap-3">
               <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>
               <button
@@ -2295,12 +2299,12 @@ export default function App() {
       <div className="min-h-screen bg-background">
         <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md">
           <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4">
-            <div className="flex items-center gap-2">
+            <button onClick={() => setViewMode('analysis')} title="Blue Ocean — home" className="flex items-center gap-2 rounded-lg px-1 py-0.5 hover:opacity-80 transition-all">
               <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-500 text-white">
                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
               </div>
               <span className="text-sm font-bold">Blue Ocean <span className="text-muted-foreground font-normal">· Country Finder</span> <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary/60 font-mono">v{APP_VERSION}</span></span>
-            </div>
+            </button>
             <div className="flex items-center gap-3">
               <div className="text-xs text-muted-foreground hidden sm:block">OpenStreetMap · Nominatim · Wikipedia</div>
               <button
