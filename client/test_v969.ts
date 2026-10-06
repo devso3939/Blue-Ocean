@@ -1,6 +1,9 @@
 // v6.9.69 unit tests: CF-challenge detection + Wayback rescue plumbing
 // Run: bun run test_v969.ts (tsconfig resolves ./src/clientEngine)
-import { _EXTRACT_LAYER_META } from './src/clientEngine';
+import { _EXTRACT_LAYER_META } from './src/clientEngine.js';
+
+// node shim for bare test run (tsconfig excludes test file)
+declare const process: { exit: (code: number) => void };
 
 let pass = 0, fail = 0;
 function eq(name: string, got: unknown, want: unknown) {

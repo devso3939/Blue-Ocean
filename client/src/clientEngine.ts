@@ -9772,9 +9772,9 @@ function cleanWebsiteUrl(raw: string): string {
   try {
     const u = new URL(raw);
     u.hash = '';
-    for (const k of [...u.searchParams.keys()]) {
+    u.searchParams.forEach((_, k) => {
       if (/^utm_|^(fbclid|gclid|msclkid|ref|refsrc|source|igshid|yclid|si|_ga|_gl|mc_cid|mc_eid)$/i.test(k)) u.searchParams.delete(k);
-    }
+    });
     return u.toString();
   } catch { return raw; }
 }
