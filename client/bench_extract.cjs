@@ -125,7 +125,71 @@ function buildFromRef(ref) {
 }
 
 // ── run ────────────────────────────────────────────────────────────────────
-function runHarness(bundlePath, label) {
+// ── cache ────────────────────────────────────────────────────────────────
+// bench_results/<label>.json + <label>.log are the repeatable harvest. When a
+// result already exists, compare() (and re-runs) load it instead of re-fetching
+// the whole corpus — the harness is network-bound and stale results are fine
+// because the parser change is what varies between runs, not the corpus.
+function annotateLog(label, suffix) {
+  const log = path.join(RESULTS, `${label}.log`);
+  if (fs.existsSync(log)) {
+    const prev = fs.readFileSync(log, 'utf8');
+    if (!prev.includes('cache written') && !prev.includes(suffix)) {
+      fs.appendFileSync(log, `\n-- ${suffix} (${new Date().toISOString()}) --`);
+    }
+  }
+}
+
+function saveCached(result, label, reason) {
+  fs.writeFileSync(path.join(RESULTS, `${label}.json`), JSON.stringify(result, null, 2));
+  annotateLog(label, `cache written: ${reason || 'unknown'}`);
+}
+
+function isValidCache(result) {
+  if (!result || typeof result !== 'object') return false;
+  const s = result.stats;
+  return s && typeof s.tried === 'number' &&
+    s.tried === 60 && s.fetched > 0 && typeof s.emailHits === 'number' && typeof s.phoneHits === 'number';
+}
+
+// v6.9.142: partial/interrupted writes (killed mid-harness, fs crash,
+// interrupted download) leave a .json of the wrong shape — validate before
+// trusting any JSON read of the cache.
+function validateCache(result) {
+  return isValidCache(result);
+}
+
+function loadCached(label) {
+  const json = path.join(RESULTS, `${label}.json`);
+  const log = path.join(RESULTS, `${label}.log`);
+  if (fs.existsSync(json)) {
+    try {
+      const raw = fs.readFileSync(json, 'utf8');
+      const parsed = JSON.parse(raw);
+      // v6.9.142: a partial/interrupted write (killed mid-harness, fs crash,
+      // interrupted download) leaves a .json of the wrong shape. Refuse it and
+      // fall through to a fresh re-fetch so no downstream code ever trusts
+      // incomplete stats.
+      if (!isValidCache(parsed)) return null;
+      return { fromCache: true, data: parsed, dataPath: json, logPath: log };
+    } catch (e) {
+      console.error(`bench: cached ${label}.json unreadable: ${e.message}`);
+      return null;
+    }
+  }
+  return null;
+}
+
+function runHarness(bundlePath, label, { fresh = false, checkCache = true } = {}) {
+  // v6.9.142: reuse a saved run instead of re-fetching the corpus when the
+  // parser hasn't changed — network-bound, full re-fetch is the expensive part.
+  if (checkCache) {
+    const cached = loadCached(label);
+    if (cached && !fresh) {
+      console.log(`bench: ${label}: CACHE HIT (${cached.dataPath}) — results reused as-is`);
+      return cached.data;
+    }
+  }
   fs.mkdirSync(RESULTS, { recursive: true });
   console.log(`bench: running ${label} (${path.relative(CLIENT, bundlePath)}) …`);
   const t0 = Date.now();
@@ -200,7 +264,7 @@ function runHarness(bundlePath, label) {
     bundle: path.relative(CLIENT, bundlePath),
     stats: parsed.stats, sites: parsed.sites, missed: parsed.missed, errs: parsed.errs,
   };
-  fs.writeFileSync(path.join(RESULTS, `${label}.json`), JSON.stringify(result, null, 2));
+  saveCached(result, label, 'fresh harness run (with retry merge)');
   printStats(label, parsed.stats);
   console.log(`bench: ${label} ok in ${(ms / 1000).toFixed(0)}s → bench_results/${label}.json`);
   return result;
@@ -388,6 +452,7 @@ function compare(A, B, strict) {
 function argValue(flag) { const i = process.argv.indexOf(flag); return i >= 0 ? process.argv[i + 1] : null; }
 const strict = process.argv.includes('--strict');
 
+const fresh = process.argv.includes('--fresh');
 const [cmd, ...rest] = process.argv.slice(2);
 if (!cmd || cmd === 'help' || cmd === '--help') {
   console.log(fs.readFileSync(__filename, 'utf8').split('*/')[0].replace(/^\/\*|^ \* ?/gm, ''));
@@ -397,19 +462,22 @@ if (cmd === 'run') {
   const ref = argValue('--ref');
   const label = argValue('--label') || (ref ? ref.replace(/[^A-Za-z0-9_.-]/g, '_') : 'current');
   const bundle = ref ? buildFromRef(ref) : build(ENTRY, path.join(TMP, 'current.cjs'));
-  runHarness(bundle, label);
+  runHarness(bundle, label, { fresh });
 } else if (cmd === 'oldnew') {
   const ref = argValue('--ref');
   if (!ref) die('oldnew requires --ref <gitref> (the baseline to compare against)');
   const baseLabel = argValue('--label') || ref.replace(/[^A-Za-z0-9_.-]/g, '_');
-  const A = runHarness(buildFromRef(ref), baseLabel);
-  const B = runHarness(build(ENTRY, path.join(TMP, 'current.cjs')), 'current');
+  const A = runHarness(buildFromRef(ref), baseLabel, { fresh: !!fresh });
+  const B = runHarness(build(ENTRY, path.join(TMP, 'current.cjs')), 'current', { fresh: !!fresh });
   compare(A, B, strict);
 } else if (cmd === 'compare') {
   const [fa, fb] = rest.filter(a => !a.startsWith('--'));
   if (!fa || !fb) die('compare <a.json> <b.json>');
   const load = p => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { die(`cannot read ${p}: ${e.message}`); } };
-  compare(load(fa), load(fb), strict);
+  const A = load(fa);
+  const B = load(fb);
+  if (A === undefined || B === undefined) process.exit(2);
+  compare(A, B, strict);
 } else {
   die(`unknown command "${cmd}" — use run | oldnew | compare (see --help)`);
 }
