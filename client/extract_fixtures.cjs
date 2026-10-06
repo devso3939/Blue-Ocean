@@ -189,5 +189,21 @@ run('hours-text-jsonld-wins', [
   '<body>Also open Mon-Fri 9:00-18:00</body>',
 ].join(''), { hours: 'Mo-Su 10:00-22:00' });
 
+// v6.9.141: localized day names — the corpus is Georgia-heavy and sites
+// publish hours in ru/ka far more often than as structured data. JS \b is
+// ASCII-only, so these needed Unicode lookarounds (BEFORE: no match at all).
+run('hours-text-russian', `<div>пн-пт 10:00-19:00</div>`,
+  { hours: 'Mo-Fr 10:00-19:00' });
+
+run('hours-text-georgian', `<div>ორშ-პარ 09:00-18:00</div>`,
+  { hours: 'Mo-Fr 09:00-18:00' });
+
+run('hours-jsonld-russian',
+  `<script type="application/ld+json">{"@type":"Cafe","openingHoursSpecification":{"dayOfWeek":"Понедельник","opens":"09:00","closes":"18:00"}}</script>`,
+  { hours: 'Mo 09:00-18:00' });
+
+// same guards as Latin, now with Cyrillic shapes around a day token
+run('hours-text-russian-phone-guard', `<div>вт: 2300 44 55</div>`, { hours: '' });
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

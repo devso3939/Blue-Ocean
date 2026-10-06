@@ -31,6 +31,13 @@ interface Target {
 
 const targets: Target[] = require('../parsing_targets.json');
 
+// v6.9.141: BENCH_ONLY restricts this run to specific target indices — lets
+// bench_extract re-run just the pages a previous pass failed to fetch, so
+// reachability noise can be repaired instead of merely excused.
+const ONLY_IDX = process.env.BENCH_ONLY
+  ? new Set(process.env.BENCH_ONLY.split(',').map(s => parseInt(s, 10)).filter(n => !Number.isNaN(n)))
+  : null;
+
 function normEmail(e: string): string { return e.toLowerCase().replace(/\./g, ''); }
 function normPhone(p: string): string { return p.replace(/\D/g, '').slice(-7); }
 
@@ -53,7 +60,8 @@ const stats = {
 
 const details: string[] = [];
 
-async function processOne(t: Target) {
+async function processOne(t: Target, idx: number) {
+  if (ONLY_IDX && !ONLY_IDX.has(idx)) return;
   stats.tried++;
   // The engine's fetch chain: direct first, then CORS proxies.
   let html = '';
@@ -119,7 +127,7 @@ async function main() {
     while (idx < targets.length) {
       const i = idx++;
       try {
-        await processOne(targets[i]);
+        await processOne(targets[i], i);
       } catch (e) {
         details.push(`ERR  ${targets[i].name}: ${(e as Error).message}`);
       }

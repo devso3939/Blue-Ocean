@@ -9907,6 +9907,23 @@ const _HOURS_DAY_ALIASES: Record<string, number> = {
   fr: 4, friday: 4, fri: 4,
   sa: 5, saturday: 5, sat: 5,
   su: 6, sunday: 6, sun: 6,
+  // v6.9.141: Russian — the corpus is Georgia-heavy; sites publish hours in
+  // ru far more often than in structured data.
+  пн: 0, понедельник: 0,
+  вт: 1, вторник: 1,
+  ср: 2, среда: 2,
+  чт: 3, четверг: 3,
+  пт: 4, пятница: 4,
+  сб: 5, суббота: 5,
+  вс: 6, воскресенье: 6,
+  // v6.9.141: Georgian (Mkhedruli — caseless, aliases stored lowercase).
+  ორშ: 0, ორშაბათი: 0,
+  სამ: 1, სამშაბათი: 1,
+  ოთხ: 2, ოთხშაბათი: 2,
+  ხუთ: 3, ხუთშაბათი: 3,
+  პარ: 4, პარასკევი: 4,
+  შაბ: 5, შაბათი: 5,
+  კვი: 6, კვირა: 6,
 };
 function hoursDayIdx(tok: string): number | null {
   return Object.prototype.hasOwnProperty.call(_HOURS_DAY_ALIASES, tok) ? _HOURS_DAY_ALIASES[tok] : null;
@@ -9952,11 +9969,17 @@ function hoursFromSpec(entry: Record<string, unknown>): string {
   if (opens) return `${label} ${opens}`;
   return label;
 }
-/** Normalize a free-form hours string ("Monday-Friday 9am-5pm" → "Mo-Fr …"). */
+/** Normalize a free-form hours string ("Monday-Friday 9am-5pm" → "Mo-Fr …").
+ *  v6.9.141: Russian/Georgian day tokens too — JS \\b is ASCII-only, so those
+ *  get their own pass with Unicode letter boundaries. */
 function hoursNormalize(s: string): string {
-  const t = s.replace(
+  const mapDay = (m: string) => { const i = hoursDayIdx(m.toLowerCase()); return i == null ? m : _HOURS_DAY_ORDER[i]; };
+  let t = s.replace(
+    /(?<![\p{L}\p{N}])(понедельник|вторник|среда|четверг|пятница|суббота|воскресенье|пн|вт|ср|чт|пт|сб|вс|ორშაბათი|სამშაბათი|ოთხშაბათი|ხუთშაბათი|პარასკევი|შაბათი|კვირა|ორშ|სამ|ოთხ|ხუთ|პარ|შაბ|კვი)(?![\p{L}\p{N}])/giu,
+    mapDay);
+  t = t.replace(
     /\b(sunday|saturday|friday|thursday|wednesday|tuesday|monday|thurs|thur|tues|tue|wed|thu|sat|sun|mon|fri|mo|tu|we|th|fr|sa|su)\b/gi,
-    m => { const i = hoursDayIdx(m.toLowerCase()); return i == null ? m : _HOURS_DAY_ORDER[i]; });
+    mapDay);
   return t.replace(/\s+/g, ' ').replace(/,\s+/g, ',').trim();
 }
 /** One JSON-LD entity → compact hours string ('' when it declares none). */
@@ -9991,10 +10014,14 @@ function hoursFromVisibleText(html: string): string {
     .replace(/<[^>]+>/g, ' ')
     .replace(/&[a-z]+;/gi, ' ')
     .replace(/\s+/g, ' ');
-  const DAY = '(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Thurs|Tue|Sat|Sun|Mon|Wed|Thu|Fri|Mo|Tu|We|Th|Fr|Sa|Su)';
+  const DAY = '(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Thurs|Tue|Sat|Sun|Mon|Wed|Thu|Fri|Mo|Tu|We|Th|Fr|Sa|Su|' +
+    'понедельник|вторник|среда|четверг|пятница|суббота|воскресенье|пн|вт|ср|чт|пт|сб|вс|' +
+    'ორშაბათი|სამშაბათი|ოთხშაბათი|ხუთშაბათი|პარასკევი|შაბათი|კვირა|ორშ|სამ|ოთხ|ხუთ|პარ|შაბ|კვი)';
   const DAYS = `${DAY}(?:\\s*[-–—]\\s*${DAY})?(?:\\s*,\\s*${DAY}(?:\\s*[-–—]\\s*${DAY})?)*`;
   const TIME = '(\\d{1,2}(?:[:.]\\d{2})?\\s*(?:[ap]\\.?m\\.?)?\\s*(?:[-–—]|\\bto\\b)\\s*\\d{1,2}(?:[:.]\\d{2})?\\s*(?:[ap]\\.?m\\.?)?)';
-  const m = visible.match(new RegExp(`\\b${DAYS}\\s*(?::|[-–—])?\\s*${TIME}`, 'i'));
+  // v6.9.141: Unicode lookbehind instead of \\b (ASCII-only — Cyrillic and
+  // Georgian day tokens never matched at a \\b boundary).
+  const m = visible.match(new RegExp(`(?<![\\p{L}\\p{N}])${DAYS}\\s*(?::|[-–—])?\\s*${TIME}`, 'iu'));
   if (!m) return '';
   // Validate the time range: exactly two sides, hour ≤ 24, minutes ≤ 59,
   // ≤ 8 raw digits total (a phone number can never pass this gate).

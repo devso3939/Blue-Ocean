@@ -23,8 +23,9 @@
  * Outputs: bench_results/<label>.json + <label>.log (raw harness output).
  * Build scratch lives in _bench/ (both gitignored).
  *
- * Notes: the harness needs network; reachability varies run-to-run, so the
- * compare step warns when the two runs fetched different page counts. The
+ * Notes: the harness needs network; reachability varies run-to-run, so run/oldnew
+ * auto-retry unfetched pages once (BENCH_ONLY filter, log in <label>-retry.log)
+ * and compare excuses any GT hits still lost to unfetched pages. The
  * per-site detail blocks only list sites that yielded a contact (plus ERR
  * lines), so "only in A/B" sets can be reachability noise.
  */
@@ -53,8 +54,13 @@ const KNOWN_TRADEOFFS = [
           'GT mobile +995596560033 is no longer matched (accepted in v6.9.130)' },
 ];
 
-function sh(cmd, args) {
-  const r = spawnSync(cmd, args, { cwd: CLIENT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+function sh(cmd, args, opts = {}) {
+  // v6.9.141: opts (timeout, env) were previously DROPPED here — the retry's
+  // BENCH_ONLY filter never reached the harness and RUN_TIMEOUT never applied.
+  const r = spawnSync(cmd, args, {
+    cwd: CLIENT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+    timeout: opts.timeout, env: opts.env,
+  });
   if (r.error) die(`${cmd} failed: ${r.error.message}`);
   return r;
 }
@@ -133,8 +139,62 @@ function runHarness(bundlePath, label) {
     console.error(out.split('\n').slice(-15).join('\n'));
     die(`${label}: harness exited ${r.status} (see ${logPath})`);
   }
-  const parsed = parseHarness(out);
+  let parsed = parseHarness(out);
   if (!parsed) die(`${label}: could not parse harness output (see ${logPath})`);
+
+  // v6.9.141: auto-retry unfetched targets ONCE. Fetch failures are the
+  // dominant run-to-run noise (the same code fetched 34–38 of 60 pages across
+  // runs); a second pass over only the missed pages (BENCH_ONLY index filter)
+  // turns most noise into data. Counts are additive: the retry's targets are
+  // disjoint from the first pass's fetched set.
+  const missedNames = Object.keys(parsed.missed || {});
+  if (missedNames.length) {
+    let tgts = [];
+    try { tgts = JSON.parse(fs.readFileSync(path.join(CLIENT, 'parsing_targets.json'), 'utf8')); } catch {}
+    const idxs = [];
+    for (const n of missedNames) {
+      const i = tgts.findIndex(t => t.name === n);
+      if (i >= 0 && !idxs.includes(i)) idxs.push(i);
+    }
+    if (idxs.length) {
+      console.log(`bench: ${label}: retrying ${idxs.length} unfetched page(s)…`);
+      const r2 = node([bundlePath], { timeout: RUN_TIMEOUT_MS, env: { ...process.env, SMOKE_ONLY: '', BENCH_ONLY: idxs.join(',') } });
+      const out2 = (r2.stdout || '') + (r2.stderr || '');
+      fs.writeFileSync(path.join(RESULTS, `${label}-retry.log`), out2);
+      if (r2.status === 0 && !r2.signal) {
+        const p2 = parseHarness(out2);
+        // Capability guard: a harness built from a ref that predates
+        // BENCH_ONLY ignores the filter and re-runs all 60 targets — merging
+        // that would double-count every stat. Discard it instead.
+        if (p2 && p2.stats.tried !== idxs.length) {
+          console.log(`bench: ${label}: retry harness ran ${p2.stats.tried} targets (expected ${idxs.length}) — BENCH_ONLY unsupported by this ref, retry discarded`);
+        } else if (p2) {
+          const s = { ...parsed.stats };
+          for (const k of ['fetched', 'anyContact', 'emailHits', 'emailNew', 'phoneHits', 'phoneNew',
+            'facebook', 'instagram', 'hoursFilled', 'ratingFilled']) {
+            if (s[k] != null && p2.stats[k] != null) s[k] += p2.stats[k];
+          }
+          if (s.tried) s.fetchedPct = Math.round(s.fetched / s.tried * 100);
+          if (s.fetched) s.rate = Math.round(s.anyContact / s.fetched * 100);
+          // still-missed = retried-but-failed again, plus missed names whose
+          // index wasn't retried (duplicate-name targets collapse by name).
+          const retriedNames = new Set(idxs.map(i => tgts[i] && tgts[i].name));
+          const stillMissed = {};
+          for (const n of missedNames) if (!retriedNames.has(n)) stillMissed[n] = true;
+          for (const n of Object.keys(p2.missed || {})) stillMissed[n] = true;
+          const recovered = missedNames.length - Object.keys(stillMissed).length;
+          parsed = {
+            stats: s,
+            sites: { ...parsed.sites, ...p2.sites },
+            missed: stillMissed,
+            errs: [...(parsed.errs || []), ...(p2.errs || [])],
+          };
+          console.log(`bench: ${label}: retry recovered ${recovered}/${missedNames.length} page(s) (${Object.keys(stillMissed).length} still missed)`);
+        }
+      }
+    }
+  }
+
   const result = {
     label, when: new Date().toISOString(), ms,
     bundle: path.relative(CLIENT, bundlePath),
