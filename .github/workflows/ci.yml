@@ -84,9 +84,12 @@ jobs:
         # Diagnostic capture: job logs need admin rights to read, so on
         # failure the tail of esbuild's output is surfaced as an annotation.
         # Exit status is preserved verbatim — this never masks a failure.
+        # On Linux npm leaves the NATIVE esbuild binary at bin/esbuild, so it
+        # must be executed directly — `node bin/esbuild` parses ELF as JS and
+        # dies. (Windows keeps a JS wrapper there; that's the local convention.)
         run: |
           set +e
-          OUT=$(node node_modules/esbuild/bin/esbuild src/__parsertest.ts --bundle --platform=node --format=cjs --outfile=parsertest.cjs 2>&1)
+          OUT=$(./node_modules/esbuild/bin/esbuild src/__parsertest.ts --bundle --platform=node --format=cjs --outfile=parsertest.cjs 2>&1)
           EC=$?
           if [ "$EC" -ne 0 ]; then
             MSG=$(printf '%s' "$OUT" | tr '\n' ' ' | tail -c 1400)

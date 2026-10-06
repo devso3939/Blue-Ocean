@@ -59,9 +59,19 @@ function sh(cmd, args) {
 const node = (args, opts) => sh(process.execPath, args, opts);
 
 // ── build ──────────────────────────────────────────────────────────────────
+// On Linux/macOS npm's postinstall leaves the NATIVE esbuild binary at
+// node_modules/esbuild/bin/esbuild (ELF/Mach-O); on Windows it stays a JS
+// wrapper. Executing the native binary through `node` fails with a
+// SyntaxError (that's what broke the first CI gate), so detect the format.
+function esbuildRun(args) {
+  const head = fs.readFileSync(ESBUILD).subarray(0, 4);
+  const native = head[0] === 0x7f || (head[0] === 0xcf && head[1] === 0xfa) || (head[0] === 0xfe && head[1] === 0xed);
+  return native ? sh(ESBUILD, args) : node([ESBUILD, ...args]);
+}
+
 function build(entryPath, outPath) {
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
-  const r = node([ESBUILD, entryPath, '--bundle', '--platform=node', '--format=cjs', `--outfile=${outPath}`]);
+  const r = esbuildRun([entryPath, '--bundle', '--platform=node', '--format=cjs', `--outfile=${outPath}`]);
   if (r.status !== 0) { console.error(r.stderr || r.stdout); die(`esbuild failed for ${entryPath}`); }
   return outPath;
 }
