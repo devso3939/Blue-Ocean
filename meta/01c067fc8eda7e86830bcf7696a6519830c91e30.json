@@ -1,9 +1,10 @@
 {
   "url": "https://www.google.com/maps/search/%E1%83%A5%E1%83%9D%E1%83%A5%E1%83%9D%20Coco%2C%20Mtatsminda%20District?hl=en",
-  "ts": "2026-09-23T23:39:07Z",
-  "engine": "camoufox",
+  "ts": "2026-10-06T18:38:47Z",
+  "camoufox_error": "official 156.0.1-beta.34, the browser this camoufox release pairs with, is not installed. Please run `camoufox fetch` to install.",
+  "engine": "chromium",
   "challenged": false,
-  "bytes": 236271,
+  "bytes": 211905,
   "status": "done",
-  "finished_at": "2026-09-23T23:39:29Z"
+  "finished_at": "2026-10-06T18:38:52Z"
 }
