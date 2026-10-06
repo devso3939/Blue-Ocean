@@ -61,7 +61,10 @@ async function processOne(t: Target) {
     const resp = await xFetchPage(t.url); html = await resp.text();
   } catch { /* unreachable */ }
   if (html) stats.reachable++;
-  if (!html) return;
+  // v6.9.140: tell bench_extract WHICH pages never loaded, so a GT drop can
+  // be attributed to reachability (network) vs a fetched page that parsed
+  // worse (a real regression).
+  if (!html) { details.push(`NO-FETCH ${t.name}`); return; }
 
   const b = {
     name: t.name, website: t.url, phone: '', email: '',

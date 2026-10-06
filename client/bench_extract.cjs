@@ -16,7 +16,9 @@
  *   --label <name>   result label / filename stem (default: current | <ref>)
  *   --strict         exit 1 if email/phone ground-truth hits regress (B < A),
  *                    after crediting back KNOWN_TRADEOFFS (documented, accepted
- *                    GT losses) — only unexpected regressions fail
+ *                    GT losses) and GT hits lost to UNFETCHED pages (network
+ *                    reachability) — only regressions on pages that both runs
+ *                    actually fetched can fail the gate
  *
  * Outputs: bench_results/<label>.json + <label>.log (raw harness output).
  * Build scratch lives in _bench/ (both gitignored).
@@ -136,7 +138,7 @@ function runHarness(bundlePath, label) {
   const result = {
     label, when: new Date().toISOString(), ms,
     bundle: path.relative(CLIENT, bundlePath),
-    stats: parsed.stats, sites: parsed.sites, errs: parsed.errs,
+    stats: parsed.stats, sites: parsed.sites, missed: parsed.missed, errs: parsed.errs,
   };
   fs.writeFileSync(path.join(RESULTS, `${label}.json`), JSON.stringify(result, null, 2));
   printStats(label, parsed.stats);
@@ -178,19 +180,22 @@ function parseHarness(text) {
 
   const sites = {};
   const errs = [];
+  const missed = {}; // v6.9.140: targets whose fetch failed (NO-FETCH lines)
   let cur = null;
   for (const line of text.split('\n')) {
     const hd = line.match(/^✓ (.+) \((.+)\)$/);
     if (hd) { cur = sites[hd[1]] = { category: hd[2] }; continue; }
     const er = line.match(/^ERR\s+(.+?): (.*)$/);
     if (er) { errs.push({ site: er[1], error: er[2] }); cur = null; continue; }
+    const nf = line.match(/^NO-FETCH\s+(.+)$/);
+    if (nf) { missed[nf[1]] = true; cur = null; continue; }
     if (!cur || !/^ {4}\w+:\s/.test(line)) continue;
     const f = line.match(/^ {4}(email|phone|fb|ig):\s+(.*?)\s*\[([^\]]*)\]\s*$/);
     if (f) { cur[f[1]] = f[2]; cur[`${f[1]}Overlap`] = parseOverlap(f[3]); continue; }
     const plain = line.match(/^ {4}(fb|ig):\s+(\S+)\s*$/);
     if (plain) cur[plain[1]] = plain[2];
   }
-  return { stats: s, sites, errs };
+  return { stats: s, sites, missed, errs };
 }
 
 function printStats(label, s) {
@@ -229,12 +234,17 @@ function compare(A, B, strict) {
     console.log(`\n⚠ reachability differed (${A.stats.fetched} vs ${B.stats.fetched} pages) — per-site deltas below may be noise.`);
   }
 
+  const missedA = A.missed || {};
+  const missedB = B.missed || {};
   const names = [...new Set([...Object.keys(A.sites), ...Object.keys(B.sites)])].sort();
-  const lines = { gtLoss: [], gtGain: [], gained: [], lost: [], changed: [], onlyA: [], onlyB: [] };
+  const lines = { gtLoss: [], gtGain: [], gained: [], lost: [], changed: [], onlyA: [], onlyB: [], unfetchedA: [], unfetchedB: [] };
   for (const n of names) {
     const a = A.sites[n], b = B.sites[n];
-    if (!a) { lines.onlyB.push(n); continue; }
-    if (!b) { lines.onlyA.push(n); continue; }
+    // v6.9.140: a site absent because its page never loaded is reachability
+    // noise and is tracked separately from a page that loaded but yielded
+    // nothing (the latter IS a potential regression).
+    if (!a) { (missedA[n] ? lines.unfetchedA : lines.onlyB).push(n); continue; }
+    if (!b) { (missedB[n] ? lines.unfetchedB : lines.onlyA).push(n); continue; }
     for (const f of ['email', 'phone']) {
       const av = a[f], bv = b[f];
       const ao = a[`${f}Overlap`], bo = b[`${f}Overlap`];
@@ -262,11 +272,27 @@ function compare(A, B, strict) {
   emit('newly found (field was empty)', lines.gained);
   emit('no longer found', lines.lost);
   emit('value changed', lines.changed);
-  emit(`only in ${A.label} (reachability?)`, lines.onlyA);
-  emit(`only in ${B.label} (reachability?)`, lines.onlyB);
+  emit(`unfetched in ${B.label} (network — their hits are excused)`, lines.unfetchedB);
+  emit(`unfetched in ${A.label} (network)`, lines.unfetchedA);
+  emit(`only in ${A.label} (fetched in B but yielded nothing)`, lines.onlyA);
+  emit(`only in ${B.label} (fetched in A but yielded nothing)`, lines.onlyB);
 
   const emailDelta = B.stats.emailHits - A.stats.emailHits;
   const phoneDelta = B.stats.phoneHits - A.stats.phoneHits;
+
+  // Reachability credit: GT hits A scored on pages B never fetched cannot be
+  // a parser regression (the parser never saw them) — they are excused.
+  // Fetch failures are tracked per target via NO-FETCH lines, so a page that
+  // WAS fetched and then lost a GT hit still counts as a real regression.
+  const reach = { email: 0, phone: 0 };
+  for (const [n, s] of Object.entries(A.sites)) {
+    if (!missedB[n]) continue;
+    if ((s.emailOverlap ?? 0) > 0) reach.email++;
+    if ((s.phoneOverlap ?? 0) > 0) reach.phone++;
+  }
+  if (reach.email || reach.phone) {
+    console.log(`\nnote: ${Object.keys(missedB).length} pages were unfetched in ${B.label} — their GT hits are excused as reachability.`);
+  }
 
   // Credit back regressions that match a documented known tradeoff: the loss
   // must actually manifest in this comparison (per-site evidence), otherwise
@@ -281,15 +307,19 @@ function compare(A, B, strict) {
       console.log(`\nknown tradeoff (${t.field} ${t.site}) — not counted as a regression: ${t.note}`);
     }
   }
-  const emailEff = emailDelta + credit.email;
-  const phoneEff = phoneDelta + credit.phone;
-  const fmt = (d, c) => {
+  const emailEff = emailDelta + credit.email + reach.email;
+  const phoneEff = phoneDelta + credit.phone + reach.phone;
+  const fmt = (d, f) => {
     const s = d === 0 ? '=' : d > 0 ? `+${d}` : String(d);
-    return c ? `${s} (raw ${d}, tradeoff +${c} → ${d + c})` : s;
+    const parts = [];
+    if (credit[f]) parts.push(`tradeoff +${credit[f]}`);
+    if (reach[f]) parts.push(`reachability +${reach[f]}`);
+    const c = credit[f] + reach[f];
+    return parts.length ? `${s} (raw ${d}; ${parts.join('; ')} → ${d + c})` : s;
   };
-  console.log(`\nverdict: email GT ${fmt(emailDelta, credit.email)}, phone GT ${fmt(phoneDelta, credit.phone)}`);
+  console.log(`\nverdict: email GT ${fmt(emailDelta, 'email')}, phone GT ${fmt(phoneDelta, 'phone')}`);
   if (strict && (emailEff < 0 || phoneEff < 0)) {
-    console.error('STRICT: ground-truth hits regressed (beyond known tradeoffs)');
+    console.error('STRICT: ground-truth hits regressed (beyond known tradeoffs and unfetched pages)');
     process.exit(1);
   }
 }
