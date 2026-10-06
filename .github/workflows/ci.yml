@@ -79,12 +79,24 @@ jobs:
         working-directory: client
         run: npm run build
 
+      - name: Bundle parser-test harness
+        working-directory: client
+        run: node node_modules/esbuild/bin/esbuild src/__parsertest.ts --bundle --platform=node --format=cjs --outfile=parsertest.cjs
+
       - name: Extraction fixtures (offline parser gate)
         working-directory: client
         env:
           SMOKE_ONLY: "1"
-        run: |
-          node node_modules/esbuild/bin/esbuild src/__parsertest.ts --bundle --platform=node --format=cjs --outfile=parsertest.cjs
-          node extract_fixtures.cjs
-          node smoke_extract.cjs
-          node smoke_extract2.cjs
+        run: node extract_fixtures.cjs
+
+      - name: Extraction smoke — basic contacts
+        working-directory: client
+        env:
+          SMOKE_ONLY: "1"
+        run: node smoke_extract.cjs
+
+      - name: Extraction smoke — obfuscation patterns
+        working-directory: client
+        env:
+          SMOKE_ONLY: "1"
+        run: node smoke_extract2.cjs
