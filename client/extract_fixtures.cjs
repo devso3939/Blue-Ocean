@@ -119,5 +119,50 @@ run('website-utm-stripped', `<body><a href="https://cafeorient.ge/?utm_source=fa
 run('website-relative-with-base', `<body><a href="/reservation">Book</a><a href="https://partner.ge/">Partner</a></body>`,
   { website: 'https://cafe.ge/' }, { name: 'Cafe Orient', baseUrl: 'https://cafe.ge/' });
 
+// ── v6.9.135: business profile — hours / aggregate rating / address ──────
+// BEFORE this change the module never parsed openingHours at all (hours came
+// only from OSM tags), rating/reviewCount came from a loose HTML regex that
+// misses integer values and "1,234"-style counts, and JSON-LD addresses were
+// only read by the deep-crawl lane — never by the primary homepage scrape.
+run('hours-spec-compressed', [
+  '<script type="application/ld+json">{"@type":"Restaurant","openingHoursSpecification":[',
+  '{"dayOfWeek":["Monday","Tuesday","Wednesday","Thursday","Friday"],"opens":"09:00","closes":"18:00"},',
+  '{"dayOfWeek":"Saturday","opens":"10:00","closes":"14:00"}]}</script>',
+].join(''), { hours: 'Mo-Fr 09:00-18:00; Sa 10:00-14:00' });
+
+run('hours-spec-range-token',
+  `<script type="application/ld+json">{"@type":"Store","openingHoursSpecification":{"dayOfWeek":"Mo-Su","opens":"10:00","closes":"22:00"}}</script>`,
+  { hours: 'Mo-Su 10:00-22:00' });
+
+run('hours-openstring-fullnames',
+  `<script type="application/ld+json">{"@type":"Store","openingHours":"Monday-Friday 9am-5pm"}</script>`,
+  { hours: 'Mo-Fr 9am-5pm' });
+
+run('hours-microdata-meta',
+  `<meta itemprop="openingHours" content="Tu-Su 11:00-23:00">`,
+  { hours: 'Tu-Su 11:00-23:00' });
+
+run('hours-osm-wins',
+  `<script type="application/ld+json">{"openingHours":"Mo-Su 09:00-23:00"}</script>`,
+  { hours: 'Mo-Su 08:00-16:00' }, { b: { hours: 'Mo-Su 08:00-16:00' } });
+
+// structured aggregateRating beats the loose regex: "1,234" used to be
+// parsed as reviewCount=1, and ratingValue:5 (integer) used to be missed.
+run('jsonld-aggregate-rating',
+  `<script type="application/ld+json">{"@type":"Restaurant","aggregateRating":{"ratingValue":4.7,"reviewCount":"1,234"}}</script>`,
+  { rating: 4.7, reviewCount: 1234 });
+
+run('jsonld-aggregate-integer',
+  `<script type="application/ld+json">{"@type":"Cafe","aggregateRating":{"ratingValue":5,"ratingCount":87}}</script>`,
+  { rating: 5, reviewCount: 87 });
+
+run('jsonld-address-postal',
+  `<script type="application/ld+json">{"@type":"LocalBusiness","address":{"streetAddress":"12 Rustaveli Ave","addressLocality":"Tbilisi","postalCode":"0108"}}</script>`,
+  { address: '12 Rustaveli Ave, Tbilisi, 0108' });
+
+run('address-osm-wins',
+  `<script type="application/ld+json">{"address":{"streetAddress":"Other St"}}</script>`,
+  { address: 'OSM Street, Tbilisi' }, { b: { address: 'OSM Street, Tbilisi' } });
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -4536,7 +4536,7 @@ async function enrichFromGooglePlaces(businesses: Business[], onProgress?: (pct:
 // every call site at once.
 function extractFromHtml(html: string, b: Business, baseUrl?: string): boolean {
   const snap = (x: Business) =>
-    `${x.phone}|${x.email}|${x.website}|${x.facebook}|${x.instagram}|${x.twitter}|${x.pinterest}|${x.linkedin}|${x.youtube}|${x.tiktok}|${x.rating ?? ''}|${x.reviewCount ?? ''}`;
+    `${x.phone}|${x.email}|${x.website}|${x.facebook}|${x.instagram}|${x.twitter}|${x.pinterest}|${x.linkedin}|${x.youtube}|${x.tiktok}|${x.rating ?? ''}|${x.reviewCount ?? ''}|${x.hours ?? ''}|${x.address ?? ''}`;
   // Snapshot before so caller can know whether anything was extracted
   const before = snap(b);
   extractFromHtmlModule(html, b, baseUrl);
@@ -9892,6 +9892,92 @@ function preferEmail(current: string | undefined, candidate: string): string | u
   return cur;
 }
 
+// ── v6.9.135: business-profile structured data (opening hours) ────────────
+// Business.hours existed from day one and the UI renders it (🕐), but only
+// the OSM tag loader ever set it — a website's own JSON-LD/microdata was
+// never read. These helpers turn schema.org openingHours /
+// openingHoursSpecification into a compact display string:
+//   "Mo-Fr 09:00-18:00; Sa 10:00-14:00"
+const _HOURS_DAY_ORDER = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
+const _HOURS_DAY_ALIASES: Record<string, number> = {
+  mo: 0, monday: 0, mon: 0,
+  tu: 1, tuesday: 1, tue: 1, tues: 1,
+  we: 2, wednesday: 2, wed: 2,
+  th: 3, thursday: 3, thu: 3, thur: 3, thurs: 3,
+  fr: 4, friday: 4, fri: 4,
+  sa: 5, saturday: 5, sat: 5,
+  su: 6, sunday: 6, sun: 6,
+};
+function hoursDayIdx(tok: string): number | null {
+  return Object.prototype.hasOwnProperty.call(_HOURS_DAY_ALIASES, tok) ? _HOURS_DAY_ALIASES[tok] : null;
+}
+/** Compress weekday indexes: [0..4] → "Mo-Fr", [0,2] → "Mo,We". */
+function hoursDaysLabel(days: number[]): string {
+  const uniq = Array.from(new Set(days)).sort((a, b) => a - b);
+  if (!uniq.length) return '';
+  const parts: string[] = [];
+  let i = 0;
+  while (i < uniq.length) {
+    let j = i;
+    while (j + 1 < uniq.length && uniq[j + 1] === uniq[j] + 1) j++;
+    const a = _HOURS_DAY_ORDER[uniq[i]], z = _HOURS_DAY_ORDER[uniq[j]];
+    parts.push(j > i ? `${a}-${z}` : a);
+    i = j + 1;
+  }
+  return parts.join(',');
+}
+/** One openingHoursSpecification entry → "Mo-Fr 09:00-18:00" ('' if unusable). */
+function hoursFromSpec(entry: Record<string, unknown>): string {
+  const raw = entry.dayOfWeek;
+  const list = Array.isArray(raw) ? raw : raw != null ? [raw] : [];
+  const days: number[] = [];
+  for (const d of list) {
+    const s = String(d).trim();
+    const rng = s.match(/^([A-Za-z]+)\s*-\s*([A-Za-z]+)$/);
+    if (rng) {
+      const a = hoursDayIdx(rng[1].toLowerCase()), z = hoursDayIdx(rng[2].toLowerCase());
+      if (a == null || z == null || a > z) return '';
+      for (let k = a; k <= z; k++) days.push(k);
+    } else {
+      const idx = hoursDayIdx(s.toLowerCase());
+      if (idx == null) return '';
+      days.push(idx);
+    }
+  }
+  const label = hoursDaysLabel(days);
+  if (!label) return '';
+  const opens = typeof entry.opens === 'string' ? entry.opens.trim() : '';
+  const closes = typeof entry.closes === 'string' ? entry.closes.trim() : '';
+  if (opens && closes) return `${label} ${opens}-${closes}`;
+  if (opens) return `${label} ${opens}`;
+  return label;
+}
+/** Normalize a free-form hours string ("Monday-Friday 9am-5pm" → "Mo-Fr …"). */
+function hoursNormalize(s: string): string {
+  const t = s.replace(
+    /\b(sunday|saturday|friday|thursday|wednesday|tuesday|monday|thurs|thur|tues|tue|wed|thu|sat|sun|mon|fri|mo|tu|we|th|fr|sa|su)\b/gi,
+    m => { const i = hoursDayIdx(m.toLowerCase()); return i == null ? m : _HOURS_DAY_ORDER[i]; });
+  return t.replace(/\s+/g, ' ').trim();
+}
+/** One JSON-LD entity → compact hours string ('' when it declares none). */
+function hoursFromJsonLd(entity: Record<string, unknown>): string {
+  const segs: string[] = [];
+  const add = (seg: string) => { const s = seg.trim(); if (s && !segs.includes(s)) segs.push(s); };
+  const spec = entity.openingHoursSpecification;
+  for (const raw of Array.isArray(spec) ? spec : spec != null ? [spec] : []) {
+    if (raw && typeof raw === 'object') add(hoursFromSpec(raw as Record<string, unknown>));
+    else if (typeof raw === 'string') add(hoursNormalize(raw));
+  }
+  if (!segs.length) {
+    const oh = entity.openingHours;
+    for (const raw of Array.isArray(oh) ? oh : oh != null ? [oh] : []) {
+      if (typeof raw === 'string') add(hoursNormalize(raw));
+    }
+  }
+  const out = segs.join('; ');
+  return out.length <= 140 ? out : '';
+}
+
 function extractFromHtmlModule(html: string, b: Business, baseUrl?: string): void {
   const JUNK = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|duckduckgo|schema\.org|privacy.*policy|terms.*service|cookie/i;
   const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
@@ -10291,6 +10377,71 @@ function extractFromHtmlModule(html: string, b: Business, baseUrl?: string): voi
     const ttM = html.match(/tiktok\.com\/@([a-zA-Z0-9._-]+)/i);
     if (ttM && !ttM[0].includes('discover')) {
       b.tiktok = 'https://tiktok.com/@' + ttM[1].replace(/\/$/, '');
+    }
+  }
+
+  // ── v6.9.135: business profile from structured data ──────────────────
+  // Hours / aggregate rating / postal address: fields the UI already
+  // renders, previously set only by the OSM tag loader (or a loose rating
+  // regex below). One JSON-LD pass over the SAME entities the phone/email
+  // lanes already walk fills all three from the site's own declaration.
+  // Never overwrites: OSM/curated values win.
+  if (!b.hours || !b.rating || !b.address) {
+    for (const jl of html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)) {
+      try {
+        const entities: Record<string, unknown>[] = [];
+        collectJsonLdEntities(JSON.parse(jl[1]), entities);
+        for (const e of entities) {
+          if (!b.hours) {
+            const h = hoursFromJsonLd(e);
+            if (h) { b.hours = h; yieldBump('jsonld'); }
+          }
+          // aggregateRating: structured source beats the loose regex below
+          // (integer values, comma decimals "4,8", "1,234" review counts).
+          if (!b.rating) {
+            const ar = e.aggregateRating && typeof e.aggregateRating === 'object' && !Array.isArray(e.aggregateRating)
+              ? e.aggregateRating as Record<string, unknown> : null;
+            if (ar) {
+              const rv = Number(String(ar.ratingValue ?? '').replace(',', '.'));
+              if (rv >= 1 && rv <= 5) {
+                b.rating = rv;
+                yieldBump('jsonld');
+                if (!b.reviewCount) {
+                  const rc = parseInt(String(ar.reviewCount ?? ar.ratingCount ?? '').replace(/[^\d]/g, ''), 10);
+                  if (rc > 0 && rc < 100000) b.reviewCount = rc;
+                }
+              }
+            }
+          }
+          // Address: only a STRUCTURED PostalAddress (street or postal code
+          // present) — a bare string entity.address is too often boilerplate.
+          if (!b.address) {
+            const a = e.address;
+            if (a && typeof a === 'object' && !Array.isArray(a)) {
+              const ar = a as Record<string, unknown>;
+              const sv = (k: string) => typeof ar[k] === 'string' ? (ar[k] as string).trim() : '';
+              const parts = [sv('streetAddress'), sv('addressLocality'), sv('addressRegion'), sv('postalCode')]
+                .filter(Boolean).filter((p, i, arr) => arr.indexOf(p) === i);
+              const joined = parts.join(', ');
+              if (joined.length >= 6 && joined.length <= 140 && (ar.streetAddress || ar.postalCode)
+                && !/schema\.org|example\.(com|org)/i.test(joined)) {
+                b.address = joined;
+                yieldBump('jsonld');
+              }
+            }
+          }
+        }
+      } catch {}
+      if (b.hours && b.rating && b.address) break;
+    }
+    // Microdata fallback for hours: <meta itemprop="openingHours" content=…>
+    if (!b.hours) {
+      const mdH = html.match(/<meta[^>]*itemprop=["']openingHours["'][^>]*content=["']([^"']{3,80})["']/i)
+        || html.match(/itemprop=["']openingHours["'][^>]*>([^<]{3,80})</i);
+      if (mdH) {
+        const h = hoursNormalize(mdH[1]);
+        if (h) { b.hours = h; yieldBump('microdata'); }
+      }
     }
   }
 

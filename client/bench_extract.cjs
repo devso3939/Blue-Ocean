@@ -159,6 +159,9 @@ function parseHarness(text) {
   [s.phoneHits, s.phoneNew] = ph;
   const so = num(/facebook signals: (\d+), instagram: (\d+)/, text, 1, 2) || [];
   [s.facebook, s.instagram] = so;
+  // v6.9.135: profile fills (absent in older logs → left undefined)
+  const hr = num(/hours filled: (\d+), rating filled: (\d+)/, text, 1, 2) || [];
+  [s.hoursFilled, s.ratingFilled] = hr;
   [s.rate] = num(/success rate on reachable pages: (\d+)%/, text, 1) || [];
   s.passed = /DIRECT PARSING PASS/.test(text);
   if (s.tried == null || s.fetched == null) return null;
@@ -183,7 +186,9 @@ function parseHarness(text) {
 function printStats(label, s) {
   console.log(`bench: [${label}] fetched ${s.fetched}/${s.tried} (${s.fetchedPct}%), ` +
     `any-contact ${s.anyContact}, email GT ${s.emailHits}+${s.emailNew}new, ` +
-    `phone GT ${s.phoneHits}+${s.phoneNew}new, rate ${s.rate}% ${s.passed ? 'PASS' : 'FAIL'}`);
+    `phone GT ${s.phoneHits}+${s.phoneNew}new, rate ${s.rate}% ` +
+    (s.hoursFilled != null ? `hours ${s.hoursFilled}, rating ${s.ratingFilled} ` : '') +
+    `${s.passed ? 'PASS' : 'FAIL'}`);
 }
 
 // ── compare ────────────────────────────────────────────────────────────────
@@ -198,8 +203,9 @@ function compare(A, B, strict) {
     ['email GT hits', 'emailHits'], ['email new finds', 'emailNew'],
     ['phone GT hits', 'phoneHits'], ['phone new finds', 'phoneNew'],
     ['facebook / instagram', null], ['success rate %', 'rate'],
+    ['hours filled', 'hoursFilled'], ['rating filled', 'ratingFilled'],
   ];
-  const pad = (v, n) => String(v).padStart(n);
+  const pad = (v, n) => String(v == null ? '–' : v).padStart(n);
   console.log(`\n${'metric'.padEnd(22)}${pad(A.label, 12)}${pad(B.label, 12)}  Δ`);
   for (const [name, key] of rows) {
     let a, b;

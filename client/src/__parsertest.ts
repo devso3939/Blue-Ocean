@@ -48,6 +48,7 @@ const stats = {
   emailHits: 0, emailNew: 0, emailTruth: 0,
   phoneHits: 0, phoneNew: 0, phoneTruth: 0,
   fb: 0, ig: 0,
+  hours: 0, rating: 0,
 };
 
 const details: string[] = [];
@@ -75,6 +76,9 @@ async function processOne(t: Target) {
 
   const hasContact = !!(b.email || b.phone || b.facebook || b.instagram);
   if (hasContact) stats.anyContact++;
+  // v6.9.135: profile fills — hours/rating parsed from the page itself
+  if (b.hours) stats.hours++;
+  if (b.rating) stats.rating++;
 
   const eCov = overlap([b.email].filter(Boolean), t.known.emails, normEmail);
   const pCov = overlap([b.phone].filter(Boolean), t.known.phones, normPhone);
@@ -97,6 +101,8 @@ async function processOne(t: Target) {
   if (b.phone) parts.push(`    phone: ${b.phone}${pCov >= 0 ? ` [ground-truth overlap ${(pCov * 100).toFixed(0)}%]` : ' [new find]'}`);
   if (b.facebook) parts.push(`    fb:    ${b.facebook}`);
   if (b.instagram) parts.push(`    ig:    ${b.instagram}`);
+  if (b.hours) parts.push(`    hours: ${b.hours}`);
+  if (b.rating) parts.push(`    rating: ${b.rating}${b.reviewCount ? ` (${b.reviewCount} reviews)` : ''}`);
   if (hasContact) details.push(parts.join('\n'));
 }
 
@@ -127,6 +133,7 @@ async function main() {
   console.log(`emails: ${stats.emailHits} ground-truth hits + ${stats.emailNew} new finds (truth available for ${targets.length - noTruthEmail})`);
   console.log(`phones: ${stats.phoneHits} ground-truth hits + ${stats.phoneNew} new finds (truth available for ${targets.length - noTruthPhone})`);
   console.log(`facebook signals: ${stats.fb}, instagram: ${stats.ig}`);
+  console.log(`hours filled: ${stats.hours}, rating filled: ${stats.rating}`);
 
   console.log('\n--- findings (first 30) ---');
   console.log(details.slice(0, 30).join('\n'));
