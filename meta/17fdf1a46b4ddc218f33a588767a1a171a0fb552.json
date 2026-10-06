@@ -1,9 +1,10 @@
 {
   "url": "https://www.google.com/maps/search/Cafe%20Khachapuri%20Erekle%20II%20Street%2C%20Krtsanisi%20District?hl=en",
-  "ts": "2026-09-24T20:42:27Z",
-  "engine": "camoufox",
+  "ts": "2026-10-06T18:38:02Z",
+  "camoufox_error": "official 156.0.1-beta.34, the browser this camoufox release pairs with, is not installed. Please run `camoufox fetch` to install.",
+  "engine": "chromium",
   "challenged": false,
-  "bytes": 210682,
+  "bytes": 211233,
   "status": "done",
-  "finished_at": "2026-09-24T20:42:34Z"
+  "finished_at": "2026-10-06T18:38:10Z"
 }
