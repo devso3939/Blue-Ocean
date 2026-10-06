@@ -1,9 +1,10 @@
 {
   "url": "https://www.google.com/maps/search/Cafe%20Kanudosi%20Cafe%20Kanudosi%2C%20Sighnaghi?hl=en",
-  "ts": "2026-09-26T22:50:51Z",
-  "engine": "camoufox",
+  "ts": "2026-10-06T19:18:44Z",
+  "camoufox_error": "official 156.0.1-beta.34, the browser this camoufox release pairs with, is not installed. Please run `camoufox fetch` to install.",
+  "engine": "chromium",
   "challenged": false,
-  "bytes": 210723,
+  "bytes": 211969,
   "status": "done",
-  "finished_at": "2026-09-26T22:50:59Z"
+  "finished_at": "2026-10-06T19:18:51Z"
 }
