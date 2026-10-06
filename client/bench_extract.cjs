@@ -14,7 +14,9 @@
  *
  * Options:
  *   --label <name>   result label / filename stem (default: current | <ref>)
- *   --strict         exit 1 if email/phone ground-truth hits regress (B < A)
+ *   --strict         exit 1 if email/phone ground-truth hits regress (B < A),
+ *                    after crediting back KNOWN_TRADEOFFS (documented, accepted
+ *                    GT losses) — only unexpected regressions fail
  *
  * Outputs: bench_results/<label>.json + <label>.log (raw harness output).
  * Build scratch lives in _bench/ (both gitignored).
@@ -38,6 +40,16 @@ const ENTRY = path.join(SRC, '__parsertest.ts');
 const RUN_TIMEOUT_MS = 600_000; // per harness run
 
 function die(msg) { console.error(`bench: ${msg}`); process.exit(2); }
+
+// Documented, ACCEPTED ground-truth losses. When --strict runs, a regression
+// on exactly these site/field pairs is credited back into the delta, so only
+// unexpected regressions exit 1. Add an entry here whenever a parser change
+// deliberately trades a GT hit for a better answer (and say why).
+const KNOWN_TRADEOFFS = [
+  { field: 'phone', site: 'Sandali Metekhi',
+    note: 'site publishes its landline 0322560033 in tel:/structured data; ' +
+          'GT mobile +995596560033 is no longer matched (accepted in v6.9.130)' },
+];
 
 function sh(cmd, args) {
   const r = spawnSync(cmd, args, { cwd: CLIENT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
@@ -239,10 +251,29 @@ function compare(A, B, strict) {
 
   const emailDelta = B.stats.emailHits - A.stats.emailHits;
   const phoneDelta = B.stats.phoneHits - A.stats.phoneHits;
-  console.log(`\nverdict: email GT ${emailDelta === 0 ? '=' : emailDelta > 0 ? `+${emailDelta}` : emailDelta}, ` +
-    `phone GT ${phoneDelta === 0 ? '=' : phoneDelta > 0 ? `+${phoneDelta}` : phoneDelta}`);
-  if (strict && (emailDelta < 0 || phoneDelta < 0)) {
-    console.error('STRICT: ground-truth hits regressed');
+
+  // Credit back regressions that match a documented known tradeoff: the loss
+  // must actually manifest in this comparison (per-site evidence), otherwise
+  // the credit doesn't apply and a real regression still fails.
+  const credit = { email: 0, phone: 0 };
+  for (const t of KNOWN_TRADEOFFS) {
+    const prefix = `${t.field} ${t.site}:`;
+    const regressed = lines.gtLoss.some(l => l.startsWith(prefix)) ||
+      lines.lost.some(l => l.startsWith(prefix)) || lines.onlyA.includes(t.site);
+    if (regressed) {
+      credit[t.field]++;
+      console.log(`\nknown tradeoff (${t.field} ${t.site}) — not counted as a regression: ${t.note}`);
+    }
+  }
+  const emailEff = emailDelta + credit.email;
+  const phoneEff = phoneDelta + credit.phone;
+  const fmt = (d, c) => {
+    const s = d === 0 ? '=' : d > 0 ? `+${d}` : String(d);
+    return c ? `${s} (raw ${d}, tradeoff +${c} → ${d + c})` : s;
+  };
+  console.log(`\nverdict: email GT ${fmt(emailDelta, credit.email)}, phone GT ${fmt(phoneDelta, credit.phone)}`);
+  if (strict && (emailEff < 0 || phoneEff < 0)) {
+    console.error('STRICT: ground-truth hits regressed (beyond known tradeoffs)');
     process.exit(1);
   }
 }
