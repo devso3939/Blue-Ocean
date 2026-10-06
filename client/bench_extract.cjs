@@ -196,6 +196,11 @@ function runHarness(bundlePath, label, { fresh = false, checkCache = true } = {}
   const r = node([bundlePath], { timeout: RUN_TIMEOUT_MS, env: { ...process.env, SMOKE_ONLY: '' } });
   const out = (r.stdout || '') + (r.stderr || '');
   const logPath = path.join(RESULTS, `${label}.log`);
+  // v6.9.143: a failed/killed re-run must not destroy the previous run's log.
+  // The JSON survives (written only on success), so clobbering the log here
+  // would leave a valid cache with no matching output/provenance marker.
+  // Keep one generation as <label>-prev.log; the fresh write always follows.
+  if (fs.existsSync(logPath)) fs.renameSync(logPath, path.join(RESULTS, `${label}-prev.log`));
   fs.writeFileSync(logPath, out);
   const ms = Date.now() - t0;
   if (r.signal) die(`${label}: harness killed after ${RUN_TIMEOUT_MS / 1000}s (see ${logPath})`);
@@ -224,7 +229,9 @@ function runHarness(bundlePath, label, { fresh = false, checkCache = true } = {}
       console.log(`bench: ${label}: retrying ${idxs.length} unfetched page(s)…`);
       const r2 = node([bundlePath], { timeout: RUN_TIMEOUT_MS, env: { ...process.env, SMOKE_ONLY: '', BENCH_ONLY: idxs.join(',') } });
       const out2 = (r2.stdout || '') + (r2.stderr || '');
-      fs.writeFileSync(path.join(RESULTS, `${label}-retry.log`), out2);
+      const retryLog = path.join(RESULTS, `${label}-retry.log`);
+      if (fs.existsSync(retryLog)) fs.renameSync(retryLog, path.join(RESULTS, `${label}-retry-prev.log`));
+      fs.writeFileSync(retryLog, out2);
       if (r2.status === 0 && !r2.signal) {
         const p2 = parseHarness(out2);
         // Capability guard: a harness built from a ref that predates
