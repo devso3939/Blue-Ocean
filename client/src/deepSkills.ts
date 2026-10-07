@@ -1,5 +1,5 @@
 /**
- * Deep-parsing skills — v6.9.149
+ * Deep-parsing skills — v6.9.150
  *
  * Second-tier extraction primitives layered on the v6.9.147/148 skills,
  * each backed by a battle-tested repo:
@@ -13,6 +13,8 @@
  *   sweepSameAs        → schema.org sameAs lists (the engine's JSON-LD
  *                        walker only read facebook/instagram; this adds
  *                        tiktok/linkedin/youtube/twitter).
+ *   parseVcardBlob     → RFC-6350 vCard blocks (inline BEGIN:VCARD blobs
+ *                        and fetched .vcf files): TEL/EMAIL/URL/FN/ADR.
  *
  * All pure, browser-safe, unit-tested.
  */
@@ -42,11 +44,13 @@ function firstStr(v: unknown): string | undefined {
 /**
  * Parse the FIRST h-card (with v1 `vcard` class back-compat) from raw
  * HTML. Sites that publish microformats expose the whole contact card in
- * one node; the engine's regex layers never read them.
+ * one node; the engine's regex layers never read them. Falls back to a
+ * standalone h-adr when the page publishes an address microformat only.
  */
 export function readMicroformats(html: string, baseUrl: string): MicroContact | null {
   // Pre-gate: presence of an mf2 root class anywhere (quote-delimited in
   // attributes, so no \s boundary). The parse itself is the authority.
+  if (!html || !/(?:h-card|vcard|h-adr)/i.test(html.slice(0, 100000))) return null;
   let doc: ReturnType<typeof mf2> | null = null;
   try {
     doc = mf2(html, { baseUrl });
@@ -56,8 +60,7 @@ export function readMicroformats(html: string, baseUrl: string): MicroContact | 
   for (const item of doc.items || []) {
     if (!item.type?.some(t => t === 'h-card')) continue;
     const p = item.properties || {};
-    const emailRaw = firstStr(p.email) || "";
-
+    const emailRaw = firstStr(p.email) || '';
     const email = emailRaw.replace(/^mailto:/i, '').trim();
     const tel = firstStr(p.tel);
     const out: MicroContact = {
@@ -78,6 +81,21 @@ export function readMicroformats(html: string, baseUrl: string): MicroContact | 
     }
     if (Object.keys(out).length > 0) return out;
   }
+  // ── v6.9.150: standalone h-adr fallback — pages that publish ONLY an
+  // address microformat (many restaurant sites) still contribute their
+  // street/locality to the engine's address field.
+  for (const item of doc.items || []) {
+    if (!item.type?.some(t => t === 'h-adr')) continue;
+    const ap = item.properties || {};
+    const street = firstStr(ap['street-address']);
+    const locality = firstStr(ap.locality);
+    const country = firstStr(ap['country-name']);
+    const region = firstStr(ap.region);
+    if (street || locality) {
+      const joined = [street, locality, region, country].filter(Boolean).join(', ');
+      return { street: street || undefined, locality: locality || undefined };
+    }
+  }
   return null;
 }
 
@@ -97,16 +115,35 @@ export function ogContactGate(html: string): boolean {
   return /<meta[^>]+(?:property|name)\s*=\s*["'](og:email|og:telephone|og:phone_number|twitter:data1)["'][^>]*>/i.test(html);
 }
 
-/** vCard BEGIN/END blob → { tel, email } military-grade evidence lines */
-export function parseVcardBlob(raw: string): { tel?: string; email?: string } {
-  const out: { tel?: string; email?: string } = {};
+/** RFC-6350-ish vCard contact: TEL/EMAIL/URL/FN/ADR from a BEGIN/END blob. */
+export interface VCardContact { tel?: string; email?: string; url?: string; name?: string; street?: string; locality?: string }
+
+export function parseVcardBlob(raw: string): VCardContact {
+  const out: VCardContact = {};
   if (!raw || !/BEGIN:VCARD/i.test(raw)) return out;
+  // Unfold: RFC-6350 folds long lines with a leading space/tab on the next.
+  const lines: string[] = [];
   for (const line of raw.split(/\r?\n/)) {
+    if ((/^[\t ]/.test(line)) && lines.length) lines[lines.length - 1] += line.slice(1);
+    else lines.push(line);
+  }
+  for (const line of lines) {
     const t = line.match(/^TEL[^:]*:(.+)$/i);
     if (t && !out.tel) out.tel = t[1].trim();
     const e = line.match(/^EMAIL[^:]*:(.+)$/i);
     if (e && !out.email) out.email = e[1].trim().replace(/^mailto:/i, '');
-    if (out.tel && out.email) break;
+    const u = line.match(/^URL[^:]*:(.+)$/i);
+    if (u && !out.url) out.url = u[1].trim();
+    const fn = line.match(/^FN[^:]*:(.+)$/i);
+    if (fn && !out.name) out.name = fn[1].trim();
+    // ADR:;;street;locality;region;postal;country
+    const adr = line.match(/^ADR[^:]*:([^]*)$/i);
+    if (adr && !out.street && !out.locality) {
+      const parts = adr[1].split(';').map(s => s.trim());
+      if (parts[2]) out.street = parts[2];
+      if (parts[3]) out.locality = parts[3];
+    }
+    if (out.tel && out.email && out.url && out.name && out.street && out.locality) break;
   }
   return out;
 }
@@ -157,8 +194,8 @@ export async function domainMxProbe(host: string, timeoutMs = 3500): Promise<boo
   const h = (host || '').trim().replace(/^www\./, '').toLowerCase();
   if (!h) return false;
   for (const r of [
-    `https://dns.google/resolve?name=${encodeURIComponent(h)}&type=MX`,
-    `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(h)}&type=MX`,
+    'https://dns.google/resolve?name=' + encodeURIComponent(h) + '&type=MX',
+    'https://cloudflare-dns.com/dns-query?name=' + encodeURIComponent(h) + '&type=MX',
   ]) {
     try {
       const resp = await fetch(r, { headers: { accept: 'application/dns-json' }, signal: AbortSignal.timeout(timeoutMs) });

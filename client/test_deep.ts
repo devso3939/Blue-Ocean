@@ -1,7 +1,7 @@
 // v6.9.149 unit tests: deep skills — microformats h-card, OG-complete gate,
 // sameAs sweep, MX probe behavior
 // Run: npm test (tsx …)
-import { readMicroformats, ogContactGate, sweepSameAs } from './src/deepSkills.js';
+import { readMicroformats, ogContactGate, sweepSameAs, parseVcardBlob, sharedRegistrableDomain } from './src/deepSkills.js';
 
 // node shim for bare test run (tsconfig excludes test files)
 declare const process: { exit: (code: number) => void };
@@ -86,6 +86,51 @@ eq('og-only: no meta → gate closed', ogContactGate(wrap('<p>hello</p>')), fals
   // no sameAs key
   eq('sameAs: absent → {}', sweepSameAs(wrap('<script type="application/ld+json">{"@type":"Cafe"}</script>')), {});
 }
+
+
+// ── v6.9.150: parseVcardBlob — RFC-6350 fields the old regexes dropped ──
+
+{
+  const vcf = [
+    'BEGIN:VCARD',
+    'VERSION:3.0',
+    'FN:Cafe Orient',
+    'TEL;TYPE=WORK,VOICE:+995 322 19 66 69',
+    'EMAIL;TYPE=INTERNET:info@orient.ge',
+    'URL:https://orient.ge',
+    'ADR;TYPE=WORK:;;12 Rustaveli Ave;Tbilisi;;;Georgia',
+    'END:VCARD',
+  ].join('\r\n');
+  const vc = parseVcardBlob(vcf);
+  eq('vcard: tel', vc.tel, '+995 322 19 66 69');
+  eq('vcard: email', vc.email, 'info@orient.ge');
+  eq('vcard: url', vc.url, 'https://orient.ge');
+  eq('vcard: fn', vc.name, 'Cafe Orient');
+  eq('vcard: adr street', vc.street, '12 Rustaveli Ave');
+  eq('vcard: adr locality', vc.locality, 'Tbilisi');
+}
+{
+  // folded line (RFC-6350 continuation) must unfold before matching
+  const vcf = 'BEGIN:VCARD\r\nTEL:+995 322 19\r\n  66 69\r\nEND:VCARD';
+  eq('vcard: folded TEL unfolds', parseVcardBlob(vcf).tel, '+995 322 19 66 69');
+}
+eq('vcard: no blob → {}', parseVcardBlob('no card here'), {});
+
+// ── v6.9.150: readMicroformats — standalone h-adr fallback ──────────
+
+{
+  const html = wrap('<div class="h-adr"><span class="p-street-address">4 Abashidze St</span><span class="p-locality">Tbilisi</span></div>');
+  const mc = readMicroformats(html, 'https://cafe.ge/');
+  eq('h-adr fallback: street', mc?.street, '4 Abashidze St');
+  eq('h-adr fallback: locality', mc?.locality, 'Tbilisi');
+}
+eq('h-adr fallback: no adr → null', readMicroformats(wrap('<p>plain</p>'), 'https://x.ge/'), null);
+
+// ── v6.9.150: sharedRegistrableDomain — eTLD+1 agent gate ───────────
+
+eq('regdom: sub vs apex same', sharedRegistrableDomain('https://www.orient.ge/contact', 'mailto:info@orient.ge'.replace('mailto:', 'https://')), true);
+eq('regdom: different domains', sharedRegistrableDomain('https://orient.ge/', 'https://booking.com/x'), false);
+eq('regdom: co.uk eTLD+1', sharedRegistrableDomain('https://shop.acme.co.uk/', 'https://acme.co.uk/mail'), true);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

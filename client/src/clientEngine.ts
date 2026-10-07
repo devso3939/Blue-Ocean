@@ -16,7 +16,7 @@ import { parsePhoneNumberFromString, AsYouType } from 'libphonenumber-js';
 import { setScanContext, getScanContext, buildScanContext, categoryInNative, countryTld, contactTermsNative, type ScanContext } from './lang';
 // v6.9.147: contact-parsing skills (htmlparser2 / he / tldts / linkify-it)
 import { harvestAnchors, decodeContactEntities, sameRegDomain, findTextContacts, toE164, rankOfficialEmails, rankOfficialPhones } from './contactSkills';
-import { readMicroformats, ogContactGate, sweepSameAs, domainMxProbe } from './deepSkills';
+import { readMicroformats, ogContactGate, sweepSameAs, domainMxProbe, parseVcardBlob, sharedRegistrableDomain } from './deepSkills';
 import { APP_VERSION } from './version';
 import { currentUserId } from './auth'; // v6.9.110: user-scoped prefs/archive
 import { storedAccessToken } from './authFetch';
@@ -4523,15 +4523,13 @@ async function scrapeVCard(b: Business): Promise<void> {
         const vr = await corsFetch(fullUrl, { signal: AbortSignal.timeout(3000) });
         if (!vr.ok) continue;
         const vcf = await vr.text();
-        // Parse vCard format
-        if (!b.email) {
-          const emailM = vcf.match(/EMAIL[^:]*:([^\r\n]+)/i);
-          if (emailM) { b.email = emailM[1].trim(); yieldBump('vcard'); }
-        }
-        if (!b.phone) {
-          const telM = vcf.match(/TEL[^:]*:([^\r\n]+)/i);
-          if (telM) { b.phone = telM[1].trim(); yieldBump('vcard'); }
-        }
+        // v6.9.150: shared RFC-6350 parser (deepSkills) — also harvests
+        // URL/FN/ADR, which the old two-regex version threw away.
+        const vc = parseVcardBlob(vcf);
+        if (!b.email && vc.email && plausibleEmail(vc.email) && !_EMAIL_JUNK_RE.test(vc.email)) { b.email = vc.email; yieldBump('vcard'); }
+        if (!b.phone && vc.tel && plausiblePhone(vc.tel, false)) { b.phone = vc.tel.trim(); yieldBump('vcard'); }
+        if (!b.website && vc.url && isLikelyBusinessWebsite(vc.url, b.name)) { b.website = vc.url; yieldBump('vcard'); }
+        if (!b.address && (vc.street || vc.locality) && ((vc.street || '') + ' ' + (vc.locality || '')).trim().length >= 6) { b.address = [vc.street, vc.locality].filter(Boolean).join(', '); yieldBump('vcard'); }
       } catch {}
     }
   } catch {}
@@ -10234,6 +10232,9 @@ function extractFromHtmlModule(html: string, b: Business, baseUrl?: string): voi
       if (!b.facebook && /facebook/i.test(mc.url || '')) { b.facebook = mc.url!; yieldBump('microfmt'); }
       else if (!b.instagram && /instagram/i.test(mc.url || '')) { b.instagram = mc.url!; yieldBump('microfmt'); }
       if (!b.website && mc.url && isLikelyBusinessWebsite(mc.url, b.name)) { b.website = mc.url; yieldBump('microfmt'); }
+      // v6.9.150: published h-card/h-adr address — the author's own
+      // street/locality, stricter than any scraped prose address.
+      if (!b.address && (mc.street || mc.locality) && ((mc.street || '') + ' ' + (mc.locality || '')).trim().length >= 6) { b.address = [mc.street, mc.locality].filter(Boolean).join(', '); yieldBump('microfmt'); }
     }
   } catch { /* microformat layer is best-effort */ }
   // ── v6.9.149: OG-COMPLETE gate — contact exists ONLY in meta ──
@@ -10251,6 +10252,20 @@ function extractFromHtmlModule(html: string, b: Business, baseUrl?: string): voi
       if (!b.phone && ocP?.[1] && plausiblePhone(ocP[1], false)) { b.phone = ocP[1].trim(); yieldBump('ogonly'); }
     }
   } catch { /* OG-only gate is best-effort */ }
+  // ── v6.9.150: INLINE vCARD layer — BEGIN:VCARD blobs embedded in the
+  // page (contact widgets, QR payloads, <pre> exports). RFC-6350 fields
+  // are the publisher's own record: TEL/EMAIL/URL/FN/ADR in one blob.
+  try {
+    const decodedVhtml = decodeContactEntities(html);
+    const vBlob = decodedVhtml.match(/BEGIN:VCARD[\s\S]{0,4000}?END:VCARD/i);
+    if (vBlob) {
+      const vc = parseVcardBlob(vBlob[0]);
+      if (!b.phone && vc.tel && plausiblePhone(vc.tel, false)) { b.phone = vc.tel.trim(); yieldBump('vcard'); }
+      if (!b.email && vc.email && plausibleEmail(vc.email) && !_EMAIL_JUNK_RE.test(vc.email)) { b.email = vc.email; yieldBump('vcard'); }
+      if (!b.website && vc.url && isLikelyBusinessWebsite(vc.url, b.name)) { b.website = vc.url; yieldBump('vcard'); }
+      if (!b.address && (vc.street || vc.locality) && ((vc.street || '') + ' ' + (vc.locality || '')).trim().length >= 6) { b.address = [vc.street, vc.locality].filter(Boolean).join(', '); yieldBump('vcard'); }
+    }
+  } catch { /* inline vCard layer is best-effort */ }
   // v6.9.147b: PROMINENCE — footer-address preference with role-weighting.
   // Sites publish many addresses; the one inside a visible mailto (or "E:")
   // link inside the footer contact block is the public one. We collect ALL
@@ -11207,7 +11222,11 @@ function agentApplyContacts(
     b.phone = r.best || found.phone;
     stats.fieldsAdded.phone++; added++;
   }
-  if (found.email && !b.email && plausibleEmail(found.email) && !_EMAIL_JUNK_RE.test(found.email) && !_EMAIL_PLATFORM_RE.test(found.email.split('@')[1] || '')) {
+  // v6.9.150: provenance gate — an agent-proposed email on a different
+  // registrable domain than the business website is not the business's
+  // inbox (booking platforms, template hosts). Platform/free-mail hosts
+  // are already excluded by _EMAIL_PLATFORM_RE above.
+  if (found.email && !b.email && plausibleEmail(found.email) && !_EMAIL_JUNK_RE.test(found.email) && !_EMAIL_PLATFORM_RE.test(found.email.split('@')[1] || '') && (!b.website || sharedRegistrableDomain('https://' + (found.email.split('@')[1] || 'invalid.invalid'), b.website))) {
     const r = rankOfficialEmails([found.email], b.website || undefined);
     b.email = r.best || found.email;
     stats.fieldsAdded.email++; added++;
