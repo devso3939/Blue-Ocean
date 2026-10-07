@@ -16,6 +16,7 @@ import { parsePhoneNumberFromString, AsYouType } from 'libphonenumber-js';
 import { setScanContext, getScanContext, buildScanContext, categoryInNative, countryTld, contactTermsNative, type ScanContext } from './lang';
 // v6.9.147: contact-parsing skills (htmlparser2 / he / tldts / linkify-it)
 import { harvestAnchors, decodeContactEntities, sameRegDomain, findTextContacts, toE164, rankOfficialEmails, rankOfficialPhones } from './contactSkills';
+import { readMicroformats, ogContactGate, sweepSameAs, domainMxProbe } from './deepSkills';
 import { APP_VERSION } from './version';
 import { currentUserId } from './auth'; // v6.9.110: user-scoped prefs/archive
 import { storedAccessToken } from './authFetch';
@@ -241,6 +242,15 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
                       if (/instagram\.com/i.test(s) && !b.instagram) b.instagram = s;
                     }
                   }
+                }
+                // v6.9.149: full sameAs sweep — TikTok/LinkedIn/YouTube/X are
+                // equally official provenance in the same schema.org list.
+                if (entity.sameAs && (!b.tiktok || !b.linkedin || !b.youtube || !b.twitter)) {
+                  const sweep = sweepSameAs(JSON.stringify(entity));
+                  if (sweep.tiktok && !b.tiktok) { b.tiktok = sweep.tiktok; yieldBump('sameas'); }
+                  if (sweep.linkedin && !b.linkedin) { b.linkedin = sweep.linkedin; yieldBump('sameas'); }
+                  if (sweep.youtube && !b.youtube) { b.youtube = sweep.youtube; yieldBump('sameas'); }
+                  if (sweep.twitter && !b.twitter) { b.twitter = sweep.twitter; yieldBump('sameas'); }
                 }
                 if (entity.address && !b.address) {
                   const a = entity.address;
@@ -5332,25 +5342,9 @@ const _mxCache = new Map<string, boolean>();
 async function domainHasMx(host: string): Promise<boolean> {
   const key = host.replace(/^www\./, '').toLowerCase();
   if (_mxCache.has(key)) return _mxCache.get(key)!;
-  let ok = false;
-  const doh = [
-    `https://dns.google/resolve?name=${encodeURIComponent(key)}&type=MX`,
-    `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(key)}&type=MX`,
-    `https://dns.alidns.com/resolve?name=${encodeURIComponent(key)}&type=MX`,
-  ];
-  for (const u of doh) {
-    try {
-      const r = await fetch(u, {
-        headers: { 'accept': 'application/dns-json' },
-        signal: AbortSignal.timeout(3000),
-      });
-      if (!r.ok) continue;
-      const j = await r.json() as { Answer?: { type: number; data: string }[] };
-      if (j.Answer?.some(a => a.type === 15 && a.data)) { ok = true; break; }
-      if (j.Answer) break; // authoritative empty answer → no MX
-      // No Answer block: try next resolver
-    } catch {}
-  }
+  // v6.9.149: shared DoH probe from deepSkills (Google + Cloudflare
+  // resolvers, authoritative-empty semantics preserved).
+  const ok = await domainMxProbe(key, 3000);
   _mxCache.set(key, ok);
   return ok;
 }
@@ -9923,7 +9917,7 @@ __internals.ownSiteBase = ownSiteBase;
 // mailto vs Cloudflare etc. Module-level so both scrape sites (deep crawler
 // and this module extractor) feed the same tally. Purely additive telemetry:
 // no extraction behavior changes, reset at every scan start.
-export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'labeltext' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl' | 'wayback' | 'render' | 'rnav' | 'rsearch' | 'rbing' | 'rsocial' | 'rinfer' | 'rcms' | 'domainmatch' | 'prominence';
+export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'labeltext' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl' | 'wayback' | 'render' | 'rnav' | 'rsearch' | 'rbing' | 'rsocial' | 'rinfer' | 'rcms' | 'domainmatch' | 'prominence' | 'microfmt' | 'ogonly' | 'sameas';
 export interface ExtractionYieldEntry { found: number; tries: number; }
 export interface ExtractionYieldMap { [k: string]: ExtractionYieldEntry; }
 const _extractYield: ExtractionYieldMap = {};
@@ -9949,6 +9943,9 @@ export const _EXTRACT_LAYER_META: { key: ExtractionLayerKey; label: string; icon
   { key: 'entity',    label: '&#64;',           icon: '🔤' },
   { key: 'domainmatch', label: 'Own-domain',    icon: '🎯' },
   { key: 'prominence',  label: 'Prominence',    icon: '🏆' },
+  { key: 'microfmt',    label: 'Microformat',   icon: '🧩' },
+  { key: 'ogonly',      label: 'OG-complete',   icon: '🏷️' },
+  { key: 'sameas',      label: 'sameAs sweep',  icon: '🔁' },
   { key: 'obfusc',    label: '[at] forms',      icon: '🔑' },
   { key: 'jslit',     label: 'JS literals',     icon: '📜' },
   { key: 'dataattr',  label: 'data-email',      icon: '🔗' },
@@ -10224,6 +10221,36 @@ function hoursFromVisibleText(html: string): string {
 function extractFromHtmlModule(html: string, b: Business, baseUrl?: string): void {
   const JUNK = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|duckduckgo|schema\.org|privacy.*policy|terms.*service|cookie/i;
   const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
+  // ── v6.9.149: MICROFORMATS layer — h-card / v1 vcard ──────────
+  // Sites that publish microformats expose the ENTIRE contact card in
+  // one node (name/email/tel/url/adr) with the author's own markup —
+  // the strictest provenance there is. Runs FIRST because a published
+  // h-card beats every scrap-the-prose layer.
+  try {
+    const mc = readMicroformats(html, baseUrl || '' );
+    if (mc) {
+      if (!b.phone && mc.tel && plausiblePhone(mc.tel, false)) { b.phone = mc.tel.trim(); yieldBump('microfmt'); }
+      if (!b.email && mc.email && plausibleEmail(mc.email) && !_EMAIL_JUNK_RE.test(mc.email)) { b.email = mc.email; yieldBump('microfmt'); }
+      if (!b.facebook && /facebook/i.test(mc.url || '')) { b.facebook = mc.url!; yieldBump('microfmt'); }
+      else if (!b.instagram && /instagram/i.test(mc.url || '')) { b.instagram = mc.url!; yieldBump('microfmt'); }
+      if (!b.website && mc.url && isLikelyBusinessWebsite(mc.url, b.name)) { b.website = mc.url; yieldBump('microfmt'); }
+    }
+  } catch { /* microformat layer is best-effort */ }
+  // ── v6.9.149: OG-COMPLETE gate — contact exists ONLY in meta ──
+  // Pages whose only contact surface is og:email / og:telephone are
+  // invisible to the body-scraping layers; the existing OG layer reads
+  // og:email/og:phone but only when visible surfaces fail. Suppress the
+  // jitter-free gate: only fire when we still have nothing.
+  try {
+    if (ogContactGate(html)) {
+      const ocE = (html.match(/<meta[^>]+(?:property|name)\s*=\s*["']og:email["'][^>]*content\s*=\s*["']([^"']+)['"]/i)
+        || html.match(/<meta[^>]+content\s*=\s*["']([^"']*@[^"']+)['"][^>]*(?:property|name)\s*=\s*["']og:email["']/i));
+      const ocP = (html.match(/<meta[^>]+(?:property|name)\s*=\s*["']og:(?:telephone|phone_number|twitter:data1)["'][^>]*content\s*=\s*["']([^"']+)['"]/i)
+        || html.match(/<meta[^>]+content\s*=\s*["'](\+?[\d()\s\-]{8,18})['"][^>]*(?:property|name)\s*=\s*["']og:(?:telephone|phone_number|twitter:data1)["']/i));
+      if (!b.email && ocE?.[1] && plausibleEmail(ocE[1].trim()) && !_EMAIL_JUNK_RE.test(ocE[1])) { b.email = ocE[1].trim(); yieldBump('ogonly'); }
+      if (!b.phone && ocP?.[1] && plausiblePhone(ocP[1], false)) { b.phone = ocP[1].trim(); yieldBump('ogonly'); }
+    }
+  } catch { /* OG-only gate is best-effort */ }
   // v6.9.147b: PROMINENCE — footer-address preference with role-weighting.
   // Sites publish many addresses; the one inside a visible mailto (or "E:")
   // link inside the footer contact block is the public one. We collect ALL
@@ -11556,5 +11583,10 @@ __internals.aiAgent = {
   // v6.9.147b — benchmark + E2E access to the new layers:
   isCfChallenge,
   pageFetchViaServer,
+  // v6.9.149 — deep-skills probes:
+  readMicroformats,
+  ogContactGate,
+  sweepSameAs,
+  domainMxProbe,
 };
 try { (window as unknown as { __internals?: unknown }).__internals = __internals; } catch { /* non-browser */ }

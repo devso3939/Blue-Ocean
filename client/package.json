@@ -1,6 +1,6 @@
 {
   "name": "blue-ocean-client",
-  "version": "6.9.148",
+  "version": "6.9.149",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "deploy": "gh-pages -d dist",
     "bench:extract": "node bench_extract.cjs",
-    "test": "tsx test_v969.ts && tsx test_agent.ts && tsx test_v966.ts && tsx test_skills.ts"
+    "test": "tsx test_v969.ts && tsx test_agent.ts && tsx test_v966.ts && tsx test_skills.ts && tsx test_deep.ts"
   },
   "dependencies": {
     "he": "^2.0.0",
@@ -18,6 +18,7 @@
     "linkify-it": "^6.1.0",
     "lucide-react": "^0.400.0",
     "maplibre-gl": "^4.0.0",
+    "microformats-parser": "^2.0.6",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "tldts": "^7.4.16"
