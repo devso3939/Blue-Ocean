@@ -19,6 +19,7 @@ import { Parser } from 'htmlparser2';
 import { decode as heDecode } from 'he';
 import { getDomain } from 'tldts';
 import { LinkifyIt } from 'linkify-it';
+import { parsePhoneNumberFromString, AsYouType } from 'libphonenumber-js';
 
 export interface HarvestedAnchor {
   /** Absolute URL (resolved against `base`), or the raw href when unresolvable */
@@ -131,4 +132,84 @@ export function findTextContacts(text: string, cap = 12): TextContacts {
     }
   } catch { /* linkify is defensive — return what matched */ }
   return { emails: emails.slice(0, cap), urls: urls.slice(0, cap) };
+}
+
+// ── E.164 normalization (the omkarcloud technique) ───────────────
+
+/**
+ * Normalize a phone to E.164 (+995322196669) using libphonenumber-js
+ * region-awareness: `032 2 19 66 69` + GE → +995322196669. Returns ''
+ * when nothing plausible parses — callers keep their original value.
+ */
+export function toE164(raw: string, region?: string): string {
+  const t = (raw || '').trim();
+  if (!t) return '';
+  const digits = t.replace(/\D/g, '');
+  try {
+    if (region) {
+      const parsed = parsePhoneNumberFromString(t, region as any);
+      if (parsed && parsed.isValid()) return parsed.number.toString();
+    }
+    const intl = parsePhoneNumberFromString(t.startsWith('+') ? t : '+' + digits);
+    if (intl && intl.isValid()) return intl.number.toString();
+    if (t.startsWith('+') && digits.length >= 8 && digits.length <= 15) {
+      return t.replace(/[\s()\-.]/g, '');
+    }
+  } catch { /* fall through */ }
+  return '';
+}
+
+/** Same normalization, but non-destructive: returns the input unchanged
+ *  when E.164 is impossible — for display paths that must not lose data. */
+export function toE164OrKeep(raw: string, region?: string): string {
+  return toE164(raw, region) || raw;
+}
+
+// ── Official-contact ranking (the omkarcloud technique) ──────────
+
+/**
+ * Rank found emails; the FIRST is the one an outreach email would use.
+ * Order: own-domain personal/role ≥ own-domain departmental (info@) ≥
+ * generic official hint ≥ platform relay (gmail/facebook etc.).
+ * Deduplicates case-insensitively.
+ */
+export function rankOfficialEmails(emails: string[], ownDomain?: string): { best: string | null; ranked: string[] } {
+  if (emails.length === 0) return { best: null, ranked: [] };
+  const seen = new Set<string>();
+  const uniq = emails.filter(e => { const k = e.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
+  const domainOf = (e: string) => { try { return getDomain(e.split('@')[1] || '') || ''; } catch { return ''; } };
+  const own = ownDomain ? (getDomain(ownDomain) || '').toLowerCase() : '';
+  const score = (e: string): number => {
+    const d = domainOf(e);
+    const local = (e.split('@')[0] || '').toLowerCase();
+    if (own && d === own) {
+      // Within own-domain: personal/role-preferred > departmental info@
+      return /^(info|contact|office|hello|mail|no-?reply|donotreply|noreply|postmaster|abuse|webmaster)/.test(local) ? 2 : 3;
+    }
+    if (/^(info|contact|office|hello|mail)@/.test(e)) return own ? 1 : 2; // dept w/o own-domain context
+    if (d && d.split('.').length >= 2) return 1; // personal-ish on a real domain
+    return 0; // platform relay / junk domain
+  };
+  const ranked = [...uniq].sort((a, b) => score(b) - score(a));
+  return { best: ranked[0] || null, ranked };
+}
+
+/**
+ * Rank found phones with the same logic: own-region E.164 first, then
+ * plausible-but-unnormalized, then anything else. Dedup on digits.
+ */
+export function rankOfficialPhones(phones: string[], region?: string): { best: string | null; ranked: string[] } {
+  if (phones.length === 0) return { best: null, ranked: [] };
+  const seen = new Set<string>();
+  const uniq = phones.filter(p => { const k = p.replace(/\D/g, ''); if (seen.has(k)) return false; seen.add(k); return true; });
+  const norm = (p: string) => toE164(p, region);
+  const score = (p: string): number => {
+    const e = norm(p);
+    if (e && region) { try { const q = parsePhoneNumberFromString(e); if (q && q.country === region) return 3; } catch { /* fall through */ } }
+    if (e) return 2; // E.164-able but region unknown
+    if (p.replace(/\D/g, '').length >= 8) return 1; // plausible but unparseable
+    return 0;
+  };
+  const ranked = [...uniq].sort((a, b) => score(b) - score(a));
+  return { best: ranked[0] || null, ranked };
 }

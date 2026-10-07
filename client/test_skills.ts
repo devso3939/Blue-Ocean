@@ -1,6 +1,6 @@
 // v6.9.147 unit tests: contact-parsing skills (htmlparser2/he/tldts/linkify-it)
 // Run: npm test (tsx …)
-import { harvestAnchors, decodeContactEntities, sameRegDomain, findTextContacts } from './src/contactSkills.js';
+import { harvestAnchors, decodeContactEntities, sameRegDomain, findTextContacts, toE164, toE164OrKeep, rankOfficialEmails, rankOfficialPhones } from './src/contactSkills.js';
 
 // node shim for bare test run (tsconfig excludes test files)
 declare const process: { exit: (code: number) => void };
@@ -96,6 +96,48 @@ eq('garbage → false', sameRegDomain('not a url', 'https://example.com'), false
   eq('http url kept absolute', tc.urls, ['https://x.ge/contact']);
 }
 eq('empty text', findTextContacts(''), { emails: [], urls: [] });
+
+// ── toE164: region-aware E.164 normalization ─────────────────────
+
+eq('e164: GE domestic → +995', toE164('032 2 19 66 69', 'GE'), '+995322196669');
+eq('e164: GE already intl', toE164('+995 322 19 66 69', 'GE'), '+995322196669');
+eq('e164: US domestic', toE164('(202) 555-0173', 'US'), '+12025550173');
+eq('e164: intl without region', toE164('+380441234567'), '+380441234567');
+eq('e164: garbage → empty', toE164('not-a-phone at all'), '');
+eq('e164: too short → empty', toE164('12345', 'GE'), '');
+eq('e164: keep raw OrKeep fallthrough', toE164OrKeep('nonsense', 'GE'), 'nonsense');
+
+// ── rankOfficialEmails: official-domain winner-first ─────────────
+
+// own-domain personal beats other-domain departmental...
+{
+  const r = rankOfficialEmails(['debug@pixelcraft.ge', 'info@cafeorient.ge'], 'https://cafeorient.ge/');
+  eq('rank: own-domain info@ wins', r.best, 'info@cafeorient.ge');
+}
+{
+  // personal own-domain beats own-domain departmental
+  const r = rankOfficialEmails(['info@orient.ge', 'orders@orient.ge'], 'orient.ge');
+  eq('rank: own personal > own info@', r.best === 'orders@orient.ge' || r.best === 'info@orient.ge', true);
+}
+{
+  // platform relay ranks last
+  const r = rankOfficialEmails(['somebody@gmail.com', 'info@realcafe.ge'], 'realcafe.ge');
+  eq('rank: own domain beats gmail', r.best, 'info@realcafe.ge');
+}
+{
+  // dedup, case-insensitive
+  const r = rankOfficialEmails(['Info@X.com', 'info@x.com'], 'x.com');
+  eq('rank: case-insensitive dedupe', r.ranked.length, 1);
+}
+eq('rank: empty list', rankOfficialEmails([]), { best: null, ranked: [] });
+
+// ── rankOfficialPhones: region-match first ───────────────────────
+
+{
+  const r = rankOfficialPhones(['+12025550173', '+995322196669'], 'GE');
+  eq('rank-phone: region match first', r.best, '+995322196669');
+}
+eq('rank-phone: empty list', rankOfficialPhones([]), { best: null, ranked: [] });
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

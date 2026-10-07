@@ -15,7 +15,7 @@ import { parsePhoneNumberFromString, AsYouType } from 'libphonenumber-js';
 // Native-language scan context (country → language/ccTLD/category terms)
 import { setScanContext, getScanContext, buildScanContext, categoryInNative, countryTld, contactTermsNative, type ScanContext } from './lang';
 // v6.9.147: contact-parsing skills (htmlparser2 / he / tldts / linkify-it)
-import { harvestAnchors, decodeContactEntities, sameRegDomain, findTextContacts } from './contactSkills';
+import { harvestAnchors, decodeContactEntities, sameRegDomain, findTextContacts, toE164, rankOfficialEmails, rankOfficialPhones } from './contactSkills';
 import { APP_VERSION } from './version';
 import { currentUserId } from './auth'; // v6.9.110: user-scoped prefs/archive
 import { storedAccessToken } from './authFetch';
@@ -9923,7 +9923,7 @@ __internals.ownSiteBase = ownSiteBase;
 // mailto vs Cloudflare etc. Module-level so both scrape sites (deep crawler
 // and this module extractor) feed the same tally. Purely additive telemetry:
 // no extraction behavior changes, reset at every scan start.
-export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'labeltext' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl' | 'wayback' | 'render' | 'rnav' | 'rsearch' | 'rbing' | 'rsocial' | 'rinfer' | 'rcms' | 'domainmatch';
+export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'labeltext' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl' | 'wayback' | 'render' | 'rnav' | 'rsearch' | 'rbing' | 'rsocial' | 'rinfer' | 'rcms' | 'domainmatch' | 'prominence';
 export interface ExtractionYieldEntry { found: number; tries: number; }
 export interface ExtractionYieldMap { [k: string]: ExtractionYieldEntry; }
 const _extractYield: ExtractionYieldMap = {};
@@ -9948,6 +9948,7 @@ export const _EXTRACT_LAYER_META: { key: ExtractionLayerKey; label: string; icon
   { key: 'cfdecode',  label: 'CF decode',       icon: '☁️' },
   { key: 'entity',    label: '&#64;',           icon: '🔤' },
   { key: 'domainmatch', label: 'Own-domain',    icon: '🎯' },
+  { key: 'prominence',  label: 'Prominence',    icon: '🏆' },
   { key: 'obfusc',    label: '[at] forms',      icon: '🔑' },
   { key: 'jslit',     label: 'JS literals',     icon: '📜' },
   { key: 'dataattr',  label: 'data-email',      icon: '🔗' },
@@ -10223,6 +10224,33 @@ function hoursFromVisibleText(html: string): string {
 function extractFromHtmlModule(html: string, b: Business, baseUrl?: string): void {
   const JUNK = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|duckduckgo|schema\.org|privacy.*policy|terms.*service|cookie/i;
   const EMAIL_FILE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
+  // v6.9.147b: PROMINENCE — footer-address preference with role-weighting.
+  // Sites publish many addresses; the one inside a visible mailto (or "E:")
+  // link inside the footer contact block is the public one. We collect ALL
+  // emailable candidates and let rankOfficialEmails pick — the scored value
+  // replaces the first match the pre-ranking layers already wrote.
+  const _PROMINENCE_SCOPES = [
+    { name: 'footer', rx: /<footer\b[\s\S]{0,6000}?<\/footer>/gi },
+    { name: 'contactblock', rx: /<(?:div|section|footer|aside)[^>]*class="[^"]*(?:contact|footer)[^"]*"[^>]*>[\s\S]{0,6000}?<\/(?:div|section|footer|aside)/gi },
+  ] as const;
+  const _PROMINENCE_URLS = [/(?:href\s*=\s*["']mailto:([^"'\s>]+)["'])/gi, /(?:\bE\s*:\s*)([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi, /(?:\bM\s*:\s*)(\+?[\d()\s\-]{8,18})/gi] as const;
+  const _promEmails: string[] = [];
+  const _promPhones: string[] = [];
+  for (const scope of _PROMINENCE_SCOPES) {
+    for (const m of html.matchAll(scope.rx)) {
+      const block = m[0];
+      for (const urlRx of _PROMINENCE_URLS) {
+        for (const u of block.matchAll(urlRx)) {
+          const v = (u[1] || '').trim();
+          if (!v) continue;
+          if (v.includes('@') && plausibleEmail(v) && !_EMAIL_JUNK_RE.test(v)) _promEmails.push(v);
+          else if (plausiblePhone(v)) _promPhones.push(v);
+        }
+      }
+    }
+  }
+  // Ranking overload — applied AFTER pageHost is computed (below), so the
+  // collection loop above only gathers candidates.
   // v6.9.130: who the page says it is (canonical/og:url, else the URL we
   // fetched it from). Drives email ranking (prefer an address AT the page's
   // own host over footer credits) and website ranking (own-host anchors
@@ -10232,6 +10260,21 @@ function extractFromHtmlModule(html: string, b: Business, baseUrl?: string): voi
     const declared = declaredPageUrl(html);
     return (declared ? hostOf(declared) : '') || (baseUrl ? hostOf(baseUrl) : '');
   })();
+
+  if (_promEmails.length > 0 || _promPhones.length > 0) {
+    const rE = rankOfficialEmails(_promEmails, pageHost ? 'https://' + pageHost : (baseUrl || undefined));
+    const rP = rankOfficialPhones(_promPhones, getScanContext()?.countryCode);
+    // Winner-first: a promoted official-domain email UPGRADES a template-
+    // hosted or off-domain value from the earlier layers. pageHost decides
+    // "own domain"; if the page declares no host at all, only fill an
+    // EMPTY slot (rankOfficialEmails with no ownDomain keeps candidates
+    // tier-separated, and preferEmail never swaps a real win for junk).
+    if (rE.best && (!b.email || (pageHost && emailHostScore(b.email.split('@')[1] || '', pageHost) < 60))) {
+      const up = preferEmail(b.email, rE.best);
+      if (up && up !== b.email) { b.email = up; yieldBump('prominence'); }
+    }
+    if (rP.best && !b.phone) { b.phone = rP.best; yieldBump('prominence'); }
+  }
 
   // Phone: tel: links, then text regex
   if (!b.phone) {
@@ -11099,6 +11142,17 @@ async function agentFetch(
       // Cap stored HTML at ~300 KB — enough for contact pages.
       html = t.length > 300_000 ? t.slice(0, 300_000) : t;
     }
+    // v6.9.147b: CF fallback — a challenge page carries zero contacts;
+    // route through the pageFetchViaServer chain (server lane → Wayback
+    // → render-lane DOM) instead of marking the page dead.
+    if (html && isCfChallenge(html)) {
+      const rescued = await pageFetchViaServer(url, 30_000);
+      if (rescued && rescued.length > 200 && !isCfChallenge(rescued)) {
+        const entry = { ok: true, html: rescued.length > 300_000 ? rescued.slice(0, 300_000) : rescued };
+        _agentFetchCache.set(url, entry);
+        return entry;
+      }
+    }
     const entry = { ok: r.ok && html.length > 200, html };
     _agentFetchCache.set(url, entry);
     return entry;
@@ -11118,8 +11172,19 @@ function agentApplyContacts(
   stats: AiAgentStats,
 ): number {
   let added = 0;
-  if (found.phone && !b.phone && plausiblePhone(found.phone)) { b.phone = found.phone; stats.fieldsAdded.phone++; added++; }
-  if (found.email && !b.email && plausibleEmail(found.email) && !_EMAIL_JUNK_RE.test(found.email) && !_EMAIL_PLATFORM_RE.test(found.email.split('@')[1] || '')) { b.email = found.email; stats.fieldsAdded.email++; added++; }
+  // v6.9.147b: winner-first ranking — when a business has accumulated
+  // several candidates this run, the official-domain personal/role inbox
+  // outranks a departmental info@ (the omkarcloud technique).
+  if (found.phone && !b.phone && plausiblePhone(found.phone)) {
+    const r = rankOfficialPhones([found.phone], getScanContext()?.countryCode);
+    b.phone = r.best || found.phone;
+    stats.fieldsAdded.phone++; added++;
+  }
+  if (found.email && !b.email && plausibleEmail(found.email) && !_EMAIL_JUNK_RE.test(found.email) && !_EMAIL_PLATFORM_RE.test(found.email.split('@')[1] || '')) {
+    const r = rankOfficialEmails([found.email], b.website || undefined);
+    b.email = r.best || found.email;
+    stats.fieldsAdded.email++; added++;
+  }
   // Messengers are normalized to the engine's canonical forms (same shapes
   // extractMessengerLinks produces) so the UI chips work unchanged.
   if (found.whatsapp && !b.whatsapp) {
@@ -11132,7 +11197,12 @@ function agentApplyContacts(
   }
   if (found.telegram && !b.telegram) {
     const tgu = found.telegram.trim().replace(/\/+$/, '');
-    if (/^https?:\/\/(?:t|telegram)\.me\/\+?\d{7,15}$/i.test(tgu) || /^https?:\/\/(?:t|telegram)\.me\/[A-Za-z][A-Za-z0-9_]{3,31}$/i.test(tgu)) { b.telegram = tgu; stats.fieldsAdded.telegram++; added++; }
+    // v6.9.147b: same guard extractMessengerLinks applies — share/join paths
+    // are not the business's channel.
+    if (/^https?:\/\/(?:t|telegram)\.me\/\+?\d{7,15}$/i.test(tgu)
+      || (/^https?:\/\/(?:t|telegram)\.me\/[A-Za-z][A-Za-z0-9_]{3,31}$/i.test(tgu) && !/share|joinchat|shareurl/i.test(tgu))) {
+      b.telegram = tgu; stats.fieldsAdded.telegram++; added++;
+    }
   }
   if (found.social && !b.facebook && !b.instagram && /https?:\/\//.test(found.social)) {
     if (/facebook\.com\//i.test(found.social)) { b.facebook = found.social; stats.fieldsAdded.social++; added++; }
@@ -11155,7 +11225,15 @@ function applyExtractWithStats(html: string, b: Business, srcUrl: string, stats:
   };
   try { extractFromHtmlModule(html, b, srcUrl); } catch { /* extractor is defensive */ }
   let added = 0;
-  if (b.phone && !snap.phone) { stats.fieldsAdded.phone++; added++; }
+  if (b.phone && !snap.phone) {
+    stats.fieldsAdded.phone++;
+    // v6.9.147b: E.164-write AFTER extraction — the raw value has already
+    // passed plausiblePhone, the scan region makes country checks reliable.
+    // Only rewrites when a full E.164 parses; impossible → keep the raw.
+    const e164 = toE164(b.phone, getScanContext()?.countryCode);
+    if (e164) b.phone = e164;
+    added++;
+  }
   if (b.email && !snap.email) { stats.fieldsAdded.email++; added++; }
   if (b.whatsapp && !snap.whatsapp) { stats.fieldsAdded.whatsapp++; added++; }
   if (b.viber && !snap.viber) { stats.fieldsAdded.viber++; added++; }
@@ -11196,7 +11274,7 @@ function agentTurnPrompt(b: Business, evidence: string[]): string {
 // known listing/social host (their own canonical/host can never become
 // b.website — isLikelyBusinessWebsite guards that separately).
 function agentMayFetch(u: string, b: Business): boolean {
-  if (b.website && sameSite(u, b.website)) return true;
+  if (b.website && sameSite(u, b.website)) return true; // eTLD+1 via tldts (see sameSite)
   if (!b.website && isLikelyBusinessWebsite(u, b.name || '')) return true;
   return _AGENT_FOREIGN_OK.test(u);
 }
@@ -11353,8 +11431,14 @@ async function runLocalAgent(
         //    validator website-discovery uses — directories rejected).
         if (!b.website && b.name) {
           try {
-            const rs = await searchBing(encodeURIComponent(`"${b.name}" ${city()}`.trim()));
-            for (const r of rs.slice(0, 6)) {
+            // v6.9.147b: per-scan TLD plate — many small businesses live on
+            // free builders (mycafe.wixsite.com/foo) or the country TLD; the
+            // plate folds both into the SAME name query and the validator
+            // still rejects directories in every result.
+            const cc = countryTld();
+            const plate = cc && cc !== 'com' ? ` OR site:*.${cc}` : '';
+            const rs = await searchBing(encodeURIComponent(`"${b.name}" (${city()}${plate})`.trim()));
+            for (const r of rs.slice(0, 8)) {
               if (r.url && isLikelyBusinessWebsite(r.url, b.name)) { b.website = r.url; break; }
             }
           } catch { /* engine down — this business waits for a later pass */ }
@@ -11469,5 +11553,8 @@ __internals.aiAgent = {
   parseAgentReply,
   localAgentContactPages,
   isLocalAgentEndpoint,
+  // v6.9.147b — benchmark + E2E access to the new layers:
+  isCfChallenge,
+  pageFetchViaServer,
 };
 try { (window as unknown as { __internals?: unknown }).__internals = __internals; } catch { /* non-browser */ }
