@@ -14,6 +14,8 @@
 import { parsePhoneNumberFromString, AsYouType } from 'libphonenumber-js';
 // Native-language scan context (country → language/ccTLD/category terms)
 import { setScanContext, getScanContext, buildScanContext, categoryInNative, countryTld, contactTermsNative, type ScanContext } from './lang';
+// v6.9.147: contact-parsing skills (htmlparser2 / he / tldts / linkify-it)
+import { harvestAnchors, decodeContactEntities, sameRegDomain, findTextContacts } from './contactSkills';
 import { APP_VERSION } from './version';
 import { currentUserId } from './auth'; // v6.9.110: user-scoped prefs/archive
 import { storedAccessToken } from './authFetch';
@@ -110,10 +112,10 @@ export function scoreContactLinks(html: string, baseUrl: string): string[] {
     const homeKey = normKey(base);
     const seen = new Set<string>([homeKey]);
     const scored: { url: string; score: number }[] = [];
-    for (const m of html.matchAll(/<a\b[^>]*href\s*=\s*["']([^"'#\s]+)["'][^>]*>([\s\S]{0,200}?)<\/a>/gi)) {
-      const href = m[1];
+    for (const a of harvestAnchors(html, baseUrl)) {
+      const href = a.href;
       if (_LINK_SKIP.test(href)) continue;
-      const anchor = m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      const anchor = a.text;
       let u: URL;
       try { u = new URL(href, baseUrl); } catch { continue; }
       if (u.protocol !== 'https:' && u.protocol !== 'http:') continue;
@@ -149,8 +151,8 @@ export function pickDeeperLinks(html: string, baseUrl: string): string[] {
     const selfPath = base.pathname.replace(/\/+$/, '') || '/';
     const seen = new Set<string>();
     const scored: { url: string; score: number }[] = [];
-    for (const m of html.matchAll(/<a[^>]*href\s*=\s*["']([^"'#\s]+)["'][^>]*>([\s\S]{0,200}?)<\/a>/gi)) {
-      const href = m[1];
+    for (const a of harvestAnchors(html, baseUrl)) {
+      const href = a.href;
       if (_LINK_SKIP.test(href)) continue;
       let u: URL;
       try { u = new URL(href, baseUrl); } catch { continue; }
@@ -163,7 +165,7 @@ export function pickDeeperLinks(html: string, baseUrl: string): string[] {
       seen.add(u.origin + path);
       let decodedPath = u.pathname;
       try { decodedPath = decodeURIComponent(u.pathname); } catch { /* malformed */ }
-      const anchor = m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      const anchor = a.text;
       const hay = (anchor + ' ' + u.pathname + ' ' + decodedPath).slice(0, 300);
       let score = 0;
       for (const [rx, w] of _LINK_DEEP2) if (rx.test(hay)) score += w;
@@ -4672,6 +4674,9 @@ async function tryCommonEmailPatterns(b: Business): Promise<void> {
 // ── Extract from plain text (e.g. Brave search descriptions) ──
 function extractFromText(text: string, b: Business): boolean {
   let touched = false;
+  // v6.9.147: decode named/encoded entities first — `info&commat;ex.com`
+  // and `&#64;` hide addresses the regex below can never see.
+  text = decodeContactEntities(text);
   if (!b.phone) {
     const m = text.match(/\+?\d[\d\s\-\.\(\)]{7,18}/);
     // Digit-count + plausibility guard: snippet fragments like "2026) -" or
@@ -4684,6 +4689,14 @@ function extractFromText(text: string, b: Business): boolean {
   if (!b.email) {
     const m = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
     if (m && plausibleEmail(m[0])) { b.email = m[0]; touched = true; }
+  }
+  // v6.9.147: linkify fallback — fuzzy emails with odd TLDs the fixed
+  // regex misses; same plausibleEmail gate before anything is written.
+  if (!b.email) {
+    for (const e of findTextContacts(text, 8).emails) {
+      const clean = e.replace(/[\s>);,]+$/, '');
+      if (clean.length > 5 && clean.length < 90 && plausibleEmail(clean)) { b.email = clean; touched = true; break; }
+    }
   }
   if (!b.facebook) {
     const m = text.match(/facebook\.com\/([a-zA-Z0-9._]+)/);
@@ -10990,13 +11003,9 @@ function agentAbsUrl(u: unknown, base?: string): string | null {
 // pre-agent enrichment lanes already crawl inside the site; the agent's
 // edge is choosing WHICH pages to fetch, not roaming the open web.
 function sameSite(a: string, b: string): boolean {
-  try {
-    const h1 = new URL(a).hostname.replace(/^www\./, '');
-    const h2 = new URL(b).hostname.replace(/^www\./, '');
-    const s1 = h1.split('.'); const s2 = h2.split('.');
-    const e1 = s1.slice(-2).join('.'); const e2 = s2.slice(-2).join('.');
-    return e1 === e2 && e1.includes('.');
-  } catch { return false; }
+  // v6.9.147: real eTLD+1 via the Public Suffix List (tldts) — the old
+  // last-two-labels hack merged every *.co.uk site into one "site".
+  return sameRegDomain(a, b);
 }
 
 // Convert fetched HTML into compact text evidence for the model: title,
@@ -11012,16 +11021,11 @@ function agentEvidence(html: string, url: string, cap = 3200): string {
   const links: string[] = [];
   try {
     const seenL = new Set<string>();
-    const anchors = html.match(/<a\b[^>]*href\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi) || [];
-    for (const a of anchors) {
-      const m = a.match(/href\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/i);
-      if (!m) continue;
-      const raw = m[1].replace(/^["']|["']$/g, '').trim();
-      if (!raw || /^(javascript:|mailto:|tel:|#)/i.test(raw)) continue;
-      let abs: string | null = null;
-      try { const u = new URL(raw, url); if (u.protocol === 'http:' || u.protocol === 'https:') abs = u.toString(); } catch { abs = null; }
-      if (!abs || seenL.has(abs)) continue;
-      try { if (!sameSite(abs, url)) continue; } catch { continue; }
+    for (const a of harvestAnchors(html, url)) {
+      const abs = a.href.split('#')[0]; // fragment-only links collapse into the page itself
+      if (!/^https?:/i.test(abs)) continue; // mailto:/tel:/javascript: are evidence of their own
+      if (seenL.has(abs)) continue;
+      if (!sameSite(abs, url)) continue;
       seenL.add(abs);
       links.push(abs);
     }
@@ -11029,16 +11033,15 @@ function agentEvidence(html: string, url: string, cap = 3200): string {
   const linkRank = (u: string) => /contact|kontakt|impresum|impressum|about|branch|filial|office|კონტაქტ|ჩვენ|შესახებ|галерея/i.test(u) ? 0 : 1;
   links.sort((a, b) => linkRank(a) - linkRank(b));
   const linksLine = links.length > 0 ? `\nLINKS (same-site, prioritized): ${links.slice(0, 14).join(' ')}` : '';
-  const text = html
+  const rawText = html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
     .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
     .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
-    .replace(/&#(\d+);/g, (_, n) => { try { return String.fromCharCode(Number(n)); } catch { return ' '; } })
-    .replace(/\s+/g, ' ')
-    .trim();
+    .replace(/<[^>]+>/g, ' ');
+  // v6.9.147: full entity decode (named + numeric) instead of the inline
+  // four-entity patch — `info&commat;…` becomes a visible address.
+  const text = decodeContactEntities(rawText).replace(/\s+/g, ' ').trim();
   // Prefer lines that smell like contact info so the cap lands on signal.
   const lines = text.split(/\.\s|\|\s|·\s|,\s/).filter(l => l.length > 3);
   const contactish = lines.filter(l => /@|\+?\d[\d\s()\-]{7,}|wa\.me|t\.me|viber|tel:|contact|address|ул\.|улица|ქუჩა/i.test(l));
@@ -11049,7 +11052,13 @@ function agentEvidence(html: string, url: string, cap = 3200): string {
     const s = l.slice(0, 220);
     picked.push(s); used += s.length + 1;
   }
-  return `URL: ${url}\nTITLE: ${title}${linksLine}\nTEXT: ${picked.join(' | ').slice(0, cap)}`;
+  // v6.9.147: linkify pass — surface emails/URLs the model can read
+  // verbatim instead of hunting them in the prose.
+  const tc = findTextContacts(text, 8);
+  const contactsLine = (tc.emails.length > 0 || tc.urls.length > 0)
+    ? `\nCONTACTS FOUND: ${[...tc.emails, ...tc.urls].slice(0, 8).join(' ')}`
+    : '';
+  return `URL: ${url}\nTITLE: ${title}${linksLine}${contactsLine}\nTEXT: ${picked.join(' | ').slice(0, cap)}`;
 }
 
 // Stats for the UI: how much the agent actually added this scan.

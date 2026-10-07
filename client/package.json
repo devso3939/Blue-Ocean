@@ -1,6 +1,6 @@
 {
   "name": "blue-ocean-client",
-  "version": "6.9.146",
+  "version": "6.9.147",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,16 +9,21 @@
     "preview": "vite preview",
     "deploy": "gh-pages -d dist",
     "bench:extract": "node bench_extract.cjs",
-    "test": "tsx test_v969.ts && tsx test_agent.ts"
+    "test": "tsx test_v969.ts && tsx test_agent.ts && tsx test_v966.ts && tsx test_skills.ts"
   },
   "dependencies": {
+    "he": "^2.0.0",
+    "htmlparser2": "^12.0.0",
     "libphonenumber-js": "^1.13.12",
+    "linkify-it": "^6.1.0",
     "lucide-react": "^0.400.0",
     "maplibre-gl": "^4.0.0",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "tldts": "^7.4.16"
   },
   "devDependencies": {
+    "@types/he": "^1.2.3",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
     "@vitejs/plugin-react": "^4.2.0",
