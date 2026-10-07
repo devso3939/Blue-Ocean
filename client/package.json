@@ -1,6 +1,6 @@
 {
   "name": "blue-ocean-client",
-  "version": "6.9.145",
+  "version": "6.9.146",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "deploy": "gh-pages -d dist",
     "bench:extract": "node bench_extract.cjs",
-    "test": "tsx test_v969.ts"
+    "test": "tsx test_v969.ts && tsx test_agent.ts"
   },
   "dependencies": {
     "libphonenumber-js": "^1.13.12",

@@ -1593,7 +1593,7 @@ export default function App() {
             if (agent.tried > 0) {
               const f = agent.fieldsAdded;
               const total = f.phone + f.email + f.whatsapp + f.viber + f.telegram + f.social;
-              setRescanNote(`🤖 AI agent browsed ${agent.fetched} pages on ${agent.tried} sites — ${total} new contact fields${total > 0 ? ` (${f.phone}📞 ${f.email}✉️ ${f.whatsapp + f.viber + f.telegram}💬)` : ''}`);
+              setRescanNote(`${agent.mode === 'ai' ? '🤖 AI agent browsed' : '🧭 Local agent crawled'} ${agent.fetched} pages on ${agent.tried} sites — ${total} new contact fields${total > 0 ? ` (${f.phone}📞 ${f.email}✉️ ${f.whatsapp + f.viber + f.telegram}💬)` : ''}`);
             }
             if (!ac.signal.aborted) {
               setBusinesses(new Map(biz));
@@ -1981,8 +1981,10 @@ export default function App() {
       }
 
       // ── v6.9.127: AI web agent — top up contacts the parsers missed ──
-      // Only acts when the user enabled it in Settings (own API key); the
-      // lane returns immediately otherwise. Bounded by pages/time budgets.
+      // Runs whenever the agent lane is enabled in Settings: with a key
+      // it drives the browse from the model; without one it falls back to
+      // local crawling mode. Returns immediately only when unchecked.
+      // Bounded by pages/time budgets.
       if (!ac.signal.aborted) {
         try {
           resetAiAgentCache();
@@ -1993,7 +1995,7 @@ export default function App() {
           if (agent.tried > 0) {
             const f = agent.fieldsAdded;
             const total = f.phone + f.email + f.whatsapp + f.viber + f.telegram + f.social;
-            setRescanNote(`🤖 AI agent browsed ${agent.fetched} pages on ${agent.tried} sites — ${total} new contact fields${total > 0 ? ` (${f.phone}📞 ${f.email}✉️ ${f.whatsapp + f.viber + f.telegram}💬)` : ''}`);
+            setRescanNote(`${agent.mode === 'ai' ? '🤖 AI agent browsed' : '🧭 Local agent crawled'} ${agent.fetched} pages on ${agent.tried} sites — ${total} new contact fields${total > 0 ? ` (${f.phone}📞 ${f.email}✉️ ${f.whatsapp + f.viber + f.telegram}💬)` : ''}`);
             setBusinesses(new Map(biz));
           }
         } catch { /* agent lane best-effort */ }
@@ -2506,10 +2508,14 @@ export default function App() {
               </label>
             </div>
             <p className="text-xs text-muted-foreground mb-3">
-              Paste an <b>OpenAI-compatible</b> API key. During scans, for businesses whose contacts
-              regular parsing missed, the agent reads the fetched page text, decides which pages to
-              open next (contact/about/branches), and extracts phones, emails and messenger links —
-              every value is re-validated before it is saved. The key stays in this browser.
+              Two modes, one agent — both browse with their own fetch + parsing tools and only
+              fill <b>empty</b> fields:
+              <br />• <b>With a key</b> (or a localhost endpoint like Ollama) — the model drives the
+              browse: it chooses pages to open, searches the web for missing sites/contacts, and
+              submits every value it can read; each one is re-validated before saving.
+              <br />• <b>Without a key</b> — a local heuristic agent still crawls: it searches for the
+              official site, follows scored contact/about/branch links and mines them. Keys stay in
+              this browser; uncheck the box to turn the whole lane off.
             </p>
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
@@ -2550,7 +2556,7 @@ export default function App() {
                   value={aiAgentCfg.apiKey}
                   onChange={e => updateAiAgent({ apiKey: e.target.value })}
                   onKeyDown={e => { if (e.key === 'Enter') { aiAgentTest({ ...aiAgentCfg }).then(r => setAiAgentTestMsg(r.detail)); } }}
-                  placeholder="sk-…"
+                  placeholder="sk-… (optional for localhost models)"
                   className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary/50"
                 />
               </div>

@@ -3854,6 +3854,83 @@ export function totalBusinessCount(biz: Map<string, Business[]>): number {
   return n;
 }
 
+async function cachedLane<T>(
+  lane: string,
+  key: string,
+  fetcher: () => Promise<T[]>,
+  opts?: { getTimeoutMs?: number; putTimeoutMs?: number },
+): Promise<T[]> {
+  try {
+    const hit = await supabaseRpc<{ results?: T[] } | null>('rpc_lane_cache_get', { p_lane: lane, p_key: key }, opts?.getTimeoutMs ?? 10000);
+    if (hit?.results && hit.results.length > 0) return hit.results;
+  } catch { /* cache unavailable — fetch live */ }
+  const rs = await fetcher();
+  if (rs.length > 0) {
+    void supabaseRpc<string>('rpc_lane_cache_put', { p_lane: lane, p_key: key, p_results: rs }, opts?.putTimeoutMs ?? 15000).catch(() => {});
+  }
+  return rs;
+}
+
+// Bing Search (free scraping, no API key needed)
+// v6.9.106: shared cross-scan cache for the Bing lane (server table, 3-day
+// TTL). The retry ladder and Pass-5c discovery re-fire the same queries on
+// every rescan — each a fresh Bing fetch with block/challenge risk. A stored
+// result serves them for free; only non-empty results are cached (a challenge
+// page is not a cacheable answer).
+// v6.9.108: get/put through the shared cachedLane helper.
+function searchBing(query: string): Promise<{title: string; url: string; snippet: string}[]> {
+  return cachedLane('bing', query, () => searchBingRaw(query));
+}
+
+async function searchBingRaw(query: string): Promise<{title: string; url: string; snippet: string}[]> {
+  try {
+    const r = await corsFetch('https://www.bing.com/search?q=' + query + '&count=10', {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (r.ok) {
+    const html = await r.text();
+    // Challenge/benign page detection: Bing occasionally serves an Arkose
+    // challenge instead of results. b_algo==0 + challenge markers => no data.
+    if (!/<li class="b_algo"/i.test(html) && /akchal|challenge|verify|captcha/i.test(html)) return [];
+    const results: {title: string; url: string; snippet: string}[] = [];
+    // Extract search result blocks (li.b_algo)
+    const blocks = html.match(/<li class="b_algo"[^>]*>[\s\S]*?<\/li>/gi) || [];
+    for (const block of blocks) {
+      const titleMatch = block.match(/<h2[^>]*><a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+      // Try multiple snippet selectors: b_caption p, then any p
+      const snippetMatch = block.match(/<div class="b_caption"[^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/i)
+        || block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+      if (titleMatch) {
+        // Decode Bing redirect URLs: bing.com/ck/a?...u=a1<base64>...
+        let url = titleMatch[1];
+        if (url.includes('bing.com/ck/a')) {
+          const uMatch = url.match(/u=([^&]+)/);
+          if (uMatch) {
+            const raw = uMatch[1];
+            if (raw.startsWith('a1')) {
+              try {
+                url = atob(raw.substring(2));
+              } catch {}
+            }
+          }
+        }
+        results.push({
+          url,
+          title: titleMatch[2].replace(/<[^>]+>/g, '').replace(/&#\d+;/g, ''),
+          snippet: snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&#\d+;/g, '') : '',
+        });
+      }
+    }
+    return results;
+    }
+  } catch { /* browser arm failed — fall through to server lane */ }
+  // v6.9.64: browser arm blocked/failed → server-side Bing (no CORS, no
+  // browser IP). Same parser, independent lane.
+  return await searchBingViaServer(query);
+}
+
+
 export async function queryBusinesses(
   lat: number,
   lon: number,
@@ -4653,82 +4730,6 @@ function extractFromText(text: string, b: Business): boolean {
 // fire-and-forget put of non-empty results), previously copy-pasted across
 // the Bing / DDG-Lite / DDG-HTML wrappers and the geocode call sites.
 // Never throws: a cache outage degrades to a plain live fetch.
-async function cachedLane<T>(
-  lane: string,
-  key: string,
-  fetcher: () => Promise<T[]>,
-  opts?: { getTimeoutMs?: number; putTimeoutMs?: number },
-): Promise<T[]> {
-  try {
-    const hit = await supabaseRpc<{ results?: T[] } | null>('rpc_lane_cache_get', { p_lane: lane, p_key: key }, opts?.getTimeoutMs ?? 10000);
-    if (hit?.results && hit.results.length > 0) return hit.results;
-  } catch { /* cache unavailable — fetch live */ }
-  const rs = await fetcher();
-  if (rs.length > 0) {
-    void supabaseRpc<string>('rpc_lane_cache_put', { p_lane: lane, p_key: key, p_results: rs }, opts?.putTimeoutMs ?? 15000).catch(() => {});
-  }
-  return rs;
-}
-
-// Bing Search (free scraping, no API key needed)
-// v6.9.106: shared cross-scan cache for the Bing lane (server table, 3-day
-// TTL). The retry ladder and Pass-5c discovery re-fire the same queries on
-// every rescan — each a fresh Bing fetch with block/challenge risk. A stored
-// result serves them for free; only non-empty results are cached (a challenge
-// page is not a cacheable answer).
-// v6.9.108: get/put through the shared cachedLane helper.
-function searchBing(query: string): Promise<{title: string; url: string; snippet: string}[]> {
-  return cachedLane('bing', query, () => searchBingRaw(query));
-}
-
-async function searchBingRaw(query: string): Promise<{title: string; url: string; snippet: string}[]> {
-  try {
-    const r = await corsFetch('https://www.bing.com/search?q=' + query + '&count=10', {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (r.ok) {
-    const html = await r.text();
-    // Challenge/benign page detection: Bing occasionally serves an Arkose
-    // challenge instead of results. b_algo==0 + challenge markers => no data.
-    if (!/<li class="b_algo"/i.test(html) && /akchal|challenge|verify|captcha/i.test(html)) return [];
-    const results: {title: string; url: string; snippet: string}[] = [];
-    // Extract search result blocks (li.b_algo)
-    const blocks = html.match(/<li class="b_algo"[^>]*>[\s\S]*?<\/li>/gi) || [];
-    for (const block of blocks) {
-      const titleMatch = block.match(/<h2[^>]*><a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
-      // Try multiple snippet selectors: b_caption p, then any p
-      const snippetMatch = block.match(/<div class="b_caption"[^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/i)
-        || block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
-      if (titleMatch) {
-        // Decode Bing redirect URLs: bing.com/ck/a?...u=a1<base64>...
-        let url = titleMatch[1];
-        if (url.includes('bing.com/ck/a')) {
-          const uMatch = url.match(/u=([^&]+)/);
-          if (uMatch) {
-            const raw = uMatch[1];
-            if (raw.startsWith('a1')) {
-              try {
-                url = atob(raw.substring(2));
-              } catch {}
-            }
-          }
-        }
-        results.push({
-          url,
-          title: titleMatch[2].replace(/<[^>]+>/g, '').replace(/&#\d+;/g, ''),
-          snippet: snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&#\d+;/g, '') : '',
-        });
-      }
-    }
-    return results;
-    }
-  } catch { /* browser arm failed — fall through to server lane */ }
-  // v6.9.64: browser arm blocked/failed → server-side Bing (no CORS, no
-  // browser IP). Same parser, independent lane.
-  return await searchBingViaServer(query);
-}
-
 // DuckDuckGo Lite search — different endpoint from html.duckduckgo.com, returns cleaner results
 // v6.9.106: shared cross-scan cache for the DDG-Lite lane (3-day TTL).
 // v6.9.108: get/put through the shared cachedLane helper (same 'ddg' lane and
@@ -10799,7 +10800,10 @@ export function loadAiAgentConfig(): AiAgentConfig {
       };
     }
   } catch { /* malformed config — defaults */ }
-  return { enabled: false, provider: 'openai-compatible', baseUrl: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini', budgetPages: 40, budgetSeconds: 300 };
+  // v6.9.146: enabled by default — without a key the lane runs in LOCAL
+  // browsing mode, so the agent swarm works out of the box. The checkbox
+  // remains the one off-switch (saved once the user toggles it).
+  return { enabled: true, provider: 'openai-compatible', baseUrl: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini', budgetPages: 40, budgetSeconds: 300 };
 }
 
 export function saveAiAgentConfig(cfg: AiAgentConfig): void {
@@ -10816,15 +10820,28 @@ export function saveAiAgentConfig(cfg: AiAgentConfig): void {
   } catch { /* storage full / blocked */ }
 }
 
+// v6.9.146: loopback / private-LAN endpoints (Ollama, LM Studio,
+// llama.cpp server…) accept requests WITHOUT a key — requiring one made
+// every local setup dead-end at "not-configured".
+export function isLocalAgentEndpoint(baseUrl: string): boolean {
+  try {
+    const h = new URL(baseUrl).hostname.toLowerCase();
+    return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '0.0.0.0' ||
+      /^192\.168\./.test(h) || /^10\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h);
+  } catch { return false; }
+}
+
 export function aiAgentReady(): boolean {
   const c = loadAiAgentConfig();
-  return !!(c.enabled && c.apiKey && c.baseUrl && c.model);
+  return !!(c.enabled && c.baseUrl && c.model && (c.apiKey || isLocalAgentEndpoint(c.baseUrl)));
 }
 
 // Live test from the Settings panel: one minimal chat completion.
 export async function aiAgentTest(cfg?: Partial<AiAgentConfig>): Promise<{ ok: boolean; detail: string }> {
   const c = { ...loadAiAgentConfig(), ...(cfg || {}) };
-  if (!c.apiKey || !c.baseUrl) return { ok: false, detail: 'Paste a key and base URL first.' };
+  if (!c.baseUrl || (!c.apiKey && !isLocalAgentEndpoint(c.baseUrl))) {
+    return { ok: false, detail: 'Paste a key — or a http://localhost base URL (local models need no key).' };
+  }
   try {
     const r = await fetch(c.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
       method: 'POST',
@@ -10893,6 +10910,71 @@ function agentJson(text: string): Record<string, unknown> | null {
   try { const v = JSON.parse(m[0]); return (v && typeof v === 'object' && !Array.isArray(v)) ? v as Record<string, unknown> : null; }
   catch { return null; }
 }
+
+// ── v6.9.146: agent tool protocol ────────────────────────────────
+// The model drives the browse through ONE JSON tool call per turn —
+// plain JSON on purpose: every OpenAI-compatible endpoint (including
+// local models without native function-calling) can produce it.
+export type AgentToolCall =
+  | { tool: 'fetch_page'; url: string }
+  | { tool: 'search'; query: string }
+  | {
+      tool: 'contacts';
+      found: { phone?: string; email?: string; whatsapp?: string; viber?: string; telegram?: string; social?: string };
+      // Legacy replies (v6.9.127 format {"urls":[…],"phone":…}) carry the
+      // next page alongside the values — apply both in one turn.
+      next?: { tool: 'fetch_page'; url: string };
+    };
+
+function agentStr(v: unknown): string | undefined {
+  return typeof v === 'string' && v.trim() ? v.trim() : undefined;
+}
+
+/** Parse one model reply into a tool call. Returns null on prose/garbage —
+ *  the caller decides whether to retry or stop. Pure + unit-tested. */
+export function parseAgentReply(text: string): AgentToolCall | null {
+  const j = agentJson(text);
+  if (!j) return null;
+  const action = String(j.tool ?? j.action ?? '').toLowerCase();
+  if (action === 'search') {
+    const q = agentStr(j.query) || agentStr(j.q);
+    return q ? { tool: 'search', query: q } : null;
+  }
+  if (action === 'fetch_page' || action === 'fetch' || action === 'open' || action === 'visit') {
+    const url = agentStr(j.url) || agentStr(j.href);
+    return url ? { tool: 'fetch_page', url } : null;
+  }
+  // Contacts turn — flat keys, or nested under "contacts"/"found".
+  const src = (j.contacts && typeof j.contacts === 'object' && !Array.isArray(j.contacts))
+    ? { ...(j.contacts as Record<string, unknown>), ...j }
+    : (j.found && typeof j.found === 'object' && !Array.isArray(j.found))
+      ? { ...(j.found as Record<string, unknown>), ...j }
+      : j;
+  const found = {
+    phone: agentStr(src.phone),
+    email: agentStr(src.email),
+    whatsapp: agentStr(src.whatsapp),
+    viber: agentStr(src.viber),
+    telegram: agentStr(src.telegram),
+    social: agentStr(src.social),
+  };
+  const hasValues = Object.values(found).some(Boolean);
+  // Legacy "urls" array → queue the first as the next fetch.
+  let next: { tool: 'fetch_page'; url: string } | undefined;
+  if (Array.isArray(j.urls) && typeof j.urls[0] === 'string' && (j.urls[0] as string).trim()) {
+    next = { tool: 'fetch_page', url: (j.urls[0] as string).trim() };
+  }
+  if (hasValues || next) return { tool: 'contacts', found, next };
+  if (action === 'contacts' || action === 'report' || action === 'extract') return { tool: 'contacts', found: {} };
+  return null;
+}
+
+// Which third-party hosts the agent may open besides the business's own
+// site: listing directories (contact gold) and social profiles (bio cards).
+const _AGENT_FOREIGN_OK = new RegExp(
+  REVIEW_DIRECTORY.source +
+  '|foursquare\\.com|yellowpages\\.com|justdial\\.com|2gis\\.com|bbb\\.org|trustpilot\\.com|clutch\\.co' +
+  '|facebook\\.com|instagram\\.com|tiktok\\.com|linkedin\\.com|t\\.me|wa\\.me', 'i');
 
 // Absolute-URL whitelist for agent-proposed links.
 function agentAbsUrl(u: unknown, base?: string): string | null {
@@ -10972,6 +11054,7 @@ function agentEvidence(html: string, url: string, cap = 3200): string {
 
 // Stats for the UI: how much the agent actually added this scan.
 export interface AiAgentStats {
+  mode: 'ai' | 'local' | 'none'; // v6.9.146: which brain drove the lane
   tried: number;      // businesses the agent attempted
   fetched: number;    // pages fetched
   aiCalls: number;    // model round-trips
@@ -11052,6 +11135,66 @@ function agentApplyContacts(
 // Agent pass over one business. Returns how many contact fields were
 // newly filled (0 = no gain). Keeps its own mini-loop: evidence →
 // proposal → fetch → extract → (once) re-ask with the new evidence.
+// v6.9.146: run the strict shared extractor and attribute every new
+// field to the stats — previously only model-read values were counted,
+// so the scan note under-reported what the agent's browse actually found.
+function applyExtractWithStats(html: string, b: Business, srcUrl: string, stats: AiAgentStats): number {
+  if (!html) return 0;
+  const snap = {
+    phone: b.phone, email: b.email, whatsapp: b.whatsapp, viber: b.viber,
+    telegram: b.telegram, facebook: b.facebook, instagram: b.instagram,
+  };
+  try { extractFromHtmlModule(html, b, srcUrl); } catch { /* extractor is defensive */ }
+  let added = 0;
+  if (b.phone && !snap.phone) { stats.fieldsAdded.phone++; added++; }
+  if (b.email && !snap.email) { stats.fieldsAdded.email++; added++; }
+  if (b.whatsapp && !snap.whatsapp) { stats.fieldsAdded.whatsapp++; added++; }
+  if (b.viber && !snap.viber) { stats.fieldsAdded.viber++; added++; }
+  if (b.telegram && !snap.telegram) { stats.fieldsAdded.telegram++; added++; }
+  if ((b.facebook && !snap.facebook) || (b.instagram && !snap.instagram)) { stats.fieldsAdded.social++; added++; }
+  return added;
+}
+
+// System prompt for the tool loop — one JSON tool call per turn.
+const _AGENT_TOOL_SYS = [
+  'You are a contact-extraction agent. You browse a business\'s web presence with tools and extract phones, emails and messenger links.',
+  'Each turn you receive the evidence collected so far and reply with EXACTLY ONE JSON object choosing a tool — no markdown, no prose.',
+  'TOOLS:',
+  '{"tool":"search","query":"…"} — search the web (to find the official site or listing pages when the evidence is not enough).',
+  '{"tool":"fetch_page","url":"https://…"} — open one page; its content comes back as evidence next turn.',
+  '{"tool":"contacts","phone":"…","email":"…","whatsapp":"…","viber":"…","telegram":"…","social":"https://facebook.com/…"} — submit contact values you can READ in the evidence; omit fields you do not see. You may continue after submitting.',
+  'RULES: extract values EXACTLY as written — never invent or reformat. Prefer contact/about/branch pages from the LINKS list over guessed paths. Prefer the official site over directories. Stop when phone and email are both known.',
+].join('\n');
+
+// One turn's user message: what we know + the evidence collected so far.
+function agentTurnPrompt(b: Business, evidence: string[]): string {
+  return [
+    'Business: ' + (b.name || 'unknown'),
+    'City: ' + (getScanContext()?.cityEn || getScanContext()?.cityNative || 'unknown'),
+    b.address ? 'Known address: ' + b.address : '',
+    b.website ? 'Website: ' + b.website : 'Website: NONE known yet — use search to find the official site first.',
+    'Missing fields: ' + [!b.phone && 'phone', !b.email && 'email', !b.whatsapp && 'whatsapp', !b.viber && 'viber', !b.telegram && 'telegram', !b.facebook && !b.instagram && 'social'].filter(Boolean).join(', '),
+    '',
+    'Evidence so far:',
+    evidence.length > 0 ? evidence.slice(-5).join('\n---\n') : '(none yet — start with {"tool":"search"} to find the official site)',
+    '',
+    'Reply with ONE JSON tool call.',
+  ].filter(Boolean).join('\n');
+}
+
+// URL policy for fetch_page: same-site always; third-party only when the
+// business has no site yet and the URL is a likely official domain, or a
+// known listing/social host (their own canonical/host can never become
+// b.website — isLikelyBusinessWebsite guards that separately).
+function agentMayFetch(u: string, b: Business): boolean {
+  if (b.website && sameSite(u, b.website)) return true;
+  if (!b.website && isLikelyBusinessWebsite(u, b.name || '')) return true;
+  return _AGENT_FOREIGN_OK.test(u);
+}
+
+// Agent pass over one business: browse + parse with tools until the
+// contacts are in, the model runs out of moves, or budgets run out.
+// Works WITHOUT a website too (site discovery via the search tool).
 async function agentEnrichOne(
   b: Business,
   cfg: AiAgentConfig,
@@ -11059,99 +11202,92 @@ async function agentEnrichOne(
   deadline: number,
   opts?: { signal?: AbortSignal },
 ): Promise<number> {
-  if (!b.website) return 0;
   const before = contactFieldCountOf(b);
-  let fetched = 0;
+  stats.tried++;
   const seen = new Set<string>();
-  const modelUrls: string[] = [];
+  const evidence: string[] = [];
+  const MAX_TURNS = 8;
+  const MAX_SEARCHES = 2;
+  let turns = 0;
+  let searches = 0;
 
-  const extractAndApply = (html: string, srcUrl: string): number => {
-    if (!html) return 0;
-    const before2 = contactFieldCountOf(b);
-    try { extractFromHtmlModule(html, b, srcUrl); } catch { /* extractor is defensive */ }
-    const after2 = contactFieldCountOf(b);
-    return after2 - before2;
+  const fetchInto = async (url: string): Promise<void> => {
+    if (seen.has(url)) return;
+    seen.add(url);
+    const pg = await agentFetch(url, opts);
+    stats.fetched++;
+    if (pg.ok) {
+      applyExtractWithStats(pg.html, b, url, stats);
+      evidence.push(agentEvidence(pg.html, url));
+    } else {
+      evidence.push(`URL: ${url}\n(fetch failed — page blocked or empty)`);
+    }
+    // Site discovery: a likely-official URL fetched for a siteless business
+    // becomes its website (same validator website-discovery uses).
+    if (!b.website && isLikelyBusinessWebsite(url, b.name || '')) b.website = url;
   };
 
-  for (let hop = 0; hop < 2; hop++) {
+  // Seed: the homepage first when known — its LINKS list is what lets the
+  // model propose exact contact/branch pages instead of guessed paths.
+  if (b.website && !seen.has(b.website)) await fetchInto(b.website);
+
+  while (turns < MAX_TURNS) {
     if (Date.now() >= deadline || opts?.signal?.aborted) break;
+    if (stats.fetched >= cfg.budgetPages) break;
+    if (b.phone && b.email) break; // satisfied — the stop condition
+    turns++;
 
-    // 1) Build the evidence pack from what we have so far.
-    const evParts: string[] = [];
-    const homeUrl = b.website;
-    if (!seen.has(homeUrl) && hop === 0) {
-      const home = await agentFetch(homeUrl, opts);
-      seen.add(homeUrl); fetched += 1; stats.fetched++;
-      if (home.ok) {
-        extractAndApply(home.html, homeUrl);
-        evParts.push(agentEvidence(home.html, homeUrl));
-      } else {
-        evParts.push(`URL: ${homeUrl}\n(fetch failed — site may block bots)`);
-      }
-    }
-    for (const u of modelUrls) {
-      if (evParts.length >= 3) break;
-      if (seen.has(u)) continue;
-      const pg = await agentFetch(u, opts);
-      seen.add(u); fetched += 1; stats.fetched++;
-      if (pg.ok) {
-        extractAndApply(pg.html, u);
-        evParts.push(agentEvidence(pg.html, u));
-      } else {
-        evParts.push(`URL: ${u}\n(fetch failed)`);
-      }
-    }
-    if (evParts.length === 0) break;
-
-    // Already satisfied? Stop asking the model.
-    if (b.phone && b.email) break;
-
-    // 2) Ask the model which pages to fetch next.
+    // Ask the model; one corrective retry when a (typically local) model
+    // answers in prose instead of JSON — cheap and worth it.
+    const prompt = agentTurnPrompt(b, evidence);
     stats.aiCalls++;
-    const sys = 'You help extract business contact information from website evidence. Reply with ONLY a JSON object, no markdown, no explanations.';
-    const user = [
-      'Business: ' + (b.name || 'unknown'),
-      'Business website: ' + b.website,
-      b.address ? 'Known address: ' + b.address : '',
-      'Missing fields: ' + [!b.phone && 'phone', !b.email && 'email', !b.whatsapp && 'whatsapp', !b.telegram && 'telegram'].filter(Boolean).join(', '),
-      '',
-      'Page evidence from their website:',
-      evParts.join('\n---\n'),
-      '',
-      'Propose up to 2 ABSOLUTE URLs (pages on this same site most likely to contain the missing contact details, e.g. /contact, /about, branch pages) plus any contact values you can already read IN the evidence.',
-      'When the LINKS list contains a contact-looking page, prefer proposing that exact URL over guessing common paths.',
-      'If a value appears in the evidence, extract it EXACTLY as written (do not invent or reformat numbers).',
-      'Reply format: {"urls":["https://…"],"phone":"… or empty","email":"… or empty","whatsapp":"… or empty","viber":"… or empty","telegram":"… or empty"}',
-    ].filter(Boolean).join('\n');
-    const reply = await agentChat(cfg, sys, user, { signal: opts?.signal, maxTokens: 300 });
+    let reply = await agentChat(cfg, _AGENT_TOOL_SYS, prompt, { signal: opts?.signal, maxTokens: 300 });
+    if (reply && !parseAgentReply(reply)) {
+      stats.aiCalls++;
+      reply = await agentChat(cfg, _AGENT_TOOL_SYS, prompt + '\nREMINDER: respond with a single JSON tool object only.', { signal: opts?.signal, maxTokens: 300 });
+    }
     if (!reply) break;
-    const j = agentJson(reply);
-    if (!j) break;
+    const call = parseAgentReply(reply);
+    if (!call) break;
 
-    // 3) Apply any values the model read straight out of the evidence
-    //    (validated before write — see agentApplyContacts).
-    const candidate = {
-      phone: typeof j.phone === 'string' ? j.phone.trim() : undefined,
-      email: typeof j.email === 'string' ? j.email.trim() : undefined,
-      whatsapp: typeof j.whatsapp === 'string' ? j.whatsapp.trim() : undefined,
-      viber: typeof j.viber === 'string' ? j.viber.trim() : undefined,
-      telegram: typeof j.telegram === 'string' ? j.telegram.trim() : undefined,
-    };
-    agentApplyContacts(b, candidate, stats);
+    if (call.tool === 'contacts') {
+      agentApplyContacts(b, call.found, stats);
+      // Legacy replies bundle the next page with the values — fetch it now.
+      if (call.next) {
+        const u = agentAbsUrl(call.next.url, b.website);
+        if (u && !seen.has(u) && agentMayFetch(u, b)) await fetchInto(u);
+      }
+      continue;
+    }
 
-    // 4) Queue proposed URLs (same-site only, cap 2 per hop).
-    const urls = Array.isArray(j.urls)
-      ? (j.urls as unknown[]).map(u => agentAbsUrl(u, b.website)).filter((u): u is string => !!u && !seen.has(u) && sameSite(u, b.website)).slice(0, 2)
-      : [];
-    if (urls.length === 0) break;
-    modelUrls.push(...urls);
-    if (Date.now() >= deadline || opts?.signal?.aborted) break;
+    if (call.tool === 'search') {
+      if (searches >= MAX_SEARCHES) { evidence.push(`SEARCH "${call.query}": (search budget for this business used up)`); continue; }
+      searches++;
+      try {
+        const rs = await searchBing(encodeURIComponent(call.query));
+        const lines = rs.slice(0, 6).map((r, i) => {
+          const official = !b.website && r.url && isLikelyBusinessWebsite(r.url, b.name || '') ? ' (possible official site)' : '';
+          return `${i + 1}. ${String(r.title || '').slice(0, 90)} — ${r.url}${official}\n   ${String(r.snippet || '').slice(0, 160)}`;
+        });
+        evidence.push(lines.length > 0 ? `SEARCH "${call.query}":\n${lines.join('\n')}` : `SEARCH "${call.query}": no results`);
+      } catch {
+        evidence.push(`SEARCH "${call.query}": engine unavailable`);
+      }
+      continue;
+    }
+
+    // fetch_page — validate through the URL + navigation policy first.
+    const u = agentAbsUrl(call.url, b.website);
+    if (!u) { evidence.push('Last fetch_page URL was invalid — use an absolute http(s) URL.'); continue; }
+    if (!agentMayFetch(u, b)) {
+      evidence.push(`URL ${u} rejected: stay on the business's own site or a known listing/social host.`);
+      continue;
+    }
+    await fetchInto(u);
   }
 
-  stats.tried++;
   const gained = contactFieldCountOf(b) - before;
   if (gained > 0) stats.businessesImproved++;
-  void fetched;
   return gained;
 }
 
@@ -11159,7 +11295,100 @@ function contactFieldCountOf(b: Business): number {
   return (b.phone ? 1 : 0) + (b.email ? 1 : 0) + (b.whatsapp ? 1 : 0) + (b.viber ? 1 : 0) + (b.telegram ? 1 : 0) + (b.facebook ? 1 : 0) + (b.instagram ? 1 : 0);
 }
 
+// ── v6.9.146: LOCAL mode — the same agent without a model ───────
+// No key, no problem: a heuristic brain drives the same browse+parse
+// tools. Page choices come from the Octoparse-style link scorer
+// (scoreContactLinks) plus classic slug fallbacks when a site's nav is
+// too thin to score — then ONE depth-2 branch/team follow-up.
+// Returns up to 4 same-site contact/about/branch URLs.
+export function localAgentContactPages(html: string, base: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (u?: string | null) => {
+    if (!u) return;
+    let k = u;
+    try { const x = new URL(u); k = x.origin + (x.pathname.replace(/\/+$/, '') || '/'); } catch { /* keep raw */ }
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(u);
+  };
+  if (html) for (const u of scoreContactLinks(html, base)) push(u);
+  if (out.length === 0) {
+    // Scoring found nothing (thin/one-page nav) — guess the classic paths.
+    try {
+      const origin = new URL(base).origin;
+      for (const p of ['/contact', '/contact-us', '/contacts', '/about']) push(origin + p);
+    } catch { /* malformed base — nothing to guess from */ }
+  }
+  return out.slice(0, 4);
+}
+
+async function runLocalAgent(
+  need: Business[],
+  cfg: AiAgentConfig,
+  stats: AiAgentStats,
+  deadline: number,
+  opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void },
+): Promise<void> {
+  const city = () => getScanContext()?.cityEn || getScanContext()?.cityNative || '';
+  const fieldTotal = () => stats.fieldsAdded.phone + stats.fieldsAdded.email + stats.fieldsAdded.whatsapp + stats.fieldsAdded.viber + stats.fieldsAdded.telegram + stats.fieldsAdded.social;
+  const BATCH = 4;
+  for (let i = 0; i < need.length; i += BATCH) {
+    if (opts?.signal?.aborted || Date.now() >= deadline || stats.fetched >= cfg.budgetPages) break;
+    const batch = need.slice(i, i + BATCH);
+    await Promise.all(batch.map(async b => {
+      if (opts?.signal?.aborted || Date.now() >= deadline || stats.fetched >= cfg.budgetPages) return;
+      stats.tried++;
+      try {
+        // 1) No official site yet → its own search finds one (same
+        //    validator website-discovery uses — directories rejected).
+        if (!b.website && b.name) {
+          try {
+            const rs = await searchBing(encodeURIComponent(`"${b.name}" ${city()}`.trim()));
+            for (const r of rs.slice(0, 6)) {
+              if (r.url && isLikelyBusinessWebsite(r.url, b.name)) { b.website = r.url; break; }
+            }
+          } catch { /* engine down — this business waits for a later pass */ }
+          if (!b.website) return;
+        }
+        if (!b.website) return;
+        // 2) Homepage → strict extraction + link evidence.
+        const home = await agentFetch(b.website, opts);
+        stats.fetched++;
+        if (home.ok) applyExtractWithStats(home.html, b, b.website, stats);
+        if (b.phone && b.email) return;
+        // 3) Contact/about/branch pages, then ONE depth-2 follow-up.
+        const queue = localAgentContactPages(home.ok ? home.html : '', b.website);
+        const fetched = new Set<string>([b.website.replace(/\/+$/, '')]);
+        let depth2 = false;
+        while (queue.length > 0 && stats.fetched < cfg.budgetPages && Date.now() < deadline && !(b.phone && b.email)) {
+          if (opts?.signal?.aborted) return;
+          const u = queue.shift()!;
+          const k = u.replace(/\/+$/, '');
+          if (fetched.has(k)) continue;
+          fetched.add(k);
+          const pg = await agentFetch(u, opts);
+          stats.fetched++;
+          if (!pg.ok) continue;
+          applyExtractWithStats(pg.html, b, u, stats);
+          if (!depth2) {
+            depth2 = true;
+            for (const d of pickDeeperLinks(pg.html, u)) if (!fetched.has(d.replace(/\/+$/, ''))) queue.push(d);
+          }
+        }
+      } catch { /* per-business failures never break the batch */ }
+    }));
+    opts?.onProgress?.(`Local agent: ${stats.tried}/${need.length} sites · ${fieldTotal()} fields found`);
+    if (i + BATCH < need.length && !opts?.signal?.aborted && Date.now() < deadline) await wait(400);
+  }
+}
+
 // ── The lane: run after the regular enrichment lanes, budgeted ──
+// Two brains, one lane:
+//   • key configured (or a localhost endpoint) → AI tool loop,
+//   • otherwise → local browsing mode (no model, no key needed).
+// Both target every business still missing phone/email — with OR
+// without a website — and only ever fill EMPTY fields.
 export async function enrichWithAiAgent(
   biz: Map<string, Business[]>,
   opts?: { signal?: AbortSignal; onProgress?: (msg: string) => void },
@@ -11167,33 +11396,48 @@ export async function enrichWithAiAgent(
   const t0 = Date.now();
   const cfg = loadAiAgentConfig();
   const stats: AiAgentStats = {
+    mode: 'none',
     tried: 0, fetched: 0, aiCalls: 0, businessesImproved: 0,
     fieldsAdded: { phone: 0, email: 0, whatsapp: 0, viber: 0, telegram: 0, social: 0 },
     stopped: 'done', elapsedMs: 0,
   };
   _agentStats = stats;
-  if (!aiAgentReady()) { stats.stopped = 'not-configured'; stats.elapsedMs = Date.now() - t0; return stats; }
+  // The one off-switch: the Settings checkbox. No key simply means
+  // local mode — the lane does NOT silently skip any more.
+  if (!cfg.enabled) { stats.stopped = 'not-configured'; stats.elapsedMs = Date.now() - t0; return stats; }
+  stats.mode = aiAgentReady() ? 'ai' : 'local';
 
   const all: Business[] = [];
   biz.forEach(arr => { for (const b of arr) all.push(b); });
-  const need = all.filter(b => b.website && (!b.phone || !b.email || _EMAIL_PLATFORM_RE.test((b.email.split('@')[1] || ''))));
-  // Highest value first: businesses with a website but NO contacts at all.
+  // Website OR not: a siteless business now gets the agent too (search
+  // tool / local search arm discovers its official site first).
+  const need = all.filter(b => b.name && (!b.phone || !b.email || _EMAIL_PLATFORM_RE.test((b.email.split('@')[1] || ''))));
+  // Highest value first: businesses with the fewest contacts.
   need.sort((a, b) => (contactFieldCountOf(a) - contactFieldCountOf(b)) || ((b.name || '').length - (a.name || '').length));
   if (need.length === 0) { stats.stopped = 'no-need'; stats.elapsedMs = Date.now() - t0; return stats; }
 
   const deadline = t0 + cfg.budgetSeconds * 1000;
-  const BATCH = 4;
-  for (let i = 0; i < need.length; i += BATCH) {
-    if (opts?.signal?.aborted) { stats.stopped = 'done'; break; }
-    if (Date.now() >= deadline) { stats.stopped = 'budget-time'; break; }
-    if (stats.fetched >= cfg.budgetPages) { stats.stopped = 'budget-pages'; break; };
-    const batch = need.slice(i, i + BATCH);
-    await Promise.all(batch.map(async b => {
-      if (opts?.signal?.aborted || Date.now() >= deadline || stats.fetched >= cfg.budgetPages) return;
-      try { await agentEnrichOne(b, cfg, stats, deadline, opts); } catch { /* per-business failures never break the lane */ }
-    }));
-    opts?.onProgress?.(`AI agent: ${stats.tried}/${need.length} sites · ${stats.fieldsAdded.phone + stats.fieldsAdded.email + stats.fieldsAdded.whatsapp + stats.fieldsAdded.viber + stats.fieldsAdded.telegram + stats.fieldsAdded.social} fields found`);
-    await new Promise(r => setTimeout(r, 150));
+  const fieldTotal = () => stats.fieldsAdded.phone + stats.fieldsAdded.email + stats.fieldsAdded.whatsapp + stats.fieldsAdded.viber + stats.fieldsAdded.telegram + stats.fieldsAdded.social;
+
+  if (stats.mode === 'local') {
+    await runLocalAgent(need, cfg, stats, deadline, opts);
+    if (opts?.signal?.aborted) stats.stopped = 'done';
+    else if (stats.fetched >= cfg.budgetPages) stats.stopped = 'budget-pages';
+    else if (Date.now() >= deadline) stats.stopped = 'budget-time';
+  } else {
+    const BATCH = 4;
+    for (let i = 0; i < need.length; i += BATCH) {
+      if (opts?.signal?.aborted) { stats.stopped = 'done'; break; }
+      if (Date.now() >= deadline) { stats.stopped = 'budget-time'; break; }
+      if (stats.fetched >= cfg.budgetPages) { stats.stopped = 'budget-pages'; break; };
+      const batch = need.slice(i, i + BATCH);
+      await Promise.all(batch.map(async b => {
+        if (opts?.signal?.aborted || Date.now() >= deadline || stats.fetched >= cfg.budgetPages) return;
+        try { await agentEnrichOne(b, cfg, stats, deadline, opts); } catch { /* per-business failures never break the lane */ }
+      }));
+      opts?.onProgress?.(`AI agent: ${stats.tried}/${need.length} sites · ${fieldTotal()} fields found`);
+      await new Promise(r => setTimeout(r, 150));
+    }
   }
   stats.elapsedMs = Date.now() - t0;
   return stats;
@@ -11212,5 +11456,9 @@ __internals.aiAgent = {
   saveAiAgentConfig,
   resetAiAgentCache,
   getAiAgentStats,
+  // v6.9.146 — exported for unit tests and support probes:
+  parseAgentReply,
+  localAgentContactPages,
+  isLocalAgentEndpoint,
 };
 try { (window as unknown as { __internals?: unknown }).__internals = __internals; } catch { /* non-browser */ }
