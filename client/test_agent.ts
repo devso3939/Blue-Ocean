@@ -109,5 +109,29 @@ eq('openrouter → NOT local', isLocalAgentEndpoint('https://openrouter.ai/api/v
 eq('evil localhost-like host → NOT local', isLocalAgentEndpoint('https://localhost.evil.com/v1'), false);
 eq('garbage → NOT local', isLocalAgentEndpoint('not a url'), false);
 
+// ── v6.9.151: localAgentContactPages harvests mailto: hrefs ──────
+
+{
+  const html = '<html><body><a href="mailto:info@harvest.ge">mail</a><a href="/contact">c</a><a href="tel:+995322196669">call</a></body></html>';
+  const out = localAgentContactPages(html, 'https://harvest.ge/');
+  eq('mailto harvest: mailto present', out.some(u => u.startsWith('mailto:info@harvest.ge')), true);
+}
+{
+  // no mailto → no mailto entries
+  const out = localAgentContactPages('<a href="/about">a</a>', 'https://x.ge/');
+  eq('mailto harvest: none when absent', out.some(u => u.startsWith('mailto:')), false);
+}
+{
+  // deduped: two identical mailto hrefs → one entry
+  const html = '<a href="mailto:dup@dup.ge">1</a><a href="mailto:dup@dup.ge">2</a>';
+  const out = localAgentContactPages(html, 'https://dup.ge/');
+  eq('mailto harvest: deduped', out.filter(u => u === 'mailto:dup@dup.ge').length, 1);
+}
+{
+  // works even when the scorer finds no pages (thin nav)
+  const out = localAgentContactPages('<a href="mailto:solo@solo.ge">m</a>', 'https://solo.ge/');
+  eq('mailto harvest: thin-nav page still harvested', out.some(u => u.startsWith('mailto:solo@solo.ge')), true);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

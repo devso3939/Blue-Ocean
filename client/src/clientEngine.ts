@@ -10991,7 +10991,36 @@ async function agentChat(
       }),
       signal: anySignal(opts?.signal, AbortSignal.timeout(25_000)),
     });
-    if (!r.ok) return null;
+    if (!r.ok) {
+      // v6.9.151: transient failures (429 rate-limit, 5xx, dead gateway)
+      // get ONE retry after a short backoff — a single hiccup no longer
+      // kills the whole agent turn for a business.
+      if ([429, 500, 502, 503, 504].includes(r.status) && !opts?.signal?.aborted) {
+        await wait(700);
+        try {
+          const r2 = await fetch(c.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.apiKey}` },
+            body: JSON.stringify({
+              model: c.model,
+              messages: [
+                { role: 'system', content: system },
+                { role: 'user', content: user },
+              ],
+              max_tokens: opts?.maxTokens ?? 300,
+              temperature: 0.2,
+            }),
+            signal: anySignal(opts?.signal, AbortSignal.timeout(25_000)),
+          });
+          if (r2.ok) {
+            const d2 = await r2.json();
+            const t2 = d2?.choices?.[0]?.message?.content;
+            return typeof t2 === 'string' && t2.trim() ? t2.trim() : null;
+          }
+        } catch { /* fall through to null */ }
+      }
+      return null;
+    }
     const d = await r.json();
     const text = d?.choices?.[0]?.message?.content;
     return typeof text === 'string' && text.trim() ? text.trim() : null;
@@ -11446,6 +11475,14 @@ export function localAgentContactPages(html: string, base: string): string[] {
     out.push(u);
   };
   if (html) for (const u of scoreContactLinks(html, base)) push(u);
+  // v6.9.151: direct-contact links — mailto:/tel: hrefs are the site's own
+  // published contacts; expose them to the caller alongside pages.
+  if (html) {
+    for (const m of html.matchAll(/href=["'](?:mailto|tel):([^"']{4,80})["']/gi)) {
+      const v = m[1].trim();
+      if (v && v.includes('@')) push('mailto:' + v);
+    }
+  }
   if (out.length === 0) {
     // Scoring found nothing (thin/one-page nav) — guess the classic paths.
     try {
@@ -11496,6 +11533,15 @@ async function runLocalAgent(
         stats.fetched++;
         if (home.ok) applyExtractWithStats(home.html, b, b.website, stats);
         if (b.phone && b.email) return;
+        // v6.9.151: homepage tel:/mailto: hrefs — many one-page sites put
+        // every contact in the header/footer links; applying them costs
+        // zero fetches and can satisfy the business outright.
+        if (home.ok && (!b.email || !b.phone)) {
+          for (const m of home.html.matchAll(/href=["']mailto:([^"']{4,80})["']/gi)) {
+            const em = m[1].trim();
+            if (!b.email && em.includes('@') && plausibleEmail(em) && !_EMAIL_JUNK_RE.test(em)) { b.email = em; yieldBump('rnav'); }
+          }
+        }
         // 3) Contact/about/branch pages, then ONE depth-2 follow-up.
         const queue = localAgentContactPages(home.ok ? home.html : '', b.website);
         const fetched = new Set<string>([b.website.replace(/\/+$/, '')]);
@@ -11503,6 +11549,13 @@ async function runLocalAgent(
         while (queue.length > 0 && stats.fetched < cfg.budgetPages && Date.now() < deadline && !(b.phone && b.email)) {
           if (opts?.signal?.aborted) return;
           const u = queue.shift()!;
+          // v6.9.151: direct mailto entries from the harvested hrefs apply
+          // without a fetch — the site published the address itself.
+          if (u.startsWith('mailto:')) {
+            const em = u.slice(7).trim();
+            if (!b.email && em && em.includes('@') && plausibleEmail(em) && !_EMAIL_JUNK_RE.test(em)) { b.email = em; yieldBump('rnav'); }
+            continue;
+          }
           const k = u.replace(/\/+$/, '');
           if (fetched.has(k)) continue;
           fetched.add(k);
