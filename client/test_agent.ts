@@ -1,6 +1,6 @@
 // v6.9.146 unit tests: agent tool protocol + local-mode browsing + endpoint detection
 // Run: npm test (tsx test_v969.ts && tsx test_agent.ts)
-import { parseAgentReply, localAgentContactPages, isLocalAgentEndpoint } from './src/clientEngine.js';
+import { parseAgentReply, localAgentContactPages, isLocalAgentEndpoint, harvestSnippetEmails } from './src/clientEngine.js';
 
 // node shim for bare test run (tsconfig excludes test files)
 declare const process: { exit: (code: number) => void };
@@ -132,6 +132,48 @@ eq('garbage → NOT local', isLocalAgentEndpoint('not a url'), false);
   const out = localAgentContactPages('<a href="mailto:solo@solo.ge">m</a>', 'https://solo.ge/');
   eq('mailto harvest: thin-nav page still harvested', out.some(u => u.startsWith('mailto:solo@solo.ge')), true);
 }
+
+// ── v6.9.152: harvestSnippetEmails — find_email tool core ─────────
+
+{
+  const out = harvestSnippetEmails([
+    'Cafe Orient — contact us at info@orient.ge or call +995 322 19 66 69',
+    'Orient cafe Tbilisi · orient@mail.ru page',
+  ], 'orient.ge');
+  eq('snippet: own-domain first', out[0], 'info@orient.ge');
+  eq('snippet: platform host rejected', out.includes('orient@mail.ru'), false);
+}
+{
+  // junk + garbage TLD filtered
+  const out = harvestSnippetEmails([
+    'noreply@example.com posted sentry@wixpress.com thing@foo.primary',
+    'valid: office@acme.ge',
+  ]);
+  eq('snippet: junk/platform/TLD filtered', out, ['office@acme.ge']);
+}
+{
+  // deduped across snippets + entity-decoded (&#64;)
+  const out = harvestSnippetEmails([
+    'write to hi&#64;dup.ge today',
+    'also hi@dup.ge here',
+  ]);
+  eq('snippet: deduped + entity decoded', out, ['hi@dup.ge']);
+}
+{
+  // no domain argument — still returns all valid ones in order
+  const out = harvestSnippetEmails(['a@one.ge then b@two.ge']);
+  eq('snippet: no domain arg', out, ['a@one.ge', 'b@two.ge']);
+}
+eq('snippet: empty input → []', harvestSnippetEmails([]), []);
+
+// ── v6.9.152: parseAgentReply understands find_email ─────────────
+
+{
+  const call = parseAgentReply('{"tool":"find_email","query":"site:orient.ge email"}');
+  eq('find_email: parsed', call, { tool: 'find_email', query: 'site:orient.ge email' });
+}
+eq('find_email: query alias q works', parseAgentReply('{"tool":"find_email","q":"x@y"}')?.tool, 'find_email');
+eq('find_email: missing query → null', parseAgentReply('{"tool":"find_email"}'), null);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

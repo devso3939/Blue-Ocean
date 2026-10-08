@@ -9807,7 +9807,7 @@ const _EMAIL_JUNK_RE = /example\.com|noreply|no-reply|donotreply|wixpress|sentry
 // with in their JSON-LD/microdata boilerplate — info@schema.org leaked into
 // hundreds of rows from template contact pages (the Wix/WordPress default
 // Organization block). Also w3.org, ogp.me, and webmaster spamtrap hosts.
-const _EMAIL_PLATFORM_RE = /(?:^|[.-])(duckduckgo|bing|google|yahoo|microsoft|outlook|hotmail|gmail|icloud|proton|yandex|mail\.ru|zoho|fastmail|startpage|mojeek|brave|ecosia|qwant|search|cloudfront|akamai|amazonaws|azureedge|wix|shopify|squarespace|webflow|godaddy|namecheap|hostinger|siteground|bluehost|wordpress|schema|w3|ogp|whatwg|mozilla|wikipedia|wikimedia|webcache|translate)\.(com|co|io|net|org|me|ge|ru|de|fr)$/i;
+const _EMAIL_PLATFORM_RE = /(?:^|[.-])(duckduckgo|bing|google|yahoo|microsoft|outlook|hotmail|gmail|icloud|proton|yandex|mail|zoho|fastmail|startpage|mojeek|brave|ecosia|qwant|search|cloudfront|akamai|amazonaws|azureedge|wix|shopify|squarespace|webflow|godaddy|namecheap|hostinger|siteground|bluehost|wordpress|schema|w3|ogp|whatwg|mozilla|wikipedia|wikimedia|webcache|translate)\.(com|co|io|net|org|me|ge|ru|de|fr)$/i;
 
 // v6.9.127: TLD gate — the final domain label must be a REAL TLD. Scraped
 // page text yields fragments like "v-applic@ion.primary" (CSS class debris)
@@ -11045,6 +11045,7 @@ function agentJson(text: string): Record<string, unknown> | null {
 export type AgentToolCall =
   | { tool: 'fetch_page'; url: string }
   | { tool: 'search'; query: string }
+  | { tool: 'find_email'; query: string }
   | {
       tool: 'contacts';
       found: { phone?: string; email?: string; whatsapp?: string; viber?: string; telegram?: string; social?: string };
@@ -11057,6 +11058,39 @@ function agentStr(v: unknown): string | undefined {
   return typeof v === 'string' && v.trim() ? v.trim() : undefined;
 }
 
+/**
+ * v6.9.152: harvest email addresses from search-result snippets — the
+ * find_email tool's core. An email visible in a Bing snippet is real
+ * published text, so the same plausibility gates as page text apply:
+ * linkify-based extraction, junk/platform filters, registrable-domain
+ * preference. Pure + unit-tested.
+ * @param snippets raw snippet strings (titles included by the caller)
+ * @param domain   business website hostname (www. stripped) — own-domain
+ *                 addresses sort first; others still pass the filters
+ */
+export function harvestSnippetEmails(snippets: string[], domain?: string): string[] {
+  const scored: { e: string; own: boolean; i: number }[] = [];
+  const seen = new Set<string>();
+  const ownDomain = (domain || '').replace(/^www\./, '').toLowerCase();
+  for (const s of snippets) {
+    if (!s) continue;
+    const text = decodeContactEntities(s);
+    const found = findTextContacts(text, 6).emails;
+    for (const e of found) {
+      const em = e.trim().toLowerCase();
+      if (!em || seen.has(em)) continue;
+      if (_EMAIL_JUNK_RE.test(em) || _EMAIL_PLATFORM_RE.test(em.split('@')[1] || '')) continue;
+      // structural gate same as page-text harvesting
+      if (!plausibleEmail(em) || !_EMAIL_TLDS.has((em.split('@')[1] || '').split('.').pop() || '')) continue;
+      seen.add(em);
+      scored.push({ e: em, own: !!ownDomain && em.endsWith('@' + ownDomain), i: scored.length });
+    }
+  }
+  // own-domain first, then discovery order
+  scored.sort((a, b) => (a.own === b.own) ? a.i - b.i : (a.own ? -1 : 1));
+  return scored.map(x => x.e);
+}
+
 /** Parse one model reply into a tool call. Returns null on prose/garbage —
  *  the caller decides whether to retry or stop. Pure + unit-tested. */
 export function parseAgentReply(text: string): AgentToolCall | null {
@@ -11066,6 +11100,11 @@ export function parseAgentReply(text: string): AgentToolCall | null {
   if (action === 'search') {
     const q = agentStr(j.query) || agentStr(j.q);
     return q ? { tool: 'search', query: q } : null;
+  }
+  // v6.9.152: find_email — the snippet-harvest query tool
+  if (action === 'find_email') {
+    const q = agentStr(j.query) || agentStr(j.q);
+    return q ? { tool: 'find_email', query: q } : null;
   }
   if (action === 'fetch_page' || action === 'fetch' || action === 'open' || action === 'visit') {
     const url = agentStr(j.url) || agentStr(j.href);
@@ -11323,6 +11362,7 @@ const _AGENT_TOOL_SYS = [
   'Each turn you receive the evidence collected so far and reply with EXACTLY ONE JSON object choosing a tool — no markdown, no prose.',
   'TOOLS:',
   '{"tool":"search","query":"…"} — search the web (to find the official site or listing pages when the evidence is not enough).',
+  '{"tool":"find_email","query":"…"} — targeted email hunt, e.g. site:domain.ge OR "Business Name" email. Use when pages are blocked or emails are scarce; harvested addresses come back as evidence next turn.',
   '{"tool":"fetch_page","url":"https://…"} — open one page; its content comes back as evidence next turn.',
   '{"tool":"contacts","phone":"…","email":"…","whatsapp":"…","viber":"…","telegram":"…","social":"https://facebook.com/…"} — submit contact values you can READ in the evidence; omit fields you do not see. You may continue after submitting.',
   'RULES: extract values EXACTLY as written — never invent or reformat. Prefer contact/about/branch pages from the LINKS list over guessed paths. Prefer the official site over directories. Stop when phone and email are both known.',
@@ -11422,6 +11462,24 @@ async function agentEnrichOne(
       continue;
     }
 
+    // v6.9.152: find_email — Bing site:/name query, emails harvested from
+    // snippets and fed back as evidence; the model then submits them via
+    // the contacts tool (all validation gates still apply on apply).
+    if (call.tool === 'find_email') {
+      if (searches >= MAX_SEARCHES) { evidence.push(`FIND_EMAIL "${call.query}": (search budget for this business used up)`); continue; }
+      searches++;
+      try {
+        const rs = await searchBing(encodeURIComponent(call.query));
+        const snippets = rs.flatMap(r => [String(r.title || ''), String(r.snippet || '')]);
+        const emails = harvestSnippetEmails(snippets, b.website ? new URL(b.website).hostname : undefined);
+        evidence.push(emails.length > 0
+          ? `FIND_EMAIL "${call.query}": addresses found in snippets — ${emails.join(', ')}`
+          : `FIND_EMAIL "${call.query}": no email addresses visible in snippets`);
+      } catch {
+        evidence.push(`FIND_EMAIL "${call.query}": engine unavailable`);
+      }
+      continue;
+    }
     if (call.tool === 'search') {
       if (searches >= MAX_SEARCHES) { evidence.push(`SEARCH "${call.query}": (search budget for this business used up)`); continue; }
       searches++;
