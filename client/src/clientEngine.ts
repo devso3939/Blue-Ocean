@@ -11106,6 +11106,13 @@ export function parseAgentReply(text: string): AgentToolCall | null {
     const q = agentStr(j.query) || agentStr(j.q);
     return q ? { tool: 'find_email', query: q } : null;
   }
+  // v6.9.153: find_phone — targeted phone harvest from snippet text,
+  // same Bing-query path as find_email; harvested numbers come back as
+  // evidence and the model submits them via the contacts tool.
+  if (action === 'find_phone') {
+    const q = agentStr(j.query) || agentStr(j.q);
+    return q ? { tool: 'find_phone', query: q } : null;
+  }
   if (action === 'fetch_page' || action === 'fetch' || action === 'open' || action === 'visit') {
     const url = agentStr(j.url) || agentStr(j.href);
     return url ? { tool: 'fetch_page', url } : null;
@@ -11363,6 +11370,9 @@ const _AGENT_TOOL_SYS = [
   'TOOLS:',
   '{"tool":"search","query":"…"} — search the web (to find the official site or listing pages when the evidence is not enough).',
   '{"tool":"find_email","query":"…"} — targeted email hunt, e.g. site:domain.ge OR "Business Name" email. Use when pages are blocked or emails are scarce; harvested addresses come back as evidence next turn.',
+
+  {"tool":"find_phone","query":"..."} — targeted phone hunt via Bing, e.g. site:domain.ge OR "Business Name" phone. Use when pages are blocked or numbers are scarce; harvested numbers come back as evidence next turn.
+
   '{"tool":"fetch_page","url":"https://…"} — open one page; its content comes back as evidence next turn.',
   '{"tool":"contacts","phone":"…","email":"…","whatsapp":"…","viber":"…","telegram":"…","social":"https://facebook.com/…"} — submit contact values you can READ in the evidence; omit fields you do not see. You may continue after submitting.',
   'RULES: extract values EXACTLY as written — never invent or reformat. Prefer contact/about/branch pages from the LINKS list over guessed paths. Prefer the official site over directories. Stop when phone and email are both known.',
