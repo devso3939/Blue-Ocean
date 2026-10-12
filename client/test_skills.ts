@@ -139,5 +139,30 @@ eq('rank: empty list', rankOfficialEmails([]), { best: null, ranked: [] });
 }
 eq('rank-phone: empty list', rankOfficialPhones([]), { best: null, ranked: [] });
 
+// ── v6.9.154: findTextContacts de-obfuscation ([at]/[dot] forms) ─
+
+{
+  const tc = findTextContacts('Write to info[at]example.com or ring us');
+  eq('deobf: [at] form', tc.emails, ['info@example.com']);
+}
+{
+  const tc = findTextContacts('Mail info(at)acme.ge — the (dot) form');
+  eq('deobf: (at) form', tc.emails, ['info@acme.ge']);
+}
+{
+  const tc = findTextContacts('Reach us at sales [at] shop [dot] co.ge today');
+  eq('deobf: spaced [at] … [dot] form', tc.emails, ['sales@shop.co.ge']);
+}
+{
+  // bare "at" prose must NOT be rewritten (false-positive guard)
+  const tc = findTextContacts('Meet us at the market at noon');
+  eq('deobf: bare prose untouched', tc.emails, []);
+}
+{
+  // normal text keeps working through the same path
+  const tc = findTextContacts('Mail a@b.ge or visit www.b.ge');
+  eq('deobf: plain text unchanged', tc.emails, ['a@b.ge']);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

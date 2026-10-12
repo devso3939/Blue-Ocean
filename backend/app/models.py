@@ -200,3 +200,22 @@ class JobStatus(BaseModel):
     error: Optional[str] = None
     created_at: str = ""
     updated_at: str = ""
+
+
+# --- Crawl queue ----------------------------------------------------------
+class CrawlRequest(BaseModel):
+    """Server-side crawl of one business website (the render lane is the
+    browser backend). Depth modes — homepage | key_pages | deep."""
+    url: str = Field(..., max_length=2000, description="Absolute http(s) start URL")
+    mode: str = Field("key_pages", pattern="^(homepage|key_pages|deep)$")
+    country: Optional[str] = Field(None, min_length=2, max_length=2, description="ISO-3166-1 alpha-2 phone region hint (else derived from a ccTLD host)")
+    max_pages: Optional[int] = Field(None, ge=1, le=60, description="Lower the mode budget; never raises the server ceiling")
+    include_html: bool = Field(False, description="Echo per-page HTML in the result (debug only; big)")
+
+
+# --- PDF text extraction ---------------------------------------------------
+class PdfTextRequest(BaseModel):
+    """Extract text from a PDF supplied as a URL or base64 bytes."""
+    url: Optional[str] = Field(default=None, max_length=2000)
+    data_base64: Optional[str] = Field(default=None, max_length=12_000_000)
+    max_pages: int = Field(default=12, ge=1, le=50)

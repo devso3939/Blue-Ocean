@@ -1,6 +1,6 @@
 // v6.9.146 unit tests: agent tool protocol + local-mode browsing + endpoint detection
 // Run: npm test (tsx test_v969.ts && tsx test_agent.ts)
-import { parseAgentReply, localAgentContactPages, isLocalAgentEndpoint, harvestSnippetEmails } from './src/clientEngine.js';
+import { parseAgentReply, localAgentContactPages, isLocalAgentEndpoint, harvestSnippetEmails, harvestSnippetPhones, buildEmailDorkQueries, buildEmailQuery, setScanContext } from './src/clientEngine.js';
 
 // node shim for bare test run (tsconfig excludes test files)
 declare const process: { exit: (code: number) => void };
@@ -174,6 +174,153 @@ eq('snippet: empty input → []', harvestSnippetEmails([]), []);
 }
 eq('find_email: query alias q works', parseAgentReply('{"tool":"find_email","q":"x@y"}')?.tool, 'find_email');
 eq('find_email: missing query → null', parseAgentReply('{"tool":"find_email"}'), null);
+
+// ── v6.9.153: harvestSnippetPhones — harvest_phone tool core ─────
+
+{
+  const out = harvestSnippetPhones([
+    'Cafe Orient — call us: tel:+995322196669 or +995 322 19 66 69',
+    'Orient cafe Tbilisi · open 9-18, seats 120',
+  ], 'GE');
+  eq('phone snippet: tel: href harvested + normalized', out[0], '+995322196669');
+  eq('phone snippet: digit-run duplicate collapsed', out.length, 1);
+  eq('phone snippet: non-phones rejected', out.some(p => p.includes('120') || p.includes('18')), false);
+}
+{
+  // local-format number + scan region → E.164 through the same pipeline
+  const out = harvestSnippetPhones(['Tel: 0 322 19 66 69 today'], 'GE');
+  eq('phone snippet: region-aware E.164', out, ['+995322196669']);
+}
+{
+  // international format survives without region; garbage digits dropped
+  const out = harvestSnippetPhones(['ring +1-555-0100 now; ref 20241009']);
+  eq('phone snippet: intl survives w/o region', out, ['+15550100']);
+  eq('phone snippet: id-like digits dropped', out.includes('20241009'), false);
+}
+eq('phone snippet: empty input → []', harvestSnippetPhones([]), []);
+
+// ── v6.9.153: parseAgentReply understands harvest_phone ───────────
+
+{
+  const call = parseAgentReply('{"tool":"harvest_phone","query":"site:orient.ge phone"}');
+  eq('harvest_phone: parsed', call, { tool: 'harvest_phone', query: 'site:orient.ge phone' });
+}
+eq('harvest_phone: query alias q works', parseAgentReply('{"tool":"harvest_phone","q":"x"}')?.tool, 'harvest_phone');
+eq('harvest_phone: legacy find_phone alias → harvest_phone',
+  parseAgentReply('{"tool":"find_phone","query":"y"}'),
+  { tool: 'harvest_phone', query: 'y' });
+eq('harvest_phone: missing query → null', parseAgentReply('{"tool":"harvest_phone"}'), null);
+
+// ── v6.9.154: reply-parsing hardening (agentJson + agentStr) ──────
+// Local models emit: prose around the object, trailing commas, single
+// quotes, unquoted keys, and numeric digit-values. None may kill the turn.
+
+{
+  const call = parseAgentReply('Sure — use this: {"tool":"search","query":"x",}');
+  eq('json: prose before + trailing comma', call, { tool: 'search', query: 'x' });
+}
+{
+  const call = parseAgentReply('Use {this} then {"tool":"fetch_page","url":"https://x.ge/c"} done');
+  eq('json: prose braces ignored', call?.tool, 'fetch_page');
+}
+{
+  const call = parseAgentReply("{'tool':'search','query':'y'}");
+  eq('json: single quotes repaired', call, { tool: 'search', query: 'y' });
+}
+{
+  const call = parseAgentReply('{tool:"search",query:"z"}');
+  eq('json: unquoted keys repaired', call, { tool: 'search', query: 'z' });
+}
+eq('json: numeric phone value coerced',
+  parseAgentReply('{"tool":"contacts","phone":995322196669}')?.found?.phone,
+  '995322196669');
+eq('json: fenced + trailing prose with braces',
+  parseAgentReply('```json\n{"tool":"harvest_phone","query":"q"}\n``` (fields: {})')?.tool,
+  'harvest_phone');
+eq('json: garbage still null', parseAgentReply('{no quotes here at all}'), null);
+
+// ── v6.9.154: harvestSnippetPhones unicode + sentence hardening ──
+
+{
+  // en-dash separators (CMS typography) must not drop the number
+  const out = harvestSnippetPhones(['Call +995\u2013322\u201319\u201366\u201369 today'], 'GE');
+  eq('phone: en-dash separators normalized', out, ['+995322196669']);
+}
+{
+  // non-breaking spaces between groups (copied from PDF/Word pages)
+  const out = harvestSnippetPhones(['Tel:\u00a0+995\u00a0322\u00a019\u00a066\u00a069'], 'GE');
+  eq('phone: nbsp groups normalized', out, ['+995322196669']);
+}
+{
+  // sentence boundary: hours fragment must not merge with the real number
+  const out = harvestSnippetPhones(['Open 9-18. Call +995322196669'], 'GE');
+  eq('phone: sentence split prevents merge', out, ['+995322196669']);
+}
+
+// ── v6.9.156: buildEmailDorkQueries — "@domain" + per-department dorks ──
+
+{
+  const qs = buildEmailDorkQueries({ name: 'Shavi Coffee', website: 'https://www.cafe.ge/', address: '1 Tbilisi' } as never);
+  const d = qs.map(decodeURIComponent);
+  eq('dork: bounded to 3', qs.length <= 3, true);
+  eq('dork: @domain form first', d[0], '"@cafe.ge"');
+  eq('dork: site: + department form', d.some(x => x.startsWith('site:cafe.ge "info@"')), true);
+  eq('dork: per-department list', d.some(x => x.includes('"sales@"') && x.includes('"office@"')), true);
+  eq('dork: name fallback present', d.some(x => x.includes('Shavi Coffee')), true);
+  eq('dork: www stripped from host', d.some(x => x.includes('@www.')) || d.some(x => x.includes('site:www.')), false);
+  eq('dork: returned encoded', qs.some(x => x.includes('%22')), true);
+  eq('dork: no raw spaces', qs.every(x => !x.includes(' ')), true);
+}
+{
+  // no website yet → no host dork, but the name/department form still fires
+  const qs = buildEmailDorkQueries({ name: 'Shavi Coffee', website: '' } as never);
+  const d = qs.map(decodeURIComponent);
+  eq('dork: no host dork without website', d.some(x => x.startsWith('"@')), false);
+  eq('dork: name dork without website', d.some(x => x.includes('Shavi Coffee')), true);
+  eq('dork: no undefined leak', qs.every(x => !x.includes('undefined')), true);
+  eq('dork: no empty string queries', qs.every(x => x.length > 8), true);
+}
+{
+  // aggregator hosts are never dorked — the address belongs to the platform
+  const qs = buildEmailDorkQueries({ name: 'Some Cafe', website: 'https://facebook.com/somepage' } as never);
+  const d = qs.map(decodeURIComponent);
+  eq('dork: aggregator host skipped', d.some(x => x.includes('@facebook.com') || x.startsWith('site:facebook.com')), false);
+}
+{
+  // nameless business still yields the host dorks
+  const qs = buildEmailDorkQueries({ name: '', website: 'https://shop.acme.co.uk/' } as never);
+  const d = qs.map(decodeURIComponent);
+  eq('dork: host dork without name', d.includes('"@shop.acme.co.uk"'), true);
+  eq('dork: subdomain kept', d.some(x => x.startsWith('site:shop.acme.co.uk')), true);
+}
+{
+  // a digit-bearing address TAIL is a street, not a city — keeping it would
+  // AND the query down to nothing and burn one of the 3 dork slots
+  const qs = buildEmailDorkQueries({ name: 'Shavi Coffee', website: 'https://cafe.ge/', address: '12a Tbilisi' } as never);
+  const d = qs.map(decodeURIComponent);
+  eq('dork: street tail dropped', d.some(x => x.includes('Shavi Coffee') && x.includes('12a')), false);
+  eq('dork: street case still has name dork', d.some(x => x.includes('Shavi Coffee')), true);
+}
+{
+  // garbage website must not produce a malformed dork
+  const qs = buildEmailDorkQueries({ name: 'X', website: 'not a url' } as never);
+  const d = qs.map(decodeURIComponent);
+  eq('dork: bad website → no host dork', d.some(x => x.startsWith('"@') || x.startsWith('site:')), false);
+  eq('dork: bad website → no undefined', qs.every(x => !x.includes('undefined')), true);
+}
+
+// ── buildEmailQuery: the old single emailQ baseline (hoisted to module
+// scope in the harness round — guard that the export still yields a
+// sane encoded query, since `npm run replay` grades dorks against it) ──
+setScanContext({ countryCode: 'GE', countryName: 'Georgia', lang: 'ka', cityNative: 'თბილისი', cityEn: 'Tbilisi' } as never);
+{
+  const raw = buildEmailQuery({ name: 'Cafe Marco', website: 'https://cafemarco.ge/', address: '12a Rustaveli Ave, Tbilisi', categoryLabel: 'Cafe' } as never);
+  const dec = decodeURIComponent(raw);
+  eq('emailQ: encoded non-empty', raw.length > 0 && !raw.includes(' '), true);
+  eq('emailQ: business name quoted', dec.includes('"Cafe Marco"'), true);
+  eq('emailQ: no undefined leakage', dec.includes('undefined'), false);
+  eq('emailQ: native contact terms present', dec.includes('კონტაქტი') || dec.includes('contact'), true);
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

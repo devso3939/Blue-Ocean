@@ -16,6 +16,7 @@ import { parsePhoneNumberFromString, AsYouType } from 'libphonenumber-js';
 import { setScanContext, getScanContext, buildScanContext, categoryInNative, countryTld, contactTermsNative, type ScanContext } from './lang';
 // v6.9.147: contact-parsing skills (htmlparser2 / he / tldts / linkify-it)
 import { harvestAnchors, decodeContactEntities, sameRegDomain, findTextContacts, toE164, rankOfficialEmails, rankOfficialPhones } from './contactSkills';
+import { extractPdfText, looksLikePdfUrl, fetchPdfTextViaBackend } from './pdfSkills';
 import { readMicroformats, ogContactGate, sweepSameAs, domainMxProbe, parseVcardBlob, sharedRegistrableDomain } from './deepSkills';
 import { APP_VERSION } from './version';
 import { currentUserId } from './auth'; // v6.9.110: user-scoped prefs/archive
@@ -85,6 +86,91 @@ function collectJsonLdEntities(node: unknown, out: Record<string, unknown>[], de
 
 // --- v6.9.50: HOISTED out of queryBusinesses (were nested by an earlier scripted patch,
 // invisible to supplementProServices; no closure dependencies, safe to hoist) ---
+
+// ─── v6.9.157: robots.txt gate for the client crawl ─────────────────
+// The backend crawl queue honours robots.txt; the client's page-fetch lane
+// fetches business sites directly too, so it must gate the same way. Pure
+// helpers at module scope are unit-testable without network; the async gate
+// caches ONE robots.txt fetch per host per session (robots files change
+// slowly, and a per-session cached decision is the polite choice).
+
+/** Parse agent groups from a robots.txt body and return the rules for
+ *  `agent` (falling back to "*"), plus its crawl-delay. Null when the body
+ *  is empty/unparsable — then default-allow applies, as everywhere else. */
+export function parseRobotsForAgent(robotsTxt: string, agent = 'BlueOcean'): { paths: string[]; delay: number } | null {
+  if (!robotsTxt || !robotsTxt.trim()) return null;
+  const groups: { uas: string[]; paths: string[]; delay: number }[] = [];
+  let cur: { uas: string[]; paths: string[]; delay: number } | null = null;
+  for (const rawLine of robotsTxt.split(/\r?\n/)) {
+    const line = rawLine.replace(/#.*$/, '').trim();
+    if (!line) continue;
+    const m = /^([a-z-]+)\s*:\s*(.*)$/i.exec(line);
+    if (!m) continue;
+    const field = m[1].toLowerCase(), value = m[2].trim();
+    if (field === 'user-agent') {
+      if (cur && cur.paths.length > 0) cur = null;          // new gap → new group
+      if (!cur) { cur = { uas: [], paths: [], delay: 0 }; groups.push(cur); }
+      cur.uas.push(value.toLowerCase());
+    } else if (cur && field === 'disallow') {
+      if (value) cur.paths.push(value);
+    } else if (cur && field === 'crawl-delay') {
+      const d = parseFloat(value);
+      if (Number.isFinite(d) && d > 0) cur.delay = Math.min(d, 10);  // cap: a site asking 60s must not freeze the scan
+    }
+  }
+  if (groups.length === 0) return null;
+  const uaLower = agent.toLowerCase();
+  let best: { uas: string[]; paths: string[]; delay: number } | null = null;
+  for (const g of groups) { if (g.uas.includes('*')) best = g; }         // "*" fallback
+  for (const g of groups) {                                              // exact/partial UA match wins
+    if (g.uas.some(ua => uaLower.includes(ua) || ua.includes(uaLower))) best = g;
+  }
+  return best ? { paths: best.paths, delay: best.delay } : null;
+}
+
+/** True when `path` (pathname, leading '/') matches any disallow prefix.
+ *  An empty rules object or no paths never disallows. `"/"` disallows all. */
+export function robotsDisallows(rules: { paths: string[] } | null, path: string): boolean {
+  if (!rules || rules.paths.length === 0) return false;
+  const p = path || '/';
+  return rules.paths.some(d => d === '/' || p === d || p.startsWith(d));
+}
+
+interface _RobotsEntry { rules: { paths: string[]; delay: number } | null; delayMs: number }
+const _robotsCache = new Map<string, _RobotsEntry>();
+let _lastRobotsDelayUntil = 0;
+
+/** Async gate: fetch + cache robots.txt for `url`'s host (ONE fetch per host
+ *  per session), enforce disallow prefixes and honour crawl-delay (capped at
+ *  10s). Never throws; network failure on the robots probe itself means
+ *  default-allow — the same behaviour as an absent robots file. */
+async function robotsGate(url: string): Promise<boolean> {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, '');
+    if (!host) return true;
+    let entry = _robotsCache.get(host);
+    if (!entry) {
+      entry = { rules: null, delayMs: 0 };
+      try {
+        const r = await corsFetch(u.origin + '/robots.txt', { signal: AbortSignal.timeout(3000) });
+        if (r.ok) {
+          const txt = await r.text().catch(() => '');
+          const parsed = txt ? parseRobotsForAgent(txt, 'BlueOcean') : null;
+          if (parsed) entry = { rules: parsed, delayMs: parsed.delay * 1000 };
+        }
+      } catch { /* default-allow */ }
+      _robotsCache.set(host, entry);
+    }
+    if (robotsDisallows(entry.rules, u.pathname)) return false;
+    if (entry.delayMs > 0) {
+      const wait = _lastRobotsDelayUntil - Date.now();
+      if (wait > 0) await new Promise(res => setTimeout(res, wait));
+      _lastRobotsDelayUntil = Date.now() + entry.delayMs;
+    }
+    return true;
+  } catch { return true; }
+}
 
 // ─── v6.9.66: Octoparse-style contact-page discovery via link scoring ────
 // Octoparse's crawl model ("max link depth", "max pages per URL",
@@ -177,6 +263,109 @@ export function pickDeeperLinks(html: string, baseUrl: string): string[] {
   } catch { return []; }
 }
 
+// ─── v6.9.155: PDF contact extraction ────────────────────────────────
+// Menus, brochures, price lists and company profiles are PDFs. Until now
+// `.pdf` sat in every skip list, so the crawler found the link and dropped
+// it. These helpers fetch the bytes, extract the text (pdf.js) and reuse the
+// engine's own text validators — no new parsing trust boundary.
+const _PDF_SMELL = /contact|kontakt|контакт|kavshiri|iletisim|contacto|contatt|about|team|info|impressum|menu|brochure|price|pricing|catalog|catalogue|portfolio|flyer|profil|presentation|company|services/i;
+
+/** Internal, contact-smelling PDF URLs on a page, best-first, capped. */
+export function pickPdfLinks(html: string, baseUrl: string, cap = 2): string[] {
+  const out: string[] = [];
+  if (!html) return out;
+  try {
+    const base = new URL(baseUrl);
+    const host = base.hostname.replace(/^www\./, '');
+    const seen = new Set<string>();
+    for (const a of harvestAnchors(html, baseUrl)) {
+      const href = a.href;
+      if (!looksLikePdfUrl(href)) continue;
+      let u: URL;
+      try { u = new URL(href, baseUrl); } catch { continue; }
+      if (u.protocol !== 'https:' && u.protocol !== 'http:') continue;
+      const uhost = u.hostname.replace(/^www\./, '');
+      if (uhost !== host && !uhost.endsWith('.' + host)) continue; // internal only
+      const key = u.origin + u.pathname;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const hay = (a.text + ' ' + u.pathname).slice(0, 300);
+      if (!_PDF_SMELL.test(hay)) continue;
+      out.push(u.toString());
+      if (out.length >= cap) break;
+    }
+  } catch { /* malformed markup — return what we have */ }
+  return out;
+}
+
+function extractFromText(text: string, b: Business): boolean {
+  let touched = false;
+  // v6.9.147: decode named/encoded entities first — `info&commat;ex.com`
+  // and `&#64;` hide addresses the regex below can never see.
+  text = decodeContactEntities(text);
+  if (!b.phone) {
+    // v6.9.154: iterate ALL matches — the old first-match-only version let
+    // a leading date/ID fragment ("2026-06-11 …") block the real number
+    // sitting later in the same text. Each candidate still faces the same
+    // digit-count + plausiblePhone gates; first survivor wins.
+    for (const m of text.matchAll(/\+?\d[\d\s\-\.\(\)]{7,18}/g)) {
+      const digits = m[0].replace(/\D/g, '');
+      if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(m[0])) { b.phone = m[0].trim(); touched = true; break; }
+    }
+  }
+  if (!b.email) {
+    // v6.9.154: same — first plausible address, not the first-shaped one.
+    for (const m of text.matchAll(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g)) {
+      if (plausibleEmail(m[0])) { b.email = m[0]; touched = true; break; }
+    }
+  }
+  // v6.9.147: linkify fallback — fuzzy emails with odd TLDs the fixed
+  // regex misses; same plausibleEmail gate before anything is written.
+  if (!b.email) {
+    for (const e of findTextContacts(text, 8).emails) {
+      const clean = e.replace(/[\s>);,]+$/, '');
+      if (clean.length > 5 && clean.length < 90 && plausibleEmail(clean)) { b.email = clean; touched = true; break; }
+    }
+  }
+  if (!b.facebook) {
+    const m = text.match(/facebook\.com\/([a-zA-Z0-9._]+)/);
+    if (m && !m[0].includes('login') && !m[0].includes('sharer')) { b.facebook = 'https://facebook.com/' + m[1]; touched = true; }
+  }
+  if (!b.instagram) {
+    const m = text.match(/instagram\.com\/([a-zA-Z0-9._]+)/);
+    if (m && !m[0].includes('accounts')) { b.instagram = 'https://instagram.com/' + m[1]; touched = true; }
+  }
+  // Extract rating (e.g. "4.5 stars" or "4.5/5" or "Rating: 4.5")
+  if (!b.rating) {
+    const ratingM = text.match(/(?:rating|stars|rated?)\s*[:=]?\s*(\d\.\d)\s*(?:\/\s*5)?/i)
+      || text.match(/(\d\.\d)\s*(?:stars?|\/\s*5|out\s*of\s*5)/i);
+    if (ratingM) {
+      const val = parseFloat(ratingM[1]);
+      if (val >= 1 && val <= 5) b.rating = val;
+    }
+  }
+  // Extract review count (e.g. "1,234 reviews" or "(1234)")
+  if (!b.reviewCount) {
+    const revM = text.match(/(\d[\d,]*)\s*(?:reviews?|ratings?)/i)
+      || text.match(/\((\d[\d,]*)\)/);
+    if (revM) {
+      const val = parseInt(revM[1].replace(/,/g, ''));
+      if (val > 0 && val < 100000) b.reviewCount = val;
+    }
+  }
+  // YouTube — dedicated social field, NEVER b.website
+  if (!b.youtube) {
+    const m = text.match(/youtube\.com\/(?:channel\/([a-zA-Z0-9_-]+)|@([a-zA-Z0-9._-]+))/i);
+    if (m) b.youtube = m[1] ? 'https://youtube.com/channel/' + m[1] : 'https://youtube.com/@' + m[2];
+  }
+  // LinkedIn — dedicated social field, NEVER b.website
+  if (!b.linkedin) {
+    const m = text.match(/linkedin\.com\/(?:company|school)\/([a-zA-Z0-9._-]+)/i);
+    if (m) { b.linkedin = 'https://linkedin.com/company/' + m[1]; touched = true; }
+  }
+  return touched;
+}
+
 async function enrichFromWebsiteDeep(b: Business): Promise<void> {
   if (!b.website) return;
   const EXCLUDE = /example\.com|wixpress|sentry\.io|webpack|googleapis|google\.com|gstatic|cloudflare|facebook\.com|instagram\.com|twitter\.com|schema\.org|w3\.org|duckduckgo\.com|bing\.com/i;
@@ -186,6 +375,41 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
   let homeHtml = '';
   let lastPageOk = ''; // v6.9.67: URL whose HTML homeHtml currently holds
   const crawled = new Set<string>();
+  const pdfCandidates = new Set<string>(); // v6.9.155: contact-smelling PDFs seen
+
+  // v6.9.155: binary needs a byte-preserving arm — the text CORS proxies
+  // (cors.sh / jina) mangle PDF streams. Direct where CORS allows, allorigins
+  // `/raw` otherwise. 4 MB is far above any menu/profile PDF we care about.
+  const _PDF_BYTE_CAP = 4_000_000;
+  async function fetchPdfBytes(url: string): Promise<ArrayBuffer | null> {
+    const ua = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36' };
+    const arms: Array<() => Promise<Response>> = [
+      () => fetch(url, { headers: ua }),
+      () => fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent(url), { headers: ua }),
+    ];
+    for (const arm of arms) {
+      try {
+        const r = await arm();
+        if (!r.ok) continue;
+        const ab = await bodyWithCap(r.arrayBuffer(), 8000);
+        if (ab && ab.byteLength > 200 && ab.byteLength <= _PDF_BYTE_CAP) return ab;
+      } catch { /* next arm */ }
+    }
+    return null;
+  }
+
+  /** Fetch a PDF, extract its text and run the standard text validators.
+   *  Browser first (pdf.js); when CORS blocks the bytes, the backend lane
+   *  (POST /api/pdf/text) fetches + extracts it. Both paths feed the SAME
+   *  validators below. */
+  async function scrapePdf(url: string): Promise<boolean> {
+    const bytes = await fetchPdfBytes(url);
+    let text = bytes ? await extractPdfText(bytes, { maxPages: 8, maxChars: 40000 }) : '';
+    if (!text) text = await fetchPdfTextViaBackend(url);
+    if (!text) return false;
+    return extractFromText(text, b);
+  }
+
   const normUrl = (u: string) => (u.replace(/\/+$/, '') || '/');
 
   async function deepScrape(url: string): Promise<boolean> {
@@ -193,6 +417,10 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
     const snapDS = () => [b.email, b.phone, b.facebook, b.instagram, b.website].join('|');
     const beforeDS = snapDS();
     try {
+      // v6.9.157: robots.txt gate BEFORE any crawl fetch — same rule the
+      // backend queue enforces. Blocked → return false (the loops treat it
+      // like any other fetch miss).
+      if (!(await robotsGate(url))) return false;
       // v6.9.5: route through corsFetch directly — its host-keyed direct
       // fetch already covers CORS-open hosts, and business websites reject
       // CORS far more often than they allow it, so direct-first just paid
@@ -211,6 +439,10 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
       const full = html.substring(0, 80000);
       homeHtml = full;
       lastPageOk = url;
+      // v6.9.155: harvest contact-smelling PDF links (menus/brochures/price
+      // lists) from EVERY page we fetch, not just the homepage — PDFs are
+      // usually linked from the footer nav or a contact page.
+      for (const pu of pickPdfLinks(full, url, 3)) pdfCandidates.add(pu);
 
       // 1. JSON-LD structured data extraction (schema.org/LocalBusiness)
       if (!b.phone || !b.email || !b.website) {
@@ -561,6 +793,23 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
     }
   }
 
+  // v6.9.155: PDF contact extraction — menus, brochures, price lists and
+  // company profiles are PDFs, and every `.pdf` link used to be dropped.
+  // Extract their text and run it through the SAME validators as the HTML
+  // path; a headless render (via the byte fallback) is not needed here.
+  if (pdfCandidates.size > 0 && (!b.email || !b.phone)) {
+    let pdfBudget = 2; // v6.9.155: bounded like every other crawl lane
+    for (const pu of pdfCandidates) {
+      if (pdfBudget <= 0 || (b.email && b.phone)) break;
+      if (hostIsOpen(pu)) continue; // host went network-dead — skip its PDFs
+      // v6.9.157: robots gate before fetching a PDF asset too.
+      if (!(await robotsGate(pu))) continue;
+      pdfBudget--;
+      yieldTry('pdf');
+      if (await scrapePdf(pu)) yieldBump('pdf');
+    }
+  }
+
   // Scrape contact/about pages if still missing data
   if (!b.email || !b.phone || !b.facebook || !b.instagram) {
     const base = b.website.replace(/\/$/, '');
@@ -575,6 +824,9 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
       if (crawled.has(normUrl(base + path))) continue; // v6.9.66: already fetched via discovery
       // Host went network-dead mid-loop: bail out (circuit breaker)
       if (hostIsOpen(base)) break;
+      // v6.9.157: robots gate — blocked path counts as a miss (deadPaths++)
+      // so a fully-gated site stops the probe loop instead of spraying it.
+      if (!(await robotsGate(base + path))) { deadPaths++; if (deadPaths >= 6) break; continue; }
       const touched = await deepScrape(base + path);
       // A site that answers 6 straight probes with nothing (dead host,
       // 404 SPA fallback, or hard-CORS) won't answer the remaining 18
@@ -3890,7 +4142,44 @@ async function cachedLane<T>(
 // result serves them for free; only non-empty results are cached (a challenge
 // page is not a cacheable answer).
 // v6.9.108: get/put through the shared cachedLane helper.
-function searchBing(query: string): Promise<{title: string; url: string; snippet: string}[]> {
+// v6.9.156: email DORK queries — the OSINT forms the normal contact path
+// never asks for. `"@domain"` is the classic theHarvester/Hunter dork: when
+// an engine matches it literally, the ADDRESS ITSELF appears in the snippet
+// — and snippets are exactly what harvestSnippetEmails reads. That finds
+// inboxes living on directories, staff listings and footer boilerplate the
+// site crawl never reaches. The per-department forms (site:domain "info@"
+// OR "contact@" …) target the inbox a contact page deliberately hides.
+// Bounded to 3/business and returned ENCODED to match buildEmailQuery's
+// contract, so callers can concatenate the two lists.
+export function buildEmailDorkQueries(b: Business): string[] {
+  const DEPT = '"info@" OR "contact@" OR "office@" OR "sales@"';
+  const out: string[] = [];
+  let host = '';
+  try { host = b.website ? new URL(b.website).hostname.replace(/^www\./, '').toLowerCase() : ''; } catch { host = ''; }
+  // Only dork our OWN host — an aggregator's address belongs to the platform
+  // (same guard the deep-crawl domain harvest already used).
+  const isOwnHost = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(host)
+    && !/facebook|instagram|linktr|wixsite|business\.site|carrd|squarespace|webflow|linktree/i.test(host);
+  if (isOwnHost) {
+    out.push(encodeURIComponent(`"@${host}"`));
+    out.push(encodeURIComponent(`site:${host} ${DEPT}`));
+  }
+  const name = (b.name || '').replace(/"/g, '').trim();
+  if (name) {
+    // City term only when it is a real place name — the address TAIL can be
+    // a street ("12a Tbilisi"), and a digit-bearing street term ANDs the
+    // query down to nothing, burning one of the 3 dork slots for free.
+    let city = getScanContext()?.cityNative || '';
+    if (!city && b.address) {
+      const cand = getEnglishCityName((b.address.split(',').pop() || '').trim());
+      if (cand && cand.length <= 40 && !/\d/.test(cand)) city = cand;
+    }
+    out.push(encodeURIComponent(`"${name}" ${city} ${DEPT}`.replace(/\s+/g, ' ').trim()));
+  }
+  return out.filter(q => q.length > 8).slice(0, 3);
+}
+
+export function searchBing(query: string): Promise<{title: string; url: string; snippet: string}[]> {
   return cachedLane('bing', query, () => searchBingRaw(query));
 }
 
@@ -3940,6 +4229,76 @@ async function searchBingRaw(query: string): Promise<{title: string; url: string
   // v6.9.64: browser arm blocked/failed → server-side Bing (no CORS, no
   // browser IP). Same parser, independent lane.
   return await searchBingViaServer(query);
+}
+
+// Build targeted email-only query — the OLD single-query email lane (Phase 3).
+// v6.9.157: HOISTED out of queryBusinesses (same pattern as v6.9.50: no
+// closure dependencies, safe to hoist) and exported so the offline SERP
+// replay harness can compare its real output against buildEmailDorkQueries.
+export function buildEmailQuery(b: Business): string {
+  const cityQ = getScanContext()?.cityNative || '';
+  const nameEn = getEnglishCityName(b.name);
+  const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
+  const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
+  const streetEn = getEnglishCityName(street);
+  const category = b.categoryLabel || '';
+  const isLatin = /^[a-zA-Z\u00c0-\u024f\u1e00-\u1eff\s\-'&.0-9]+$/.test(b.name);
+  const parts: string[] = [];
+  if (isLatin) {
+    parts.push(`"${b.name}"`);
+  } else {
+    if (streetEn && streetEn !== street) parts.push(`"${streetEn}"`);
+    if (category) parts.push(category);
+    if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
+  }
+  if (cityQ) parts.push(cityQ); else if (cityEn) parts.push(cityEn);
+  // v6.9.16: native email-contact terms
+  parts.push(contactTermsNative());
+  return encodeURIComponent(parts.join(' '));
+}
+
+// v6.9.81: DDG **html** endpoint as the retry-ladder second engine. Measured
+// on a 536-business Cafes run the pass-1 html-DDG arm yielded 9 fields in 40
+// calls (129s) — the best efficiency of ANY engine (Bing 1/16s) — while
+// lite.duckduckgo (searchDDGLite) sat health-gated dead the whole pass. The
+// ladder's 'ddg' slot now uses this parser instead.
+// v6.9.106: shared cross-scan cache for the DDG-HTML lane (3-day TTL).
+// v6.9.108: get/put through the shared cachedLane helper.
+// v6.9.157: HOISTED out of queryBusinesses + exported (was illegally nested
+// when the SERP replay harness tried to import it — TS1184).
+export function searchDDGHtml(query: string): Promise<{ title: string; url: string; snippet: string }[]> {
+  return cachedLane('ddg', query, () => searchDDGHtmlRaw(query));
+}
+
+async function searchDDGHtmlRaw(query: string): Promise<{ title: string; url: string; snippet: string }[]> {
+  if (!engineAvailable('ddg')) return [];
+  try {
+    const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + query, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!r.ok) { engineNoteFail('ddg', 'DuckDuckGo', classifyEngineError(r.status), `HTTP ${r.status}`); return []; }
+    const html = await r.text();
+    if (!html || html.length < 200) { engineNoteFail('ddg', 'DuckDuckGo', 'net', 'empty response (blocked)'); return []; }
+    if (/anomaly|challenge|captcha|blocked/i.test(html)) { engineNoteFail('ddg', 'DuckDuckGo', 'challenge', 'challenge page'); return []; }
+    const out: { title: string; url: string; snippet: string }[] = [];
+    // Result anchors: href="//duckduckgo.com/l/?uddg=<enc>&rut=…" or direct https
+    for (const m of html.matchAll(/<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)) {
+      let u = m[1];
+      const dec = u.match(/[?&]uddg=([^&]+)/);
+      if (dec) { try { u = decodeURIComponent(dec[1]); } catch { continue; } }
+      if (u.startsWith('//')) u = 'https:' + u;
+      if (!/^https?:\/\//i.test(u) || /duckduckgo\.com/i.test(u)) continue;
+      out.push({ url: u, title: m[2].replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').trim(), snippet: '' });
+    }
+    const snips = [...html.matchAll(/<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi)].map(m2 => m2[1].replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').trim());
+    for (let i = 0; i < Math.min(out.length, snips.length); i++) out[i].snippet = snips[i];
+    if (out.length > 0) engineNoteSuccess('ddg', 'DuckDuckGo');
+    return out.slice(0, 8);
+  } catch (e: any) {
+    if (e?.message !== 'Cancelled') engineNoteFail('ddg', 'DuckDuckGo', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : e?.message || 'network error').slice(0, 60));
+    return [];
+  }
 }
 
 
@@ -4680,71 +5039,6 @@ async function tryCommonEmailPatterns(b: Business): Promise<void> {
 }
 
 // ── Extract from plain text (e.g. Brave search descriptions) ──
-function extractFromText(text: string, b: Business): boolean {
-  let touched = false;
-  // v6.9.147: decode named/encoded entities first — `info&commat;ex.com`
-  // and `&#64;` hide addresses the regex below can never see.
-  text = decodeContactEntities(text);
-  if (!b.phone) {
-    const m = text.match(/\+?\d[\d\s\-\.\(\)]{7,18}/);
-    // Digit-count + plausibility guard: snippet fragments like "2026) -" or
-    // dates ("2026-06-11") match the char class but aren't phone numbers.
-    if (m) {
-      const digits = m[0].replace(/\D/g, '');
-      if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(m[0])) { b.phone = m[0].trim(); touched = true; }
-    }
-  }
-  if (!b.email) {
-    const m = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-    if (m && plausibleEmail(m[0])) { b.email = m[0]; touched = true; }
-  }
-  // v6.9.147: linkify fallback — fuzzy emails with odd TLDs the fixed
-  // regex misses; same plausibleEmail gate before anything is written.
-  if (!b.email) {
-    for (const e of findTextContacts(text, 8).emails) {
-      const clean = e.replace(/[\s>);,]+$/, '');
-      if (clean.length > 5 && clean.length < 90 && plausibleEmail(clean)) { b.email = clean; touched = true; break; }
-    }
-  }
-  if (!b.facebook) {
-    const m = text.match(/facebook\.com\/([a-zA-Z0-9._]+)/);
-    if (m && !m[0].includes('login') && !m[0].includes('sharer')) { b.facebook = 'https://facebook.com/' + m[1]; touched = true; }
-  }
-  if (!b.instagram) {
-    const m = text.match(/instagram\.com\/([a-zA-Z0-9._]+)/);
-    if (m && !m[0].includes('accounts')) { b.instagram = 'https://instagram.com/' + m[1]; touched = true; }
-  }
-  // Extract rating (e.g. "4.5 stars" or "4.5/5" or "Rating: 4.5")
-  if (!b.rating) {
-    const ratingM = text.match(/(?:rating|stars|rated?)\s*[:=]?\s*(\d\.\d)\s*(?:\/\s*5)?/i)
-      || text.match(/(\d\.\d)\s*(?:stars?|\/\s*5|out\s*of\s*5)/i);
-    if (ratingM) {
-      const val = parseFloat(ratingM[1]);
-      if (val >= 1 && val <= 5) b.rating = val;
-    }
-  }
-  // Extract review count (e.g. "1,234 reviews" or "(1234)")
-  if (!b.reviewCount) {
-    const revM = text.match(/(\d[\d,]*)\s*(?:reviews?|ratings?)/i)
-      || text.match(/\((\d[\d,]*)\)/);
-    if (revM) {
-      const val = parseInt(revM[1].replace(/,/g, ''));
-      if (val > 0 && val < 100000) b.reviewCount = val;
-    }
-  }
-  // YouTube — dedicated social field, NEVER b.website
-  if (!b.youtube) {
-    const m = text.match(/youtube\.com\/(?:channel\/([a-zA-Z0-9_-]+)|@([a-zA-Z0-9._-]+))/i);
-    if (m) b.youtube = m[1] ? 'https://youtube.com/channel/' + m[1] : 'https://youtube.com/@' + m[2];
-  }
-  // LinkedIn — dedicated social field, NEVER b.website
-  if (!b.linkedin) {
-    const m = text.match(/linkedin\.com\/(?:company|school)\/([a-zA-Z0-9._-]+)/i);
-    if (m) { b.linkedin = 'https://linkedin.com/company/' + m[1]; touched = true; }
-  }
-  return touched;
-}
-
 // ─── Brave Search Enrichment ───────────────────────────────────
 // ─── v6.9.108: shared cross-scan cache wrapper for the search lanes ────
 // One helper for the v6.9.106 lane-cache protocol (get → miss → live fetch →
@@ -4810,48 +5104,6 @@ async function searchDDGLiteRaw(query: string): Promise<{title: string; url: str
     // v6.9.4: count thrown errors so the gate trips after 3 consecutive
     // failures instead of silently re-firing for every business.
     if (e?.message !== 'Cancelled') engineNoteFail('ddglite', 'DDG Lite', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : e?.message || 'network error').slice(0, 60));
-    return [];
-  }
-}
-
-// v6.9.81: DDG **html** endpoint as the retry-ladder second engine. Measured
-// on a 536-business Cafes run the pass-1 html-DDG arm yielded 9 fields in 40
-// calls (129s) — the best efficiency of ANY engine (Bing 1/16s) — while
-// lite.duckduckgo (searchDDGLite) sat health-gated dead the whole pass. The
-// ladder's 'ddg' slot now uses this parser instead.
-// v6.9.106: shared cross-scan cache for the DDG-HTML lane (3-day TTL).
-// v6.9.108: get/put through the shared cachedLane helper.
-function searchDDGHtml(query: string): Promise<{ title: string; url: string; snippet: string }[]> {
-  return cachedLane('ddg', query, () => searchDDGHtmlRaw(query));
-}
-
-async function searchDDGHtmlRaw(query: string): Promise<{ title: string; url: string; snippet: string }[]> {
-  if (!engineAvailable('ddg')) return [];
-  try {
-    const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + query, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!r.ok) { engineNoteFail('ddg', 'DuckDuckGo', classifyEngineError(r.status), `HTTP ${r.status}`); return []; }
-    const html = await r.text();
-    if (!html || html.length < 200) { engineNoteFail('ddg', 'DuckDuckGo', 'net', 'empty response (blocked)'); return []; }
-    if (/anomaly|challenge|captcha|blocked/i.test(html)) { engineNoteFail('ddg', 'DuckDuckGo', 'challenge', 'challenge page'); return []; }
-    const out: { title: string; url: string; snippet: string }[] = [];
-    // Result anchors: href="//duckduckgo.com/l/?uddg=<enc>&rut=…" or direct https
-    for (const m of html.matchAll(/<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)) {
-      let u = m[1];
-      const dec = u.match(/[?&]uddg=([^&]+)/);
-      if (dec) { try { u = decodeURIComponent(dec[1]); } catch { continue; } }
-      if (u.startsWith('//')) u = 'https:' + u;
-      if (!/^https?:\/\//i.test(u) || /duckduckgo\.com/i.test(u)) continue;
-      out.push({ url: u, title: m[2].replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').trim(), snippet: '' });
-    }
-    const snips = [...html.matchAll(/<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi)].map(m2 => m2[1].replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').trim());
-    for (let i = 0; i < Math.min(out.length, snips.length); i++) out[i].snippet = snips[i];
-    if (out.length > 0) engineNoteSuccess('ddg', 'DuckDuckGo');
-    return out.slice(0, 8);
-  } catch (e: any) {
-    if (e?.message !== 'Cancelled') engineNoteFail('ddg', 'DuckDuckGo', 'net', String(e?.name === 'TimeoutError' ? 'timeout' : e?.message || 'network error').slice(0, 60));
     return [];
   }
 }
@@ -5282,28 +5534,9 @@ function buildSearchQueries(b: Business): string[] {
 }
 
 // Build a targeted query specifically for finding contact pages
-// Build targeted email-only query
-function buildEmailQuery(b: Business): string {
-  const cityQ = getScanContext()?.cityNative || '';
-  const nameEn = getEnglishCityName(b.name);
-  const cityEn = b.address ? getEnglishCityName(b.address.split(',').pop()?.trim() || '') : '';
-  const street = b.address ? b.address.split(',')[0]?.trim() || '' : '';
-  const streetEn = getEnglishCityName(street);
-  const category = b.categoryLabel || '';
-  const isLatin = /^[a-zA-Z\u00c0-\u024f\u1e00-\u1eff\s\-'&.0-9]+$/.test(b.name);
-  const parts: string[] = [];
-  if (isLatin) {
-    parts.push(`"${b.name}"`);
-  } else {
-    if (streetEn && streetEn !== street) parts.push(`"${streetEn}"`);
-    if (category) parts.push(category);
-    if (nameEn && nameEn !== b.name) parts.push(`"${nameEn}"`);
-  }
-  if (cityQ) parts.push(cityQ); else if (cityEn) parts.push(cityEn);
-  // v6.9.16: native email-contact terms
-  parts.push(contactTermsNative());
-  return encodeURIComponent(parts.join(' '));
-}
+// (buildEmailQuery was HOISTED to module scope — v6.9.157: it sits next to
+// buildEmailDorkQueries so the old-vs-dork A/B replay harness can import
+// both the real old emailQ and the dork list.)
 
 // Build targeted phone-only query
 function buildPhoneQuery(b: Business): string {
@@ -6414,6 +6647,54 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
           ]);
         }
 
+        // ═══ PHASE 3b (v6.9.156): email DORK sweep ═══
+        // theHarvester-style `"@domain"` + per-department forms, fired across
+        // the engines Phase 3 already uses. Sequential with EARLY EXIT: the
+        // moment an address lands, the rest of the list is skipped — so the
+        // extra queries only spend budget when they are the ones that work.
+        if (!b.email) {
+          for (const dq of buildEmailDorkQueries(b)) {
+            if (b.email || hasSufficientData()) break;
+            // 1) Brave server lane — free of the browser key quota, with its
+            //    own monthly budget + shared cache absorbing repeats.
+            if (engineAvailable('brave_s')) {
+              try {
+                const srv = await braveBudgetedSearch(decodeURIComponent(dq), 'wave');
+                if (srv) {
+                  for (const res of srv) {
+                    if (extractFromText((res.description || '') + ' ' + (res.title || ''), b)) yieldBump('snippetdig');
+                    if (b.email) break;
+                  }
+                }
+              } catch { /* lane down — next arm */ }
+            }
+            // 2) DuckDuckGo raw SERP — for a literal "@domain" match the
+            //    address is usually IN the snippet text, which extractFromHtml
+            //    and the strict validators then read directly.
+            if (!b.email && engineAvailable('ddg')) {
+              try {
+                const r = await corsFetch('https://html.duckduckgo.com/html/?q=' + dq, {
+                  headers: { 'User-Agent': 'Mozilla/5.0' },
+                  signal: AbortSignal.timeout(4000),
+                });
+                if (r.ok) extractFromHtml(await r.text(), b);
+              } catch { /* cooldown / timeout */ }
+            }
+            // 3) Bing — takes the query already-encoded, and falls back to its
+            //    own server lane, so the dork survives a DDG cooldown.
+            if (!b.email) {
+              try {
+                const rs = await searchBing(dq);
+                let touched = false;
+                for (const res of rs.slice(0, 5)) {
+                  if (extractFromText((res.snippet || '') + ' ' + (res.title || ''), b)) touched = true;
+                }
+                if (touched) yieldBump('snippetdig');
+              } catch { /* next dork */ }
+            }
+          }
+        }
+
         // EARLY EXIT
         if (hasSufficientData()) { enrichedCount++; return; }
 
@@ -6811,21 +7092,28 @@ async function enrichFromWeb(businesses: Business[], onProgress?: (pct: number, 
         if (!b.email || !b.phone) {
           try { await deepCrawlWebsite(b); } catch {}
         }
-        // (b) domain harvest — "@domain" reveals the address on directories
+        // (b) domain harvest — "@domain" reveals the address on directories.
+        // v6.9.156: the single hardcoded DDG query became the shared dork list
+        // ("@domain" + per-department forms) and gained a Bing arm, so the
+        // harvest survives a DDG cooldown instead of silently dropping.
         if (!b.email && b.website) {
-          try {
-            const host5d = new URL(b.website).hostname.replace(/^www\./, '');
-            if (/\./.test(host5d) && !/facebook|instagram|linktr|wixsite|business\.site/i.test(host5d)) {
-              const dq = encodeURIComponent('"@' + host5d + '"');
+          for (const dq of buildEmailDorkQueries(b)) {
+            if (b.email) break;
+            try {
               if (engineAvailable('ddg')) {
                 const dr = await corsFetch('https://html.duckduckgo.com/html/?q=' + dq, {
                   headers: { 'User-Agent': 'Mozilla/5.0' },
                   signal: AbortSignal.timeout(4000),
                 });
                 if (dr.ok) extractFromHtml(await dr.text(), b);
+              } else if (engineAvailable('bing')) {
+                const br = await searchBing(dq);
+                for (const res of br.slice(0, 5)) {
+                  if (extractFromText((res.snippet || '') + ' ' + (res.title || ''), b)) yieldBump('snippetdig');
+                }
               }
-            }
-          } catch {}
+            } catch { /* next dork */ }
+          }
         }
       }));
       const afterCnt = batch5d.filter(x => x.email || x.phone).length;
@@ -9915,7 +10203,7 @@ __internals.ownSiteBase = ownSiteBase;
 // mailto vs Cloudflare etc. Module-level so both scrape sites (deep crawler
 // and this module extractor) feed the same tally. Purely additive telemetry:
 // no extraction behavior changes, reset at every scan start.
-export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'labeltext' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl' | 'wayback' | 'render' | 'rnav' | 'rsearch' | 'rbing' | 'rsocial' | 'rinfer' | 'rcms' | 'domainmatch' | 'prominence' | 'microfmt' | 'ogonly' | 'sameas';
+export type ExtractionLayerKey = 'tel' | 'wa' | 'viber' | 'jsonld' | 'microdata' | 'label' | 'labeltext' | 'regex' | 'mailto' | 'cfdecode' | 'entity' | 'obfusc' | 'jslit' | 'dataattr' | 'meta' | 'vcard' | 'mxguess' | 'socialbio' | 'svfetch' | 'snippetdig' | 'linkcrawl' | 'wayback' | 'render' | 'rnav' | 'rsearch' | 'rbing' | 'rsocial' | 'rinfer' | 'rcms' | 'domainmatch' | 'prominence' | 'microfmt' | 'ogonly' | 'sameas' | 'pdf';
 export interface ExtractionYieldEntry { found: number; tries: number; }
 export interface ExtractionYieldMap { [k: string]: ExtractionYieldEntry; }
 const _extractYield: ExtractionYieldMap = {};
@@ -9944,6 +10232,7 @@ export const _EXTRACT_LAYER_META: { key: ExtractionLayerKey; label: string; icon
   { key: 'microfmt',    label: 'Microformat',   icon: '🧩' },
   { key: 'ogonly',      label: 'OG-complete',   icon: '🏷️' },
   { key: 'sameas',      label: 'sameAs sweep',  icon: '🔁' },
+  { key: 'pdf',         label: 'PDF text',      icon: '📄' },
   { key: 'obfusc',    label: '[at] forms',      icon: '🔑' },
   { key: 'jslit',     label: 'JS literals',     icon: '📜' },
   { key: 'dataattr',  label: 'data-email',      icon: '🔗' },
@@ -11032,10 +11321,59 @@ async function agentChat(
 // Pull the first JSON object out of a reply (handles ```json fences and
 // chatter around the object). Only whitelisted keys are read by callers.
 function agentJson(text: string): Record<string, unknown> | null {
-  const m = text.match(/\{[\s\S]*\}/);
-  if (!m) return null;
-  try { const v = JSON.parse(m[0]); return (v && typeof v === 'object' && !Array.isArray(v)) ? v as Record<string, unknown> : null; }
-  catch { return null; }
+  if (!text) return null;
+  const tryParse = (s: string): Record<string, unknown> | null => {
+    try { const v = JSON.parse(s); return (v && typeof v === 'object' && !Array.isArray(v)) ? v as Record<string, unknown> : null; }
+    catch { return null; }
+  };
+  // v6.9.154: the old greedy `\{[\s\S]*\}` broke on the three things
+  // local models actually emit: prose containing braces ("Use {this} …"),
+  // trailing commas, and JS-ish quoting. Each miss burned a corrective AI
+  // retry — or killed the turn. Now: (1) the reply IS one object → parse
+  // it; (2) string-aware balanced-brace scan collects every complete
+  // top-level object; (3) a conservative repair pass (normalize toward
+  // JSON, never invent structure) re-tries each candidate.
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    const v = tryParse(trimmed);
+    if (v) return v;
+  }
+  const candidates: string[] = [];
+  let depth = 0, start = -1, inStr = false, esc = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '{') { if (depth === 0) start = i; depth++; }
+    else if (c === '}') {
+      depth--;
+      if (depth === 0 && start >= 0) { candidates.push(text.slice(start, i + 1)); start = -1; }
+    }
+  }
+  for (const cand of candidates) {
+    const v = tryParse(cand);
+    if (v) return v;
+  }
+  // Lenient repair per candidate: fully single-quoted objects → double
+  // quotes (skipped when any " is present — mixed output is left alone),
+  // unquoted keys → quoted, trailing commas → stripped. Each repaired
+  // string is still re-parsed by strict JSON.parse.
+  const singleToDouble = (s: string) => {
+    if (!s.includes("'") || s.includes('"')) return s;
+    return s.replace(/'((?:[^'\\]|\\.)*)'/g, (_m, p1: string) => '"' + p1.replace(/"/g, '\\"') + '"');
+  };
+  const quoteKeys = (s: string) => s.replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)/g, '$1"$2"$3');
+  const stripTrailingCommas = (s: string) => s.replace(/,\s*([}\]])/g, '$1');
+  for (const cand of candidates) {
+    const v = tryParse(stripTrailingCommas(quoteKeys(singleToDouble(cand))));
+    if (v) return v;
+  }
+  return null;
 }
 
 // ── v6.9.146: agent tool protocol ────────────────────────────────
@@ -11046,6 +11384,7 @@ export type AgentToolCall =
   | { tool: 'fetch_page'; url: string }
   | { tool: 'search'; query: string }
   | { tool: 'find_email'; query: string }
+  | { tool: 'harvest_phone'; query: string }
   | {
       tool: 'contacts';
       found: { phone?: string; email?: string; whatsapp?: string; viber?: string; telegram?: string; social?: string };
@@ -11055,6 +11394,11 @@ export type AgentToolCall =
     };
 
 function agentStr(v: unknown): string | undefined {
+  // v6.9.154: local models emit digit-only values as JSON numbers
+  // ({"phone":995322196669}) — dropping the turn over a type difference
+  // wastes the fetch. Finite numbers are coerced; everything else must
+  // still be a non-empty string.
+  if (typeof v === 'number' && Number.isFinite(v)) return String(v);
   return typeof v === 'string' && v.trim() ? v.trim() : undefined;
 }
 
@@ -11091,6 +11435,61 @@ export function harvestSnippetEmails(snippets: string[], domain?: string): strin
   return scored.map(x => x.e);
 }
 
+/**
+ * v6.9.153: harvest phone numbers from search-result snippets — the
+ * harvest_phone tool's core, the phone twin of harvestSnippetEmails. A
+ * number visible in a Bing snippet is real published text, so the same
+ * skepticism applies: candidates come from two shapes — explicit `tel:`
+ * links (strongest: the publisher meant it as a phone) and free-text
+ * digit runs that look phone-like — and every candidate then feeds the
+ * SAME E.164 pipeline as every other phone in the engine: toE164 with
+ * the scan country decides validity, rankOfficialPhones orders the
+ * survivors so the scan's own region sorts first. Anything that does
+ * not normalize (years, prices, order numbers) is dropped here instead
+ * of ever reaching the model as evidence.
+ * @param snippets raw snippet strings (titles included by the caller)
+ * @param region   ISO country code from the scan context (e.g. 'GE')
+ */
+export function harvestSnippetPhones(snippets: string[], region?: string): string[] {
+  const seen = new Set<string>(); // dedupe on digits, like rankOfficialPhones
+  const cands: string[] = [];
+  const push = (v: string) => {
+    const t = v.trim();
+    const d = t.replace(/\D/g, '');
+    if (!t || d.length < 7 || seen.has(d)) return;
+    seen.add(d);
+    cands.push(t);
+  };
+  for (const s of snippets) {
+    if (!s) continue;
+    // v6.9.154: normalize unicode punctuation before matching — CMS text
+    // uses en/em dashes ("322–19–66–69") and non-breaking/thin spaces the
+    // ASCII char class below rejects, silently dropping whole numbers.
+    const text = decodeContactEntities(s)
+      .replace(/[\u2010-\u2015\u2212]/g, '-')
+      .replace(/[\u00a0\u202f\u2007\u2009]/g, ' ');
+    // tel: hrefs/text — the site or listing published it AS a phone.
+    for (const m of text.matchAll(/tel:\s*([+\d][\d\s().\-]{4,30})/gi)) push(m[1]);
+    // v6.9.154: free-text digit runs — split on sentence boundaries first.
+    // The char class includes '.' and space, so without the split
+    // "open 9-18. 555 0100" merged into ONE 10-digit candidate that the
+    // E.164 gate then rejected — losing the real number behind it.
+    // Plain split (no lookbehind — unsupported regex literals throw at
+    // parse time on older WebKit and would kill the whole bundle).
+    for (const seg of text.split(/[.!?\u2026]\s+/)) {
+      for (const m of seg.matchAll(/[+]?\d[\d\s().\-]{4,28}\d/g)) push(m[0]);
+    }
+  }
+  // The shared E.164 gate + region-first ranking — the same pipeline
+  // agentApplyContacts runs when the model submits the number later.
+  // Evidence carries the NORMALIZED form: "0 322 19 66 69" + GE comes
+  // back as +995322196669, so the model submits a value that already
+  // passed the gate.
+  const valid = cands.filter(c => !!toE164(c, region));
+  const { ranked } = rankOfficialPhones(valid, region);
+  return ranked.map(p => toE164(p, region) || p);
+}
+
 /** Parse one model reply into a tool call. Returns null on prose/garbage —
  *  the caller decides whether to retry or stop. Pure + unit-tested. */
 export function parseAgentReply(text: string): AgentToolCall | null {
@@ -11106,12 +11505,14 @@ export function parseAgentReply(text: string): AgentToolCall | null {
     const q = agentStr(j.query) || agentStr(j.q);
     return q ? { tool: 'find_email', query: q } : null;
   }
-  // v6.9.153: find_phone — targeted phone harvest from snippet text,
-  // same Bing-query path as find_email; harvested numbers come back as
-  // evidence and the model submits them via the contacts tool.
-  if (action === 'find_phone') {
+  // v6.9.153: harvest_phone — targeted phone harvest from snippet text,
+  // same Bing-query path as find_email; harvested numbers are normalized
+  // through the E.164 pipeline, come back as evidence and the model
+  // submits them via the contacts tool. ('find_phone' accepted as an
+  // alias — older prompts/models used that name.)
+  if (action === 'harvest_phone' || action === 'find_phone') {
     const q = agentStr(j.query) || agentStr(j.q);
-    return q ? { tool: 'find_phone', query: q } : null;
+    return q ? { tool: 'harvest_phone', query: q } : null;
   }
   if (action === 'fetch_page' || action === 'fetch' || action === 'open' || action === 'visit') {
     const url = agentStr(j.url) || agentStr(j.href);
@@ -11369,10 +11770,8 @@ const _AGENT_TOOL_SYS = [
   'Each turn you receive the evidence collected so far and reply with EXACTLY ONE JSON object choosing a tool — no markdown, no prose.',
   'TOOLS:',
   '{"tool":"search","query":"…"} — search the web (to find the official site or listing pages when the evidence is not enough).',
-  '{"tool":"find_email","query":"…"} — targeted email hunt, e.g. site:domain.ge OR "Business Name" email. Use when pages are blocked or emails are scarce; harvested addresses come back as evidence next turn.',
-
-  {"tool":"find_phone","query":"..."} — targeted phone hunt via Bing, e.g. site:domain.ge OR "Business Name" phone. Use when pages are blocked or numbers are scarce; harvested numbers come back as evidence next turn.
-
+  '{"tool":"find_email","query":"…"} — targeted email hunt. DORKS WORK BEST: "@domain.com" (address printed in the snippet), site:domain.com "info@" OR "contact@" OR "sales@". Plain fallback: site:domain.ge OR "Business Name" email. Use when pages are blocked or emails are scarce; harvested addresses come back as evidence next turn.',
+  '{"tool":"harvest_phone","query":"…"} — targeted phone hunt via Bing, e.g. site:domain.ge OR "Business Name" phone. Use when pages are blocked or numbers are scarce; harvested numbers come back as evidence next turn, already normalized to +<country><number>.',
   '{"tool":"fetch_page","url":"https://…"} — open one page; its content comes back as evidence next turn.',
   '{"tool":"contacts","phone":"…","email":"…","whatsapp":"…","viber":"…","telegram":"…","social":"https://facebook.com/…"} — submit contact values you can READ in the evidence; omit fields you do not see. You may continue after submitting.',
   'RULES: extract values EXACTLY as written — never invent or reformat. Prefer contact/about/branch pages from the LINKS list over guessed paths. Prefer the official site over directories. Stop when phone and email are both known.',
@@ -11487,6 +11886,27 @@ async function agentEnrichOne(
           : `FIND_EMAIL "${call.query}": no email addresses visible in snippets`);
       } catch {
         evidence.push(`FIND_EMAIL "${call.query}": engine unavailable`);
+      }
+      continue;
+    }
+    // v6.9.153: harvest_phone — the phone twin of find_email: same Bing
+    // snippet path, but the candidates are pushed through the shared
+    // E.164 pipeline (toE164 + rankOfficialPhones with the scan country)
+    // before they are shown, so what the model sees as evidence is
+    // already normalized and region-ranked — it submits them next turn
+    // via the contacts tool (all validation gates re-apply on apply).
+    if (call.tool === 'harvest_phone') {
+      if (searches >= MAX_SEARCHES) { evidence.push(`HARVEST_PHONE "${call.query}": (search budget for this business used up)`); continue; }
+      searches++;
+      try {
+        const rs = await searchBing(encodeURIComponent(call.query));
+        const snippets = rs.flatMap(r => [String(r.title || ''), String(r.snippet || '')]);
+        const phones = harvestSnippetPhones(snippets, getScanContext()?.countryCode);
+        evidence.push(phones.length > 0
+          ? `HARVEST_PHONE "${call.query}": numbers found in snippets (E.164) — ${phones.join(', ')}`
+          : `HARVEST_PHONE "${call.query}": no phone numbers visible in snippets`);
+      } catch {
+        evidence.push(`HARVEST_PHONE "${call.query}": engine unavailable`);
       }
       continue;
     }

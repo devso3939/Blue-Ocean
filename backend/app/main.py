@@ -1,6 +1,7 @@
 """Blue Ocean Opportunity Intelligence — FastAPI backend."""
 from __future__ import annotations
 
+import base64
 import csv
 import io
 import json
@@ -18,7 +19,7 @@ from . import config, taxonomy
 from .cache import cache
 from .countries import get_countries
 from .jobstore import JobStore
-from .models import JobRequest, JobStatus
+from .models import CrawlRequest, JobRequest, JobStatus, PdfTextRequest
 from .providers.city import CityResolutionError, CityResolver
 from .services import analysis as analysis_service
 from .services import opportunities as opportunities_service
@@ -210,6 +211,9 @@ class JobManager:
                 filters = {**filters, "refresh": True}
             result = opportunities_service.scan_opportunities(city_id, filters, progress=progress)
             return result.model_dump()
+        if kind == "crawl":
+            req = CrawlRequest(**payload)
+            return run_crawl(req, progress=progress)
         raise HTTPException(400, f"Unknown job kind: {kind}")
 
 
@@ -250,6 +254,77 @@ def api_config():
 @app.get("/api/countries")
 def countries():
     return get_countries()
+
+
+# ---------------------------------------------------------------------------
+# PDF text extraction — the server fallback lane for the client's PDF skill.
+# The browser cannot always fetch a cross-origin PDF (CORS); here the server
+# fetches it, extracts the text and returns it for the caller's own contact
+# validators. No contact parsing happens on this side.
+# ---------------------------------------------------------------------------
+
+def _fetch_pdf_bytes(url: str) -> Optional[bytes]:
+    """Fetch a PDF over https with a hard size cap and a private-host guard."""
+    import httpx
+    from urllib.parse import urlparse
+
+    from .services.pdf_extract import MAX_BYTES
+
+    try:
+        u = urlparse(url)
+    except Exception:  # noqa: BLE001
+        return None
+    if u.scheme != "https" or not u.hostname or "." not in u.hostname:
+        return None
+    host = u.hostname.lower()
+    if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1", "169.254.169.254"):
+        return None
+    if host.startswith(("10.", "192.168.", "127.")):
+        return None
+    try:
+        with httpx.stream(
+            "GET", url, timeout=20.0, follow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; BlueOcean/1.0)",
+                "Accept": "application/pdf,*/*",
+            },
+        ) as r:
+            if r.status_code != 200:
+                return None
+            buf = bytearray()
+            for chunk in r.iter_bytes():
+                buf.extend(chunk)
+                if len(buf) > MAX_BYTES:
+                    return None
+            return bytes(buf)
+    except Exception:  # noqa: BLE001 — network/PDF fetch is best-effort
+        return None
+
+
+@app.post("/api/pdf/text")
+def pdf_text(req: PdfTextRequest):
+    """Extract text from a PDF (url or base64) for client-side contact parsing."""
+    from .services.pdf_extract import MAX_BYTES, extract_pdf_text
+
+    if req.data_base64:
+        try:
+            data = base64.b64decode(req.data_base64, validate=False)
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="bad-base64")
+    elif req.url:
+        data = _fetch_pdf_bytes(req.url)
+        if data is None:
+            raise HTTPException(status_code=502, detail="fetch-failed")
+    else:
+        raise HTTPException(status_code=400, detail="url-or-data-required")
+
+    if not data:
+        raise HTTPException(status_code=400, detail="empty")
+    if len(data) > MAX_BYTES:
+        raise HTTPException(status_code=413, detail="too-large")
+
+    text = extract_pdf_text(data, max_pages=req.max_pages)
+    return {"text": text, "chars": len(text), "bytes": len(data)}
 
 
 @app.get("/api/cities/search")
@@ -436,6 +511,49 @@ def get_job(job_id: str):
     if job is None:
         raise HTTPException(404, "Job not found (server may have restarted)")
     return JobStatus(**job)
+
+
+# ---------------------------------------------------------------------------
+# Crawl queue
+#
+# The browser client's crawl is budgeted at ~3 fetches/business because each
+# one costs a CORS-proxy round trip and the user is watching a progress bar.
+# This moves the SAME crawl server-side, where coverage is bounded by a
+# wall-clock + page count, and the render lane (render-service/) is the
+# browser backend for JS shells and Cloudflare challenges the plain fetch
+# cannot read.
+#
+# Two entry points:
+#   POST /api/crawl       — synchronous, returns the result directly.
+#   POST /api/jobs        — kind="crawl", same payload; poll /api/jobs/{id}.
+# ---------------------------------------------------------------------------
+
+def run_crawl(req: CrawlRequest, progress=None) -> dict[str, Any]:
+    """Validate a crawl request and run it under the mode's server budget."""
+    from .services.crawler import Crawler, normalize_mode
+
+    url = (req.url or "").strip()
+    if not url.lower().startswith(("http://", "https://")):
+        raise HTTPException(400, "url must be absolute http(s)")
+
+    mode = normalize_mode(req.mode)
+    on_progress = None
+    if progress is not None:
+        def on_progress(frac: float, message: str) -> None:  # noqa: F811
+            progress("crawl", frac, message)
+
+    # req.max_pages may LOWER this crawl's budget; Crawler clamps it against
+    # the server ceiling and never mutates the shared mode table.
+    return Crawler().crawl(
+        url, mode=mode, country=req.country, progress=on_progress,
+        max_pages=req.max_pages,
+    )
+
+
+@app.post("/api/crawl")
+def crawl_sync(req: CrawlRequest):
+    """Crawl one business website now (homepage | key_pages | deep)."""
+    return run_crawl(req)
 
 
 # ---------------------------------------------------------------------------

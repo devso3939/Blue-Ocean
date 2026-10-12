@@ -106,6 +106,21 @@ export interface TextContacts {
 const _linkify = new LinkifyIt({ fuzzyLink: true, fuzzyEmail: true });
 
 /**
+ * v6.9.154: lightly de-obfuscate scraper-dodging separators so linkify can
+ * see the address: `info[at]example[dot]com`, `info(at)example(dot)com`,
+ * `info [at] example [dot] com`. Deliberately conservative — only bracketed
+ * `at`/`dot` tokens are rewritten (bare "info at example dot com" prose is
+ * too false-positive-prone), and every downstream caller still runs its own
+ * plausibleEmail/platform/TLD gates on the result.
+ */
+function _deobfuscateEmails(text: string): string {
+  if (!/[\[(]\s*(?:at|dot)\s*[\])]/i.test(text)) return text;
+  return text
+    .replace(/([A-Za-z0-9._%+-])\s*[\[(]\s*at\s*[\])]\s*([A-Za-z0-9])/gi, '$1@$2')
+    .replace(/([A-Za-z0-9-])\s*[\[(]\s*dot\s*[\])]\s*([A-Za-z0-9])/gi, '$1.$2');
+}
+
+/**
  * Find emails and URLs buried in visible text. linkify-it recognizes bare
  * `www.…` links, odd-but-real TLDs and emails the engine's stricter regex
  * skips — its matches are then re-validated by the caller's own gates
@@ -116,7 +131,7 @@ export function findTextContacts(text: string, cap = 12): TextContacts {
   const urls: string[] = [];
   if (!text) return { emails, urls };
   try {
-    const ms = _linkify.match(text);
+    const ms = _linkify.match(_deobfuscateEmails(text));
     if (ms) {
       for (const m of ms) {
         if (m.schema === 'mailto:') {

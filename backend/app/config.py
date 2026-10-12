@@ -55,6 +55,30 @@ OVERPASS_URLS = [
 ]
 RESTCOUNTRIES_URL = "https://restcountries.com/v3.1/all?fields=name,cca2,cca3,region,subregion"
 
+# --- Headless render lane (render-service/) ------------------------------
+# The Camoufox/Chromium Flask service used as the crawl queue's BROWSER
+# BACKEND for JS shells and Cloudflare challenges the plain fetch can't read.
+# Empty RENDER_URL disables the lane entirely — crawls then run on plain HTTP
+# only, which is the correct default for a deployment without that service.
+RENDER_URL = os.environ.get("BLUEOCEAN_RENDER_URL", "").rstrip("/")
+RENDER_TOKEN = os.environ.get("BLUEOCEAN_RENDER_TOKEN", "")
+# The worker polls a CF challenge for up to ~90s then builds the DOM; 120s
+# clears that with headroom. gunicorn on the worker side allows 180s.
+RENDER_TIMEOUT_S = int(os.environ.get("BLUEOCEAN_RENDER_TIMEOUT_S", "120"))
+
+# --- Crawl queue depth-mode overrides ------------------------------------
+# Defaults live in services/crawler.py (homepage/key_pages/deep). These let a
+# deployment shrink its own budgets without a code change; they can only LOWER
+# the built-in ceilings.
+CRAWL_MODE_OVERRIDES = {
+    k: {
+        field: int(v)
+        for field in ("max_pages", "max_depth", "max_renders", "budget_s")
+        if (v := os.environ.get(f"BLUEOCEAN_CRAWL_{k.upper()}_{field.upper()}")) not in (None, "")
+    }
+    for k in ("homepage", "key_pages", "deep")
+}
+
 USER_AGENT = os.environ.get(
     "BLUEOCEAN_USER_AGENT",
     "BlueOceanOpportunityIntel/0.1 (open data market research tool; contact: blueocean.intel.dev@example.com)",
