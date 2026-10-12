@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/%E1%83%A4%E1%83%A0%E1%83%94%E1%83%A8%20Fresh%2C%2032?hl=en",
+  "ts": "2026-10-12T23:51:59Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 225106,
+  "status": "done",
+  "finished_at": "2026-10-12T23:52:28Z"
+}
