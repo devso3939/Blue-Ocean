@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/Antique%20bazaar%20?hl=en",
+  "ts": "2026-10-12T22:50:44Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 211578,
+  "status": "done",
+  "finished_at": "2026-10-12T22:51:20Z"
+}
