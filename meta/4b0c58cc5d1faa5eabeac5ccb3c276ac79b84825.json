@@ -1,9 +1,10 @@
 {
   "url": "https://radiocafe.ge/contact",
-  "ts": "2026-09-24T20:56:19Z",
-  "engine": "camoufox",
+  "ts": "2026-10-12T22:53:04Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
   "challenged": false,
-  "bytes": 480338,
+  "bytes": 481103,
   "status": "done",
-  "finished_at": "2026-09-24T20:56:31Z"
+  "finished_at": "2026-10-12T22:53:33Z"
 }
