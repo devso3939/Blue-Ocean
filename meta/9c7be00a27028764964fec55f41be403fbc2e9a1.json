@@ -1,0 +1,10 @@
+{
+  "url": "https://xstoys.ge/contact",
+  "ts": "2026-10-12T23:04:55Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 1175716,
+  "status": "done",
+  "finished_at": "2026-10-12T23:05:24Z"
+}
