@@ -1,0 +1,10 @@
+{
+  "url": "https://www.badagi.ge/contact",
+  "ts": "2026-10-12T22:51:55Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 13041,
+  "status": "done",
+  "finished_at": "2026-10-12T22:52:25Z"
+}
