@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/Gvergo%20?hl=en",
+  "ts": "2026-10-12T22:49:38Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 230770,
+  "status": "done",
+  "finished_at": "2026-10-12T22:50:05Z"
+}
