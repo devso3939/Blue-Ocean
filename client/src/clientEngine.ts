@@ -10062,13 +10062,19 @@ function declaredPageUrl(html: string): string {
 // v6.9.130: tracking params + fragments are campaign noise, not identity —
 // strip them so stored websites dedupe and deep-scrape cleanly. Genuine
 // query params (?page_id=42 WordPress permalinks etc.) are kept.
+// v6.9.157 FIX: collect keys BEFORE deleting — deleting inside forEach
+// shifts the URLSearchParams iteration index and silently SKIPS the entry
+// after each removal (utm_source deleted → utm_campaign survived). CI's
+// website-utm-stripped gate caught exactly this.
 function cleanWebsiteUrl(raw: string): string {
   try {
     const u = new URL(raw);
     u.hash = '';
+    const kill: string[] = [];
     u.searchParams.forEach((_, k) => {
-      if (/^utm_|^(fbclid|gclid|msclkid|ref|refsrc|source|igshid|yclid|si|_ga|_gl|mc_cid|mc_eid)$/i.test(k)) u.searchParams.delete(k);
+      if (/^utm_|^(fbclid|gclid|msclkid|ref|refsrc|source|igshid|yclid|si|_ga|_gl|mc_cid|mc_eid)$/i.test(k)) kill.push(k);
     });
+    for (const k of kill) u.searchParams.delete(k);
     return u.toString();
   } catch { return raw; }
 }
