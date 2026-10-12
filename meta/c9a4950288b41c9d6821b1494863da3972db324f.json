@@ -1,0 +1,10 @@
+{
+  "url": "https://www.dentotourism.com/contact",
+  "ts": "2026-10-12T23:07:06Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 47747,
+  "status": "done",
+  "finished_at": "2026-10-12T23:07:33Z"
+}
