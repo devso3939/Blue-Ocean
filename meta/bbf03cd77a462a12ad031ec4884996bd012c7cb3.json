@@ -1,10 +1,10 @@
 {
   "url": "https://www.magticom.ge/contact",
-  "ts": "2026-09-27T00:29:07Z",
-  "goto_error": "Page.goto: Timeout 45000ms exceeded.\nCall log:\n  - navigating to \"https://www.magticom.ge/contact\", waiting until \"domcontentloaded\"\n",
-  "engine": "camoufox",
+  "ts": "2026-10-12T23:55:06Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
   "challenged": false,
-  "bytes": 3959,
+  "bytes": 35936,
   "status": "done",
-  "finished_at": "2026-09-27T00:30:01Z"
+  "finished_at": "2026-10-12T23:55:30Z"
 }
