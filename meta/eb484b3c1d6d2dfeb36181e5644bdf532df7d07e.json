@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/%E1%83%A1%E1%83%90%E1%83%AE%E1%83%90%E1%83%AD%E1%83%90%E1%83%9E%E1%83%A3%E1%83%A0%E1%83%94%20%E2%84%961%20Sakhachapure%20%E2%84%961%2C%20Mtatsminda%20District?hl=en",
+  "ts": "2026-10-12T22:47:20Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 213284,
+  "status": "done",
+  "finished_at": "2026-10-12T22:47:47Z"
+}
