@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/Margarita's%20apartments%20%E1%83%AA%E1%83%A7%E1%83%95%E1%83%98%E1%83%90%E1%83%95%E1%83%98%E1%83%A1%20%E1%83%A9%E1%83%98%E1%83%AE%E1%83%98%2C%2010?hl=en",
+  "ts": "2026-10-13T21:01:33Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 227481,
+  "status": "done",
+  "finished_at": "2026-10-13T21:02:04Z"
+}
