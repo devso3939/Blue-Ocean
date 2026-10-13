@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/Silver%20Burger's%20?hl=en",
+  "ts": "2026-10-13T19:39:01Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 212303,
+  "status": "done",
+  "finished_at": "2026-10-13T19:39:26Z"
+}
