@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/Silver%20Burger's%20Silver%20Burger's%2C%20Krtsanisi%20District?hl=en",
+  "ts": "2026-10-13T21:00:19Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 212879,
+  "status": "done",
+  "finished_at": "2026-10-13T21:00:55Z"
+}
