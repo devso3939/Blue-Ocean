@@ -1,9 +1,10 @@
 {
   "url": "https://www.aversi.ge/contact",
-  "ts": "2026-09-21T14:28:06Z",
+  "ts": "2026-10-13T01:51:01Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
   "engine": "chromium",
   "challenged": true,
-  "bytes": 28800,
+  "bytes": 28970,
   "status": "challenge",
-  "finished_at": "2026-09-21T14:31:12Z"
+  "finished_at": "2026-10-13T01:53:03Z"
 }
