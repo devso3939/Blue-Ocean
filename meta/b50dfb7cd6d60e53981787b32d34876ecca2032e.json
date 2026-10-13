@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/%E1%83%90%E1%83%A5%E1%83%A3%E1%83%90%20%E1%83%9A%E1%83%98%E1%83%91%E1%83%94%E1%83%A0%E1%83%97%E1%83%98%20%E1%83%90%E1%83%9A%E1%83%94%E1%83%A5%E1%83%A1%E1%83%90%E1%83%9C%E1%83%93%E1%83%A0%E1%83%94%20%E1%83%9E%E1%83%A3%E1%83%A8%E1%83%99%E1%83%98%E1%83%9C%E1%83%98%E1%83%A1%20%E1%83%A5%E1%83%A3%E1%83%A9%E1%83%90%2C%2015?hl=en",
+  "ts": "2026-10-13T21:02:51Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 214466,
+  "status": "done",
+  "finished_at": "2026-10-13T21:03:12Z"
+}
