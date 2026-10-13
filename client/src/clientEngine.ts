@@ -15,7 +15,7 @@ import { parsePhoneNumberFromString, AsYouType } from 'libphonenumber-js';
 // Native-language scan context (country → language/ccTLD/category terms)
 import { setScanContext, getScanContext, buildScanContext, categoryInNative, countryTld, contactTermsNative, type ScanContext } from './lang';
 // v6.9.147: contact-parsing skills (htmlparser2 / he / tldts / linkify-it)
-import { harvestAnchors, decodeContactEntities, sameRegDomain, findTextContacts, toE164, rankOfficialEmails, rankOfficialPhones } from './contactSkills';
+import { harvestAnchors, decodeContactEntities, sameRegDomain, findTextContacts, toE164, toE164Strict, rankOfficialEmails, rankOfficialPhones } from './contactSkills';
 import { extractPdfText, looksLikePdfUrl, fetchPdfTextViaBackend } from './pdfSkills';
 import { readMicroformats, ogContactGate, sweepSameAs, domainMxProbe, parseVcardBlob, sharedRegistrableDomain } from './deepSkills';
 import { APP_VERSION } from './version';
@@ -308,9 +308,18 @@ function extractFromText(text: string, b: Business): boolean {
     // a leading date/ID fragment ("2026-06-11 …") block the real number
     // sitting later in the same text. Each candidate still faces the same
     // digit-count + plausiblePhone gates; first survivor wins.
+    // v6.9.157: write the STRICT-normalized E.164 (toE164Strict, see
+    // contactSkills) instead of the raw match — junk formats like "818)
+    // 884-8118." can no longer survive as-is, and a foreign +country (the
+    // +65 Acid Bar contamination in the Tbilisi audit) is rejected when a
+    // scan country is set. No context → permissive, as before.
     for (const m of text.matchAll(/\+?\d[\d\s\-\.\(\)]{7,18}/g)) {
-      const digits = m[0].replace(/\D/g, '');
-      if (digits.length >= 8 && digits.length <= 15 && plausiblePhone(m[0])) { b.phone = m[0].trim(); touched = true; break; }
+      const raw = m[0].trim();
+      const digits = raw.replace(/\D/g, '');
+      if (digits.length < 8 || digits.length > 15 || !plausiblePhone(raw)) continue;
+      const e164 = toE164Strict(raw, getScanContext()?.countryCode);
+      if (!e164) continue;
+      b.phone = e164; touched = true; break;
     }
   }
   if (!b.email) {
@@ -2119,6 +2128,11 @@ export function isLikelyBusinessWebsite(url: string, businessName: string, text?
     if (MEDIA_PLATFORM.test(hostname)) return false;
     // Reject review/directory/article hosts that never host a business's own site
     if (REVIEW_DIRECTORY.test(hostname)) return false;
+    // v6.9.157: reference/portal/piracy/free-ring hosts observed accepting
+    // wrong hits in the Tbilisi live audit — dictionary lookups (nplg.gov.ge
+    // wikidict pages ARE about the searched word, so the text-mention check
+    // alone can never reject them), movie-engine hosts, and free-ring relics.
+    if (/wikidict|nplg\.gov\.ge|wikipedia\.org|wiktionary|wikimedia|\.movie($|\.|\/|-)|fmovies|gomovies|kinopoisk\.|hdrezka|imdb\.com|orgs\.biz/i.test(hostname)) return false;
     // Reject yellow-pages / corporate-registry hosts
     if (YELLOW_PAGES.test(hostname)) return false;
     // Reject forum/community hosts and member/profile pages
@@ -2144,6 +2158,11 @@ export function isLikelyBusinessWebsite(url: string, businessName: string, text?
       // Case 1 — path mentions the business but host doesn't: third-party page
       // ABOUT the business (blog article, partner listing) → reject.
       if (tokens.some(t => pathSlug.includes(t))) return false;
+      // Case 3 (v6.9.157) — DEEP lookup/article on an unrelated host, text
+      // mentions notwithstanding (wikidict/index.php/<word> depth 3,
+      // ge.movie /movie/4199/<title> depth 3): ≥3 path segments on a host
+      // sharing nothing with the name is never the business's own site.
+      if (path.split('/').filter(Boolean).length >= 3) return false;
       // Case 2 — NEITHER host nor path mentions the business: ambiguous. Only
       // accept when the accompanying title/snippet confirms the business.
       if (text !== undefined && !textMentionsBusiness(text, businessName)) return false;
@@ -10093,6 +10112,11 @@ function emailHostScore(domain: string, pageHost: string): number {
 // Junk emails: asset files and placeholder addresses that regexes pick up
 const _EMAIL_FILE_RE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|mjs|pdf|zip|woff2?|ttf|otf|mp[34]|webm|avi|mov)$/i;
 const _EMAIL_JUNK_RE = /example\.com|noreply|no-reply|donotreply|wixpress|sentry\.io|cloudflare|privacy|abuse@|postmaster@|schema\.org|w3\.org|user@|username@|your(name|mail)?@|email@domain/i;
+// v6.9.157: TEMPLATE/placeholder domains — "sales@company.com",
+// "contact@mydomain.com" are website-builder boilerplate that lands in SERP
+// snippets; the Tbilisi live audit showed 7 businesses seeded with them.
+// Anchored to the @ so a real address like info@bigcompany.com survives.
+const _EMAIL_PLACEHOLDER_RE = /@(?:my|your|our|the)?domain\.(?:com|net|org)$|@company\.(?:com|net|org)$|@emailaddress\.com$|@email\.(?:com|net)$|@yourdomain\.[a-z]{2,3}$|@sample\.(?:com|org)$|@test\.(?:com|org)$|@acme\.(?:com|org)$|@sitename\.(?:com|net)$|@website\.(?:com|net)$|@yoursite\.(?:com|net)$|@youremail\.com$|@example\.[a-z]+$/i;
 // v6.9.83: platform/infrastructure domains that scraped pages reference but
 // no small business owns. A cafe whose email reads info@duckduckgo.co got it
 // from a followed search-result page — poison. Search engines, CDNs, CMS
@@ -10153,6 +10177,8 @@ export function plausibleEmail(e: string): boolean {
   if (/^\d{5,}$/.test(local)) return false;
   // Junk senders/roles that regexes commonly harvest from footers
   if (_EMAIL_JUNK_RE.test(v)) return false;
+  // v6.9.157: placeholder/template domains (see _EMAIL_PLACEHOLDER_RE above)
+  if (_EMAIL_PLACEHOLDER_RE.test(v)) return false;
   // v6.9.83: search-engine / platform / CDN domains — the most common
   // cross-contamination when followed result pages carry the engine's own
   // footer emails.
@@ -11491,9 +11517,9 @@ export function harvestSnippetPhones(snippets: string[], region?: string): strin
   // Evidence carries the NORMALIZED form: "0 322 19 66 69" + GE comes
   // back as +995322196669, so the model submits a value that already
   // passed the gate.
-  const valid = cands.filter(c => !!toE164(c, region));
+  const valid = cands.filter(c => !!toE164Strict(c, region));
   const { ranked } = rankOfficialPhones(valid, region);
-  return ranked.map(p => toE164(p, region) || p);
+  return ranked.map(p => toE164Strict(p, region) || p);
 }
 
 /** Parse one model reply into a tool call. Returns null on prose/garbage —

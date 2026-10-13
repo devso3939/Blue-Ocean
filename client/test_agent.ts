@@ -1,6 +1,6 @@
 // v6.9.146 unit tests: agent tool protocol + local-mode browsing + endpoint detection
 // Run: npm test (tsx test_v969.ts && tsx test_agent.ts)
-import { parseAgentReply, localAgentContactPages, isLocalAgentEndpoint, harvestSnippetEmails, harvestSnippetPhones, buildEmailDorkQueries, buildEmailQuery, setScanContext } from './src/clientEngine.js';
+import { parseAgentReply, localAgentContactPages, isLocalAgentEndpoint, harvestSnippetEmails, harvestSnippetPhones, buildEmailDorkQueries, buildEmailQuery, setScanContext, isLikelyBusinessWebsite, plausibleEmail } from './src/clientEngine.js';
 
 // node shim for bare test run (tsconfig excludes test files)
 declare const process: { exit: (code: number) => void };
@@ -320,6 +320,31 @@ setScanContext({ countryCode: 'GE', countryName: 'Georgia', lang: 'ka', cityNati
   eq('emailQ: business name quoted', dec.includes('"Cafe Marco"'), true);
   eq('emailQ: no undefined leakage', dec.includes('undefined'), false);
   eq('emailQ: native contact terms present', dec.includes('კონტაქტი') || dec.includes('contact'), true);
+}
+
+// ── v6.9.157 live-audit gates: placeholder emails, junk-site hosts,
+// foreign-country phones (context already GE from the emailQ block) ──
+{
+  eq('gate: sales@company.com rejected', plausibleEmail('sales@company.com'), false);
+  eq('gate: contact@mydomain.com rejected', plausibleEmail('contact@mydomain.com'), false);
+  eq('gate: real company.com substring survives', plausibleEmail('info@bigcompany.com'), true);
+  eq('gate: acmesolutions.com host survives', plausibleEmail('info@acmesolutions.com'), true);
+}
+{
+  eq('site gate: dict portal rejected', isLikelyBusinessWebsite('https://nplg.gov.ge/wikidict/index.php/nali', 'Nali'), false);
+  eq('site gate: movie host rejected', isLikelyBusinessWebsite('https://ge.movie/movie/4199/bruno', 'Bruno'), false);
+  eq('site gate: deep non-matching host rejected',
+    isLikelyBusinessWebsite('https://somedomain.ge/blog/x/y', 'Totally Different Name', 'About Totally Different Name'), false);
+  eq('site gate: own-horse subpath survives', isLikelyBusinessWebsite('https://cafeorient.ge/en/contact', 'Cafe Orient'), true);
+}
+{
+  const out = harvestSnippetPhones(['Listed +65 8123 6966 (wrong Acid Bar), actually +995 322 19 66 69'], 'GE');
+  eq('phone gate: foreign +country rejected in-GE', out, ['+995322196669']);
+}
+{
+  // no context → permissive, unchanged from before (regression guard)
+  const out = harvestSnippetPhones(['ring +1-555-0100 now']);
+  eq('phone gate: no context still permissive', out, ['+15550100']);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

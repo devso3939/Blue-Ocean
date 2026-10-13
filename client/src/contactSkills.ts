@@ -180,6 +180,24 @@ export function toE164OrKeep(raw: string, region?: string): string {
   return toE164(raw, region) || raw;
 }
 
+/** v6.9.157: STRICT E.164 for snippet/web-harvested numbers. Tbilisi live
+ *  audit: local-format numbers must parse under the scan region, and
+ *  intl-format numbers must BE that region's country — a +65 (Singapore)
+ *  number seeded into a Georgian scan by an unrelated "Acid Bar" listing
+ *  is snippet contamination, not a contact. With no scan region, behaves
+ *  exactly like toE164 (no regression for context-less callers/tests). */
+export function toE164Strict(raw: string, region?: string): string {
+  const t = (raw || '').trim();
+  if (!region || !t) return toE164(raw);
+  if (!t.startsWith('+')) return toE164(raw, region);
+  // Dialed-international format: the +country it carries is the truth.
+  try {
+    const parsed = parsePhoneNumberFromString(t);
+    if (parsed && parsed.isValid()) return parsed.country === region ? parsed.number.toString() : '';
+  } catch { /* fall through */ }
+  return '';
+}
+
 // ── Official-contact ranking (the omkarcloud technique) ──────────
 
 /**

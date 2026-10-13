@@ -32,15 +32,18 @@ const RADIUS = 800;
 async function main(): Promise<void> {
   const engine = await import('./src/clientEngine.js');
   const {
-    queryBusinesses, enrichDiscoverContacts, getCategorizedBusinessesCache,
-    getCategorizedCache, resetEngineHealth,
+    queryBusinesses, enrichDiscoverContacts, resetEngineHealth, setScanContext,
   } = engine as unknown as {
     queryBusinesses: (lat: number, lon: number, radius: number) => Promise<Map<string, unknown[]>>;
     enrichDiscoverContacts: (
       biz: Map<string, unknown[]>,
       opts?: { onProgress?: (msg: string, done: number, total: number) => void }) => Promise<void>;
-    [k: string]: unknown;
+    resetEngineHealth?: () => void;
+    setScanContext: (ctx: Record<string, unknown>) => void;
   };
+  // v6.9.157: the phone region gate (toE164Strict) needs the scan country —
+  // the first run omitted countryCode, so foreign +country numbers leaked in.
+  setScanContext({ countryCode: 'GE', countryName: 'Georgia', lang: 'ka', cityNative: 'Tbilisi', cityEn: 'Tbilisi' });
 
   resetEngineHealth?.();
 
