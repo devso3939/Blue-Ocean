@@ -87,7 +87,7 @@ async function main(): Promise<void> {
   console.log(`website   ${cnt(webOk.length)}`);
   console.log(`social    ${cnt(socialOk.length)}`);
   const full = sample.filter(b => !!b.email && (!!b.phone || !!b.whatsapp) && !!b.website);
-  console.log(`full光合 (email+phone+website together): ${full.length}/${n} (${(100 * full.length / n).toFixed(0)}%)`);
+  console.log(`full contact (email+phone+website together): ${full.length}/${n} (${(100 * full.length / n).toFixed(0)}%)`);
   console.log('\nPer-business detail:');
   for (const b of sample) {
     const fields: string[] = [];
