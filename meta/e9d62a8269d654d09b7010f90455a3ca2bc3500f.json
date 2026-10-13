@@ -1,0 +1,10 @@
+{
+  "url": "https://istore.com.ge/contact",
+  "ts": "2026-10-13T02:09:50Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 181642,
+  "status": "done",
+  "finished_at": "2026-10-13T02:10:21Z"
+}
