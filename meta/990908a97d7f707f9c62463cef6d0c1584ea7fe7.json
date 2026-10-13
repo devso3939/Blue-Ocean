@@ -1,0 +1,10 @@
+{
+  "url": "https://c.evidon.com/contact",
+  "ts": "2026-10-13T01:17:39Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 161,
+  "status": "done",
+  "finished_at": "2026-10-13T01:18:12Z"
+}
