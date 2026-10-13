@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/%E1%83%A8%E1%83%98%E1%83%97%E1%83%90%20%40%E1%83%A0%E1%83%A3%E1%83%A1%E1%83%97%E1%83%90%E1%83%95%E1%83%94%E1%83%9A%E1%83%98%20?hl=en",
+  "ts": "2026-10-13T21:05:31Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 234042,
+  "status": "done",
+  "finished_at": "2026-10-13T21:06:03Z"
+}
