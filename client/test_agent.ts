@@ -1,6 +1,6 @@
 // v6.9.146 unit tests: agent tool protocol + local-mode browsing + endpoint detection
 // Run: npm test (tsx test_v969.ts && tsx test_agent.ts)
-import { parseAgentReply, localAgentContactPages, isLocalAgentEndpoint, harvestSnippetEmails, harvestSnippetPhones, buildEmailDorkQueries, buildEmailQuery, setScanContext, isLikelyBusinessWebsite, plausibleEmail } from './src/clientEngine.js';
+import { parseAgentReply, localAgentContactPages, isLocalAgentEndpoint, harvestSnippetEmails, harvestSnippetPhones, buildEmailDorkQueries, buildEmailQuery, setScanContext, isLikelyBusinessWebsite, plausibleEmail, extractFromText } from './src/clientEngine.js';
 
 // node shim for bare test run (tsconfig excludes test files)
 declare const process: { exit: (code: number) => void };
@@ -345,6 +345,60 @@ setScanContext({ countryCode: 'GE', countryName: 'Georgia', lang: 'ka', cityNati
   // no context → permissive, unchanged from before (regression guard)
   const out = harvestSnippetPhones(['ring +1-555-0100 now']);
   eq('phone gate: no context still permissive', out, ['+15550100']);
+}
+
+// ── v6.9.158: social affinity + snippet-email/website country gates
+// (context already GE from the emailQ block above) ──
+{
+  const mk = (name: string) => ({
+    id: 't', name, website: '', email: '', phone: '', address: 'Tbilisi',
+    facebook: '', instagram: '', linkedin: '', youtube: '', twitter: '', pinterest: '', tiktok: '',
+    rating: 0, reviewCount: 0,
+  } as never as Record<string, any>);
+  // cross-contaminated: snippet about something else carries its FB handle
+  const b1 = mk('Oldenburg Shawarma');
+  extractFromText('Lisi Motocross Tbilisi — race calendar at https://facebook.com/LisiMotocross', b1 as never);
+  eq('social gate: foreign handle rejected', b1.facebook, '');
+  // affine: snippet names the business → accept
+  const b2 = mk('Oldenburg Shawarma');
+  extractFromText('Oldenburg Shawarma Tbilisi — menu on https://facebook.com/oldenburg.ge', b2 as never);
+  eq('social gate: named business accepted', b2.facebook, 'https://facebook.com/oldenburg.ge');
+  // affine by handle token even without the full name in text
+  const b3 = mk('Wendys Georgia');
+  extractFromText('Best burgers in town: https://instagram.com/wendysgeorgia', b3 as never);
+  eq('social gate: handle-token affinity accepted', b3.instagram, 'https://instagram.com/wendysgeorgia');
+}
+{
+  const mk = (name: string) => ({ id: 't', name, website: '', email: '', phone: '', address: 'Tbilisi', facebook: '', instagram: '', linkedin: '', youtube: '', twitter: '', pinterest: '', tiktok: '', rating: 0, reviewCount: 0 } as never as Record<string, any>);
+  // foreign ccTLD + no full-name affinity → rejected under GE context
+  const b1 = mk('Burger Queen');
+  extractFromText('Burger Queen Tbilisi — info@boeufburger.ie for orders', b1 as never);
+  eq('country gate: foreign ccTLD snippet email rejected', b1.email, '');
+  // local ccTLD → accepted
+  const b2 = mk('Wendys Georgia');
+  extractFromText('Wendys Georgia — info@wendys.ge', b2 as never);
+  eq('country gate: local ccTLD accepted', b2.email, 'info@wendys.ge');
+  // generic TLD → accepted (no country claim)
+  const b3 = mk('Mr Cook');
+  extractFromText('Mr Cook Tbilisi — info@mrcook.com', b3 as never);
+  eq('country gate: generic TLD accepted', b3.email, 'info@mrcook.com');
+  // foreign ccTLD + FULL-name match → accepted (not over-rejecting)
+  const b4 = mk('Boeuf Burger');
+  extractFromText('Boeuf Burger orders — info@boeufburger.ie', b4 as never);
+  eq('country gate: full-name foreign host accepted', b4.email, 'info@boeufburger.ie');
+  // website twin: foreign ccTLD needs full-name affinity in GE context
+  eq('site country gate: lone shared word rejected',
+    isLikelyBusinessWebsite('https://boeufburger.ie/', 'Burger Queen'), false);
+  eq('site country gate: generic TLD unaffected',
+    isLikelyBusinessWebsite('https://mrcookfoods.com/', 'Mr Cook'), true);
+}
+{
+  // no-context regression: snippet email country gate stays permissive
+  setScanContext(null as never);
+  const b = { id: 't', name: 'Burger Queen', website: '', email: '', phone: '', facebook: '', instagram: '', linkedin: '', youtube: '', twitter: '', pinterest: '', tiktok: '', rating: 0, reviewCount: 0 } as never as Record<string, any>;
+  extractFromText('Burger Queen info@boeufburger.ie', b as never);
+  eq('country gate: no context stays permissive', b.email, 'info@boeufburger.ie');
+  setScanContext({ countryCode: 'GE', countryName: 'Georgia', lang: 'ka', cityNative: 'თბილისი', cityEn: 'Tbilisi' } as never);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

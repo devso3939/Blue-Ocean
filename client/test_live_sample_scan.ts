@@ -61,6 +61,10 @@ async function main(): Promise<void> {
   for (const b of all) { if (!seen.has(b.id)) { seen.add(b.id); sample.push(b); } if (sample.length >= 30) break; }
 
   console.log('── Enrich: real serp dorks + website crawls (cap 4 min) ──');
+  // v6.9.158: replicate enrichDiscoverContacts' candidate filter so a 0.x s
+  // finish distinguishes "nothing to do" from "lane short-circuited".
+  const need = sample.filter(b => b.website && (!b.phone || !b.email));
+  console.log(`  lane candidates: ${need.length}/${sample.length} (have website: ${sample.filter(b => b.website).length})`);
   const t1 = Date.now();
   const BUDGET = 240_000;
   const enrichedMap = new Map<string, any[]>([['sample', sample]]);

@@ -298,7 +298,7 @@ export function pickPdfLinks(html: string, baseUrl: string, cap = 2): string[] {
   return out;
 }
 
-function extractFromText(text: string, b: Business): boolean {
+export function extractFromText(text: string, b: Business): boolean {
   let touched = false;
   // v6.9.147: decode named/encoded entities first — `info&commat;ex.com`
   // and `&#64;` hide addresses the regex below can never see.
@@ -322,10 +322,13 @@ function extractFromText(text: string, b: Business): boolean {
       b.phone = e164; touched = true; break;
     }
   }
+  // v6.9.158: own-host (when the business already has a website) feeds the
+  // snippet-email country gate below.
+  const ownHost = b.website ? (b.website.replace(/^https?:\/\//, '').split('/')[0] || '').replace(/^www\./, '').toLowerCase() : '';
   if (!b.email) {
     // v6.9.154: same — first plausible address, not the first-shaped one.
     for (const m of text.matchAll(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g)) {
-      if (plausibleEmail(m[0])) { b.email = m[0]; touched = true; break; }
+      if (plausibleEmail(m[0]) && snippetEmailCountryOk(m[0], b.name, ownHost)) { b.email = m[0]; touched = true; break; }
     }
   }
   // v6.9.147: linkify fallback — fuzzy emails with odd TLDs the fixed
@@ -333,16 +336,16 @@ function extractFromText(text: string, b: Business): boolean {
   if (!b.email) {
     for (const e of findTextContacts(text, 8).emails) {
       const clean = e.replace(/[\s>);,]+$/, '');
-      if (clean.length > 5 && clean.length < 90 && plausibleEmail(clean)) { b.email = clean; touched = true; break; }
+      if (clean.length > 5 && clean.length < 90 && plausibleEmail(clean) && snippetEmailCountryOk(clean, b.name, ownHost)) { b.email = clean; touched = true; break; }
     }
   }
   if (!b.facebook) {
     const m = text.match(/facebook\.com\/([a-zA-Z0-9._]+)/);
-    if (m && !m[0].includes('login') && !m[0].includes('sharer')) { b.facebook = 'https://facebook.com/' + m[1]; touched = true; }
+    if (m && !m[0].includes('login') && !m[0].includes('sharer') && socialHandleAffine(text, b.name, m[1])) { b.facebook = 'https://facebook.com/' + m[1]; touched = true; }
   }
   if (!b.instagram) {
     const m = text.match(/instagram\.com\/([a-zA-Z0-9._]+)/);
-    if (m && !m[0].includes('accounts')) { b.instagram = 'https://instagram.com/' + m[1]; touched = true; }
+    if (m && !m[0].includes('accounts') && socialHandleAffine(text, b.name, m[1])) { b.instagram = 'https://instagram.com/' + m[1]; touched = true; }
   }
   // Extract rating (e.g. "4.5 stars" or "4.5/5" or "Rating: 4.5")
   if (!b.rating) {
@@ -365,12 +368,12 @@ function extractFromText(text: string, b: Business): boolean {
   // YouTube — dedicated social field, NEVER b.website
   if (!b.youtube) {
     const m = text.match(/youtube\.com\/(?:channel\/([a-zA-Z0-9_-]+)|@([a-zA-Z0-9._-]+))/i);
-    if (m) b.youtube = m[1] ? 'https://youtube.com/channel/' + m[1] : 'https://youtube.com/@' + m[2];
+    if (m && socialHandleAffine(text, b.name, m[1] || m[2])) b.youtube = m[1] ? 'https://youtube.com/channel/' + m[1] : 'https://youtube.com/@' + m[2];
   }
   // LinkedIn — dedicated social field, NEVER b.website
   if (!b.linkedin) {
     const m = text.match(/linkedin\.com\/(?:company|school)\/([a-zA-Z0-9._-]+)/i);
-    if (m) { b.linkedin = 'https://linkedin.com/company/' + m[1]; touched = true; }
+    if (m && socialHandleAffine(text, b.name, m[1])) { b.linkedin = 'https://linkedin.com/company/' + m[1]; touched = true; }
   }
   return touched;
 }
@@ -2111,6 +2114,36 @@ function textMentionsBusiness(text: string, businessName: string): boolean {
   return false;
 }
 
+// v6.9.158: SNIPPET-email country affinity (weak provenance — page crawls
+// from the business's own site keep full trust via ownHost below). A foreign
+// ccTLD under a known scan country passes only with FULL-name affinity, so
+// info@boeufburger.ie for a Tbilisi "Burger Queen" is rejected while a
+// business genuinely hosted on .ie/.de survives on its own full name.
+function snippetEmailCountryOk(em: string, businessName?: string, ownHost?: string): boolean {
+  const scanTld = countryTld();
+  const domain = (em.split('@')[1] || '').toLowerCase();
+  if (!scanTld || !domain) return true;
+  if (ownHost && (domain === ownHost || domain.endsWith('.' + ownHost))) return true;
+  const tld = domain.split('.').pop() || '';
+  if (!/^[a-z]{2}$/.test(tld)) return true; // generic TLD (.com/.net/…) — no country claim
+  if (tld === scanTld) return true;
+  const label = domain.slice(0, -(tld.length + 1));
+  const full = extractBizNameTokens(businessName || '').join('');
+  return !!full && (domain.includes(full) || full.includes(label));
+}
+
+// v6.9.158: cross-contamination gate for SNIPPET-sourced social URLs — a
+// result about something else can carry its social handle into a business's
+// fields (the LisiMotocross Facebook page attached to a shawarma stand in
+// the Tbilisi audit). Accept when the snippet names the business
+// (translit-aware) or the handle shares a name token. Page-crawl lanes
+// (own site, structured data, nav links) keep full trust.
+function socialHandleAffine(text: string, businessName: string, handle: string): boolean {
+  if (textMentionsBusiness(text, businessName)) return true;
+  const h = (handle || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return extractBizNameTokens(businessName).some(t => h.includes(t));
+}
+
 // Check if a URL is likely the business's OWN website (not a directory listing)
 export function isLikelyBusinessWebsite(url: string, businessName: string, text?: string): boolean {
   try {
@@ -2177,6 +2210,21 @@ export function isLikelyBusinessWebsite(url: string, businessName: string, text?
     // Accept if it looks like a real business domain
     // Good signs: .com, .ge, .org, .net, .io, .co, country TLDs
     // Bad signs: blogspot, wordpress.com, wix, squarespace (but these ARE real business sites)
+    // v6.9.158: country affinity — a foreign ccTLD (boeufburger.ie for a
+    // Tbilisi business) needs FULL-name affinity; a lone shared word
+    // ("burger") is exactly the cross-contamination the Tbilisi audit
+    // caught. Generic TLDs and the scan's own ccTLD pass untouched; no
+    // scan context → unchanged behavior.
+    const scanTld = countryTld();
+    if (scanTld && !hostname.endsWith('.' + scanTld)) {
+      const cc = hostname.split('.').pop() || '';
+      if (/^[a-z]{2}$/.test(cc) && cc !== scanTld) {
+        const full = extractBizNameTokens(businessName).join('');
+        const label = hostname.split('.').slice(-2)[0].replace(/[^a-z0-9]/g, '');
+        const norm = hostname.replace(/[^a-z0-9]/g, '');
+        if (!full || !(norm.includes(full) || full.includes(label))) return false;
+      }
+    }
     return true;
   } catch {
     return false;
@@ -2641,6 +2689,15 @@ const _CORS_OPEN_HOSTS = new Set([
   'en.wikipedia.org', 'ru.wikipedia.org', 'ka.wikipedia.org',
 ]);
 function hostAllowsDirect(u: string): boolean {
+  // v6.9.158: outside a browser there IS no CORS — a direct fetch is free,
+  // correct and authoritative for every host, so lead with it instead of
+  // burning the third-party proxy arms (cors.sh/jina/allorigins measured
+  // 404/403/403 in the v6.9.158 probe) and instead of tripping the scan-wide
+  // _netFails budget, which was returning instant-598 for EVERY business
+  // site by enrichment time (the 0.4 s dead-lane mystery). Browsers keep the
+  // static allowlist — direct-first there means one console error per host,
+  // the reason v6.9.5 reverted it.
+  if (typeof window === 'undefined') return true;
   try { return _CORS_OPEN_HOSTS.has(new URL(u).host); } catch { return false; }
 }
 
@@ -2987,14 +3044,25 @@ async function corsFetch(url: string, init?: RequestInit): Promise<Response> {
         // v6.9.61: buffer the body under a cap and rebuild the Response —
         // the raw Response's body stream has no deadline, so a stalled
         // body would hang every caller's `await r.text()` forever.
+        // v6.9.158: Node/worker runtimes need the FULL body (the browser
+        // 4000-char cap would truncate SERP/HTML pages the parsers need).
+        const directCap = typeof window === 'undefined' ? 600_000 : 4000;
+        const text = await bodyWithCap(r0.text(), directCap);
         if (r0.ok) {
-          const text = await bodyWithCap(r0.text(), 4000);
           hostRecordSuccess(url);
           return new Response(text, { status: 200, headers: { 'Content-Type': r0.headers.get('content-type') || 'text/html' } });
         }
-      } catch { /* CORS error or body stall */ }
+        // v6.9.158: an HTTP response from the origin — even 404/500 — is
+        // AUTHORITATIVE: no proxy can turn it into a different answer, so
+        // return it instead of wasting the whole proxy chain (and do NOT
+        // mark direct dead — only a network/CORS refusal does that; a 404
+        // on robots.txt proves the host is reachable).
+        hostRecordSuccess(url);
+        return new Response(text, { status: r0.status, headers: { 'Content-Type': r0.headers.get('content-type') || 'text/html' } });
+      } catch { /* CORS error or body stall */ markDirectDead(url); }
+    } else {
+      markDirectDead(url);
     }
-    markDirectDead(url);
   }
   if (callerSignal?.aborted) throw new Error('Cancelled');
 
@@ -11443,8 +11511,11 @@ function agentStr(v: unknown): string | undefined {
  * @param snippets raw snippet strings (titles included by the caller)
  * @param domain   business website hostname (www. stripped) — own-domain
  *                 addresses sort first; others still pass the filters
+ * @param businessName v6.9.158: enables the snippet-email country gate —
+ *                 a foreign-ccTLD address must carry the full business name
+ *                 to pass when a scan country is known
  */
-export function harvestSnippetEmails(snippets: string[], domain?: string): string[] {
+export function harvestSnippetEmails(snippets: string[], domain?: string, businessName?: string): string[] {
   const scored: { e: string; own: boolean; i: number }[] = [];
   const seen = new Set<string>();
   const ownDomain = (domain || '').replace(/^www\./, '').toLowerCase();
@@ -11458,6 +11529,8 @@ export function harvestSnippetEmails(snippets: string[], domain?: string): strin
       if (_EMAIL_JUNK_RE.test(em) || _EMAIL_PLATFORM_RE.test(em.split('@')[1] || '')) continue;
       // structural gate same as page-text harvesting
       if (!plausibleEmail(em) || !_EMAIL_TLDS.has((em.split('@')[1] || '').split('.').pop() || '')) continue;
+      // v6.9.158: country affinity for weak-provenance snippet addresses
+      if (!snippetEmailCountryOk(em, businessName, ownDomain)) continue;
       seen.add(em);
       scored.push({ e: em, own: !!ownDomain && em.endsWith('@' + ownDomain), i: scored.length });
     }
@@ -11912,7 +11985,7 @@ async function agentEnrichOne(
       try {
         const rs = await searchBing(encodeURIComponent(call.query));
         const snippets = rs.flatMap(r => [String(r.title || ''), String(r.snippet || '')]);
-        const emails = harvestSnippetEmails(snippets, b.website ? new URL(b.website).hostname : undefined);
+        const emails = harvestSnippetEmails(snippets, b.website ? new URL(b.website).hostname : undefined, b.name);
         evidence.push(emails.length > 0
           ? `FIND_EMAIL "${call.query}": addresses found in snippets — ${emails.join(', ')}`
           : `FIND_EMAIL "${call.query}": no email addresses visible in snippets`);
