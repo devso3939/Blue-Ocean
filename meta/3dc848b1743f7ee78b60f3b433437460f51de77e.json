@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/%E1%83%90%E1%83%A1%E1%83%9E%E1%83%A0%E1%83%98%E1%83%90%20%E1%83%A4%E1%83%98%E1%83%A2%E1%83%9C%E1%83%94%E1%83%A1%E1%83%98%20Archil%20Mishveladze%20Street%2C%205?hl=en",
+  "ts": "2026-10-17T23:55:29Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 257629,
+  "status": "done",
+  "finished_at": "2026-10-17T23:56:03Z"
+}
