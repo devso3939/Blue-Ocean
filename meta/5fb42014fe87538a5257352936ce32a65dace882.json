@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/ANVD%20ANVD%2C%20Bagrationi%20II?hl=en",
+  "ts": "2026-10-17T23:53:19Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 227217,
+  "status": "done",
+  "finished_at": "2026-10-17T23:53:47Z"
+}
