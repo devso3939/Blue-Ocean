@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/%E1%83%B0%E1%83%90%E1%83%A0%E1%83%93%20%E1%83%95%E1%83%94%E1%83%98%20hard%20way%2C%20Gldani%20District?hl=en",
+  "ts": "2026-10-17T23:50:13Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 229752,
+  "status": "done",
+  "finished_at": "2026-10-17T23:50:47Z"
+}
