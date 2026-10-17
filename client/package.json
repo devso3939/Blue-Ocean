@@ -10,7 +10,7 @@
     "deploy": "gh-pages -d dist",
     "bench:extract": "node bench_extract.cjs",
     "replay": "tsx test_serp_replay.ts",
-    "test": "tsx test_v969.ts && tsx test_agent.ts && tsx test_v966.ts && tsx test_skills.ts && tsx test_deep.ts && tsx test_pdf.ts && tsx test_robots.ts"
+    "test": "tsx test_v969.ts && tsx test_agent.ts && tsx test_v966.ts && tsx test_skills.ts && tsx test_city.ts && tsx test_deep.ts && tsx test_pdf.ts && tsx test_robots.ts"
   },
   "dependencies": {
     "he": "^2.0.0",

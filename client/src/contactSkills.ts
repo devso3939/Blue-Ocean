@@ -1,5 +1,5 @@
 /**
- * Contact-parsing skills — v6.9.147
+ * Contact-parsing skills — v6.9.158
  *
  * Small, pure, unit-tested extraction primitives that give the engine,
  * the contact swarm and the AI agent better eyes on hostile markup.
@@ -10,9 +10,12 @@
  *   decodeContactEntities → he           (github.com/mathiasbynens/he)
  *   sameRegDomain         → tldts        (github.com/remusao/tldts)
  *   findTextContacts      → linkify-it   (github.com/linkify/linkify-it)
+ *   extractBizNameAffinity → tldts        (reuses extractBizNameTokens via clientEngine)
+ *   rankOfficialEmails    → tldts/tldts-core + libphonenumber-js
+ *   rankOfficialPhones    → tldts/tldts-core + libphonenumber-js
  *
- * All four are browser-safe pure JS (no Node streams/buffers), bundled
- * by Vite like the rest of the client.
+ * All are browser-safe pure JS (no Node streams/buffers), bundled by
+ * Vite like the rest of the client.
  */
 
 import { Parser } from 'htmlparser2';
@@ -246,3 +249,53 @@ export function rankOfficialPhones(phones: string[], region?: string): { best: s
   const ranked = [...uniq].sort((a, b) => score(b) - score(a));
   return { best: ranked[0] || null, ranked };
 }
+
+/**
+ * Cross-field affinity score for a website URL against a business name.
+ * Reuses extractBizNameTokens (in clientEngine) via a shared internal import — the
+ * same transliteration/tok path the deep scrape, isLikelyBusinessWebsite
+ * and the agent already trust.
+ *
+ * Score 2 = strong official affinity under the v6.9.158 country gates:
+ *   - own-host (the business website itself, when we already have it) OR
+ *   - the URL's host/path carries the business's full translit token run
+ *
+ * Score 1 = weak but plausible: one significant name token appears in the
+ *   host. Score 0 = no affinity.
+ *
+ * Used by harvestSnippetEmails/harvestSnippetPhones/extractFromText to
+ * prefer email/website/phone sources whose host or text actually names the
+ * business — without paying a paid crawl for the deeper page (the cheap
+ * offline affinity gate replaces one fetch in many discover-lane cases).
+ */
+
+import { extractBizNameTokens } from './clientEngine';
+export function extractBizNameAffinity(url: string, businessName: string, text?: string, ownHost?: string): number {
+  if (!url || !businessName) return 0;
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, '').toLowerCase();
+    const path = (u.pathname || '').toLowerCase();
+
+    // Own-host: strongest signal — the business's own site is always
+    // affinity-1+ when we already have it (this is the cheap gate that
+    // lets discover-lane pages prefer same-site contacts).
+    if (ownHost) {
+      try { if (host === ownHost || host.endsWith('.' + ownHost)) return 2; } catch { /* ignore */ }
+    }
+
+    const tokens = extractBizNameTokens(businessName);
+    if (tokens.length === 0) return 0;
+
+    const full = tokens.join('');
+    const hostNorm = host.replace(/[^a-z0-9]/g, '');
+    const pathNorm = path.replace(/[^a-z0-9]/g, '');    // Strong: the host or path carries the FULL token run.
+    if (hostNorm.includes(full) || pathNorm.includes(full) || full.includes(hostNorm) || full.includes(pathNorm)) return 2;
+    // Weak-but-plausible: at least one significant token in the host.
+    if (tokens.some((t) => host.includes(t) || hostNorm.includes(t))) return 1;
+    // Fallback: text mentions the business (caller-supplied context).
+    if (text && tokens.some((t) => text.toLowerCase().includes(t))) return 1;
+    return 0;
+  } catch { return 0; }
+}
+

@@ -1183,6 +1183,14 @@ export default function App() {
         setCityResults([]);
         if (e.message?.includes('rate limit')) setError('Search servers are busy — wait a few seconds and try again');
         else if (e.message?.includes('No results')) setError(''); // silent for no results
+        // v6.9.160: anything else used to be swallowed with NO message at all —
+        // how a total city-search outage (every query returning zero rows) looked
+        // like "the app does nothing when I type a city". Say something, and
+        // keep the real error in the console for diagnosis.
+        else {
+          console.error('[city search]', e);
+          setError('City search failed — check your connection and try again');
+        }
       }
       setCitySearching(false);
     }, 400);

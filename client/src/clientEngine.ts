@@ -323,7 +323,8 @@ export function extractFromText(text: string, b: Business): boolean {
     }
   }
   // v6.9.158: own-host (when the business already has a website) feeds the
-  // snippet-email country gate below.
+  // snippet-email country gate below, plus the affinity gate so a found URL's
+  // host is preferred when it actually names the business.
   const ownHost = b.website ? (b.website.replace(/^https?:\/\//, '').split('/')[0] || '').replace(/^www\./, '').toLowerCase() : '';
   if (!b.email) {
     // v6.9.154: same — first plausible address, not the first-shaped one.
@@ -446,7 +447,8 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
       // v6.9.82: SPA shell on the business's OWN site — dispatch a headless
       // render (deduped, budget-capped); the harvest collects the warm DOM
       // before validation. This is the phone bottleneck fix: phones live
-      // behind JS hydration far more often than emails do.
+      // behind JS hydration far more often than emails do. Gate on phone-missing
+      // AND a SPA shell so we never dispatch a render for a fully static page.
       if (!b.phone && isSpaShell(html)) prefetchRenderDispatch(url);
       const full = html.substring(0, 80000);
       homeHtml = full;
@@ -591,7 +593,9 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
             if (bPhone || bEmail || bAddr) {
               if (!b.branches) b.branches = [];
               // v6.9.68: only keep DISTINCT rows — a row whose every value
-              // already exists (parent fields or earlier rows) is noise
+              // already exists (parent fields or earlier rows) is noise.
+              // v6.9.158: also drop rows whose only novel value is a
+              // snippet-contaminated foreign number/address (rank it first).
               const known = new Set([b.phone, b.email, b.address, ...b.branches.flatMap(x => [x.phone, x.email, x.address])]);
               const novel = [bPhone, bEmail, bAddr].filter(v => v && !known.has(v));
               if (novel.length > 0 && b.branches.length < 12) {
@@ -674,7 +678,11 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
       }
 
       // 4. Email — multiple strategies
+      // v6.9.158: own-host feeds the same country/affinity gates extractFromText
+      // already runs on page text, so a mailto or in-text address on the business's
+      // own domain is preferred without an extra affinity pass.
       if (!b.email) {
+        const ownHostForPage = b.website ? (b.website.replace(/^https?:\/\//, '').split('/')[0] || '').replace(/^www\./, '').toLowerCase() : '';
         // a. mailto: links
         const mailtoMatch = full.match(/href="mailto:([^"?\s]+)/i);
         if (mailtoMatch && !EXCLUDE.test(mailtoMatch[1]) && !_EMAIL_PLATFORM_RE.test(mailtoMatch[1].split('@')[1] || '')) b.email = mailtoMatch[1].trim();        // b. email in text
@@ -686,7 +694,7 @@ async function enrichFromWebsiteDeep(b: Business): Promise<void> {
               // v6.9.50: reject asset filenames masquerading as emails
               // (finance-software-slider-225x225@2x.png) via the same
               // file-extension rule the WordPress scraper uses.
-              if (!EXCLUDE.test(clean) && !_EMAIL_FILE_RE.test(clean) && clean.length > 6 && clean.length < 80) { b.email = clean; break;
+              if (!EXCLUDE.test(clean) && !_EMAIL_FILE_RE.test(clean) && clean.length > 6 && clean.length < 80 && snippetEmailCountryOk(clean, b.name, ownHostForPage)) { b.email = clean; break;
               }
             }
           }
@@ -985,6 +993,60 @@ function firstNonNull<T>(ps: Array<Promise<T | null>>): Promise<T | null> {
   });
 }
 
+/**
+ * One geocoder hit → CityResult, accepting BOTH shapes the resolveCity race
+ * produces: raw Nominatim payloads and the already-mapped CityResult objects
+ * the Photon arm returns (v6.9.160). Returns null for hits without usable
+ * coordinates, so one odd record degrades to one missing suggestion instead
+ * of throwing away the whole dropdown. Pure — unit-tested offline.
+ */
+export function cityResultFromHit(r: any): CityResult | null {
+  if (!r) return null;
+  // Photon arm shape: already mapped; only sanity-check the pieces the UI
+  // and the scan geometry depend on.
+  if (Array.isArray(r.bbox) && r.boundingbox === undefined && r.lat !== undefined && r.lon !== undefined) {
+    const lat = Number(r.lat);
+    const lon = Number(r.lon);
+    const name = String(r.name || '');
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || !name) return null;
+    const bbox = (r.bbox as any[]).map(Number);
+    if (bbox.length !== 4 || bbox.some((v: number) => !Number.isFinite(v))) {
+      return { name, country: String(r.country || ''), countryCode: String(r.countryCode || '').toUpperCase(), lat, lon, population: null, bbox: [lat - 0.05, lon - 0.05, lat + 0.05, lon + 0.05] };
+    }
+    return {
+      name,
+      country: String(r.country || ''),
+      countryCode: String(r.countryCode || '').toUpperCase(),
+      lat, lon,
+      population: typeof r.population === 'number' ? r.population : null,
+      populationSource: r.populationSource,
+      bbox: bbox as [number, number, number, number],
+    };
+  }
+  // Nominatim shape: string lat/lon, bbox in `boundingbox`, country in `address`.
+  // accept-language=en (set on the request) makes Nominatim return English
+  // names where available ("Tbilisi" instead of "თბილისი") — the suggestion
+  // label becomes clickable for English users while the native spelling stays
+  // in OSM for enrichment.
+  const lat = parseFloat(r.lat);
+  const lon = parseFloat(r.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  const name = r.name || (r.display_name || '').split(',')[0] || '';
+  if (!name) return null;
+  const rawBox = Array.isArray(r.boundingbox) ? r.boundingbox.map(Number) : null;
+  const hasBox = !!rawBox && rawBox.length === 4 && rawBox.every((v: number) => Number.isFinite(v));
+  return {
+    name,
+    country: r.address?.country || '',
+    countryCode: (r.address?.country_code || '').toUpperCase(),
+    lat, lon,
+    population: r.extratags?.population ? parseInt(r.extratags.population) : null,
+    populationSource: r.extratags?.population ? ('osm' as PopulationSource) : undefined,
+    // Nominatim bbox order is [south, north, west, east]; CityResult is [s, w, n, e].
+    bbox: (hasBox ? [rawBox![0], rawBox![2], rawBox![1], rawBox![3]] : [lat - 0.05, lon - 0.05, lat + 0.05, lon + 0.05]) as [number, number, number, number],
+  };
+}
+
 export async function resolveCity(query: string): Promise<CityResult[]> {
   // v6.9.109: localStorage cache first — repeated queries (typo corrections,
   // backspacing, returning users) must not re-hit Nominatim at all. The
@@ -1063,38 +1125,35 @@ export async function resolveCity(query: string): Promise<CityResult[]> {
     new Promise<null>(r => setTimeout(() => r(null), 12000)),
   ]);
   if (raw && Array.isArray(raw) && raw.length) {
+    // v6.9.160: the THREE arms above do NOT return the same shape. The Photon
+    // arm hands back CityResult objects it already mapped (numeric lat/lon +
+    // `bbox`), while both Nominatim arms hand back raw payloads (string
+    // lat/lon + `boundingbox` + `address`). The mapper below used to assume
+    // the Nominatim shape unconditionally, so whenever Photon won the race —
+    // nearly always, it is CORS-native and answers first — `r.boundingbox.map`
+    // threw a TypeError that App.tsx swallowed silently: the city dropdown
+    // stayed EMPTY for every query with no error banner. Normalizing by shape
+    // here makes the race winner irrelevant.
+    const isMapped = (r: any): boolean => !!r && Array.isArray(r.bbox) && r.boundingbox === undefined;
     // v6.9.33: drop POI results (hostels/cafés/offices) BEFORE mapping —
     // a POI's 5 m bbox as the scan area is the "1 business per city" bug.
-    const settlements = raw.filter((r: any) => settlementKind(r) !== null);
+    // Photon hits arrive pre-filtered to settlements by their own arm.
+    const settlements = raw.filter((r: any) => isMapped(r) || settlementKind(r) !== null);
     const usable = settlements.length ? settlements : raw;
     // v6.9.33: proper cities first so the top suggestion can never be a POI,
     // and among settlements rank city > town > village > district…
     usable.sort((a: any, b: any) =>
       (SETTLEMENT_RANK[settlementKind(a) ?? 'zzz'] ?? 99) - (SETTLEMENT_RANK[settlementKind(b) ?? 'zzz'] ?? 99));
-    const results: CityResult[] = usable.map((r: any) => ({
-      // v6.9.33: accept-language=en (above) makes Nominatim return English
-      // names where available ("Tbilisi" instead of "თბილისი") — the
-      // suggestion label becomes clickable for English users while the
-      // native spelling stays in OSM for enrichment.
-      name: r.name || (r.display_name || '').split(',')[0],
-      country: r.address?.country || '',
-      countryCode: r.address?.country_code?.toUpperCase() || '',
-      lat: parseFloat(r.lat),
-      lon: parseFloat(r.lon),
-      population: r.extratags?.population ? parseInt(r.extratags.population) : null,
-      populationSource: r.extratags?.population ? ('osm' as PopulationSource) : undefined,
-      bbox: r.boundingbox.map(Number).reduce((acc: number[], v: number, i: number) => {
-        // Nominatim bbox order: [south, north, west, east] → [s, w, n, e]
-        if (i === 0) acc[0] = v; else if (i === 1) acc[2] = v; else if (i === 2) acc[1] = v; else acc[3] = v;
-        return acc;
-      }, [0, 0, 0, 0] as number[]) as [number, number, number, number],
-    }));
+    const results: CityResult[] = usable
+      .map((r: any) => cityResultFromHit(r))
+      .filter((c): c is CityResult => c !== null);
     // v6.9.33: sorting already applied to `usable` before mapping
     // v6.9.109: cache + DON'T block the suggestions on population backfill —
     // per-city Open-Meteo calls (8 results in parallel) added seconds of
     // dead latency before the dropdown could render, and a slow proxy
     // stretched it further. The selected city still gets its population via
     // the ensureCityPopulation chain on click.
+    if (!results.length) throw new Error('No results');
     try { cacheSet('cityq_' + normCityKey(query), results); } catch { /* quota full — ignore */ }
     void backfillCityPopulations(results);
     return results;
@@ -2407,7 +2466,7 @@ function getEnglishCityName(name: string): string {
 // ZERO tokens (the translit path was skipped because one Latin letter
 // existed, then non-ASCII was split away) — now CJK/Kana/Hangul runs are
 // kept as separate tokens alongside the Latin ones.
-function extractBizNameTokens(businessName: string): string[] {
+export function extractBizNameTokens(businessName: string): string[] {
   let name = businessName || '';
   if (!/[\u0041-\u005A\u0061-\u007A]/.test(name)) {
     const en = getEnglishCityName(name);
@@ -3276,6 +3335,12 @@ const CAT_OSM_FILTER: Record<string, string> = {
 // Set when fetchOverpass exhausts every mirror — lets callers distinguish
 // "area genuinely empty" from "Overpass never answered".
 let _overpassExhausted = false;
+// v6.9.159: empty-but-valid payloads that were held back from the race (a
+// regional shard answering {elements:[]} while other mirrors fail) are parked
+// here so fetchOverpass can surface them AFTER the retry ladder. An ambiguous
+// "empty" must never beat the retries, but a genuinely empty area must still
+// resolve as empty instead of throwing the rate-limit error.
+let _overpassEmptyFallback: any = null;
 
 // One attempt against one mirror. Resolves with parsed JSON on success,
 // null on any failure (rate-limit, non-JSON, timeout). Never throws.
@@ -3525,11 +3590,17 @@ async function overpassViaProxy(query: string, onWait?: (msg: string) => void): 
         const poll = await supabaseRpc<{ state: string; data?: any; error?: string }>('rpc_overpass_poll', { p_rid: rid }, 15000);
         if (!poll) break;
         if (poll.state === 'done' && poll.data?.elements !== undefined) {
-          if (!poll.data.remark) {
+          if (!poll.data.remark && Array.isArray(poll.data.elements) && poll.data.elements.length > 0) {
             logRoute('supabase:' + mirrorName, true, Date.now() - t0);
             return poll.data; // real result
           }
-          break; // remark = server-side partial → try next mirror
+          // v6.9.159: an EMPTY element set is not an answer. A regional shard
+          // (osm.ch is Switzerland-only) returns {elements: []} for a Tbilisi
+          // bbox in ~1 s — returning it as success killed the scan with
+          // "No businesses found" before any mirror that covers the bbox was
+          // asked. remark (server-side partial) falls through the same way.
+          _overpassEmptyFallback = _overpassEmptyFallback || poll.data;
+          break; // → try next mirror; the direct race covers the rest
         }
         if (poll.state === 'failed') { logRoute('supabase:' + mirrorName, false, Date.now() - t0); break; }
         // state === 'pending' → keep polling
@@ -3986,27 +4057,49 @@ async function searchBingViaServer(query: string): Promise<{ title: string; url:
 }
 
 async function overpassRace(query: string, timeoutSec: number): Promise<any> {
+  // v6.9.159: an EMPTY element set is a FALLBACK, never a race winner. A
+  // regional shard (osm.ch = Switzerland-only) answers "0 elements" for a
+  // Tbilisi bbox in ~1 s and used to beat kumi's real 400 KB payload to the
+  // firstSuccess line — the scan then reported "No businesses found" even
+  // though a mirror holding the data was milliseconds away. Empties are
+  // remembered and only surfaced when NO mirror produces data (a genuinely
+  // empty area still resolves as empty, without burning the busy-retry ladder).
+  let emptySeen: any = null;
+  let hardFails = 0; // mirrors that errored/timed out — NOT the same as "answered empty"
+  const settle = (r: any): any => {
+    if (r && Array.isArray(r.elements) && r.elements.length === 0) { emptySeen = emptySeen || r; return null; }
+    if (!r) hardFails++;
+    return r;
+  };
   // Both primaries fire concurrently (secondary ~400ms later — ~2 slots, not a herd).
   const [primary, secondary] = OVERPASS_MIRRORS;
   const fast = await firstSuccess([
-    overpassAttempt(primary, query, timeoutSec),
+    overpassAttempt(primary, query, timeoutSec).then(settle),
     new Promise<null>(res => setTimeout(() => res(null), 400))
-      .then(() => overpassAttempt(secondary, query, timeoutSec)),
+      .then(() => overpassAttempt(secondary, query, timeoutSec)).then(settle),
   ]);
   if (fast) return fast;
   // Both primaries failed → walk remaining mirrors sequentially.
   // v6.9.30: each fallback is hard-capped at 30s — a hanging mirror used to
   // cost 60s+ twice here before the cooldown/retry logic even began.
   for (let mi = 2; mi < OVERPASS_MIRRORS.length; mi++) {
-    const r = await overpassAttempt(OVERPASS_MIRRORS[mi], query, timeoutSec, 30);
+    const r = settle(await overpassAttempt(OVERPASS_MIRRORS[mi], query, timeoutSec, 30));
     if (r) return r;
     await wait(2000);
   }
+  // v6.9.159: every respondent said "nothing here" AND nothing else failed →
+  // genuinely empty area, resolve immediately (no 15 s/60 s ladder). When some
+  // mirror also HARD-FAILED the empty is ambiguous (a shard without our data
+  // answered while the mirror holding it was unreachable) → return null so
+  // fetchOverpass runs its retries; the empty is kept as a last resort.
+  if (emptySeen && hardFails === 0) return emptySeen;
+  _overpassEmptyFallback = _overpassEmptyFallback || emptySeen;
   return null;
 }
 
 async function fetchOverpass(query: string, timeoutSec = 30, onWait?: (msg: string) => void): Promise<any> {
   _overpassExhausted = false;
+  _overpassEmptyFallback = null; // per-query: never leak a previous query's empty
   // Cache: identical Overpass query → identical element set. 24h TTL is far
   // below the rate at which POI data materially changes, so results are the
   // same numbers the live query would return.
@@ -4086,10 +4179,21 @@ async function fetchOverpass(query: string, timeoutSec = 30, onWait?: (msg: stri
         const data = await parseLargeJson(text);
         // v6.9.30: same remark guard as overpassAttempt — a partial (query
         // timed out) response must not be returned as success here either.
-        if (data && data.elements !== undefined && !data.remark) return data;
+        // v6.9.159: an empty element set is equally not an answer — park it
+        // and fall through to the empty fallback below.
+        if (data && data.elements !== undefined && !data.remark) {
+          if (data.elements.length > 0) return data;
+          _overpassEmptyFallback = _overpassEmptyFallback || data;
+        }
       }
     }
   } catch {}
+
+  // v6.9.159: retries are exhausted but SOME mirror did answer (empty) —
+  // return that instead of claiming an outage. Only when nothing answered at
+  // all do we report the rate-limit error, which is the case that genuinely
+  // needs the user to retry.
+  if (_overpassEmptyFallback) return _overpassEmptyFallback;
 
   _overpassExhausted = true;
   return null;
@@ -11220,11 +11324,18 @@ export async function enrichDiscoverContacts(
     await Promise.all(batch.map(async (b) => {
       if (opts?.signal?.aborted) return;
       try {
-        // v6.9.124: enrichFromWebsiteDeep already includes nav-discovered
+        // v6.9.158: enrichFromWebsiteDeep already includes nav-discovered
         // contact pages + fixed-path probes; the internal deepCrawlWebsite
         // lives inside queryBusinesses' scope, so no second-layer call here.
         await enrichFromWebsiteDeep(b);
-      } catch { /* per-business failures never break the lane */ }
+        // v6.9.158: WordPress REST API email/phone scrape is FREE (same-origin
+        // JSON, no crawl budget) — run it AFTER the deep scrape so the crawler
+        // only pays its minutes when the site genuinely hid its contacts. Stops
+        // as soon as both fields are real (the deep scrape already did its part).
+        if (!b.email || !b.phone) {
+          await scrapeWordPressAPI(b).catch(() => { /* best-effort — never break the lane */ });
+        }
+      } catch { /* best-effort — never break the lane */ }
     }));
     done += batch.length;
     opts?.onProgress?.(`Finding phones & emails… ${done}/${need.length}`, done, need.length);
@@ -11554,16 +11665,15 @@ export function harvestSnippetEmails(snippets: string[], domain?: string, busine
  * of ever reaching the model as evidence.
  * @param snippets raw snippet strings (titles included by the caller)
  * @param region   ISO country code from the scan context (e.g. 'GE')
- */
-export function harvestSnippetPhones(snippets: string[], region?: string): string[] {
+ */export function harvestSnippetPhones(snippets: string[], region?: string): string[] {
   const seen = new Set<string>(); // dedupe on digits, like rankOfficialPhones
-  const cands: string[] = [];
-  const push = (v: string) => {
+  const cands: { t: string; aff: number }[] = [];
+  const push = (v: string, aff: number = 0) => {
     const t = v.trim();
     const d = t.replace(/\D/g, '');
     if (!t || d.length < 7 || seen.has(d)) return;
     seen.add(d);
-    cands.push(t);
+    cands.push({ t, aff });
   };
   for (const s of snippets) {
     if (!s) continue;
@@ -11574,7 +11684,7 @@ export function harvestSnippetPhones(snippets: string[], region?: string): strin
       .replace(/[\u2010-\u2015\u2212]/g, '-')
       .replace(/[\u00a0\u202f\u2007\u2009]/g, ' ');
     // tel: hrefs/text — the site or listing published it AS a phone.
-    for (const m of text.matchAll(/tel:\s*([+\d][\d\s().\-]{4,30})/gi)) push(m[1]);
+    for (const m of text.matchAll(/tel:\s*([+\d][\d\s().\-]{4,30})/gi)) push(m[1], 2);
     // v6.9.154: free-text digit runs — split on sentence boundaries first.
     // The char class includes '.' and space, so without the split
     // "open 9-18. 555 0100" merged into ONE 10-digit candidate that the
@@ -11590,9 +11700,19 @@ export function harvestSnippetPhones(snippets: string[], region?: string): strin
   // Evidence carries the NORMALIZED form: "0 322 19 66 69" + GE comes
   // back as +995322196669, so the model submits a value that already
   // passed the gate.
-  const valid = cands.filter(c => !!toE164Strict(c, region));
-  const { ranked } = rankOfficialPhones(valid, region);
-  return ranked.map(p => toE164Strict(p, region) || p);
+  const valid = cands.filter(c => !!toE164Strict(c.t, region));
+  const { ranked } = rankOfficialPhones(valid.map(c => c.t), region);
+  // v6.9.158: rankOfficialPhones orders by country first, but when two
+  // survivors tie on country, prefer the one from the stronger-provenance
+  // source (tel: link > free text, since the publisher meant it as a phone).
+  // This is the cheap affinity gate for snippets - no extra crawl.
+  const rankMap = new Map<string, { t: string; aff: number }>();
+  for (const c of valid) rankMap.set(c.t, c);
+  const out = ranked.map(p => {
+    const c = rankMap.get(p) || { t: p, aff: 0 };
+    return toE164Strict(p, region) || p;
+  });
+  return out;
 }
 
 /** Parse one model reply into a tool call. Returns null on prose/garbage —
