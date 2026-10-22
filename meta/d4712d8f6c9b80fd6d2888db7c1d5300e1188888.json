@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/Spa%20R%C3%A9veil%20Spa%20R%C3%A9veil%2C%2011410?hl=en",
+  "ts": "2026-10-22T17:04:53Z",
+  "camoufox_error": "403 Client Error: rate limit exceeded for url: https://api.github.com/repos/camoufox/camoufox/releases",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 215970,
+  "status": "done",
+  "finished_at": "2026-10-22T17:04:57Z"
+}
