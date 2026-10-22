@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/Seat%20Seat%2C%20Lower%20Broughton?hl=en",
+  "ts": "2026-10-22T17:19:18Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 247195,
+  "status": "done",
+  "finished_at": "2026-10-22T17:19:43Z"
+}
