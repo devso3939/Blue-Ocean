@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/The%20Style%20Room%20%40%20No.%204%20Bank%20Place%2C%204?hl=en",
+  "ts": "2026-10-22T16:40:13Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 218292,
+  "status": "done",
+  "finished_at": "2026-10-22T16:40:42Z"
+}
