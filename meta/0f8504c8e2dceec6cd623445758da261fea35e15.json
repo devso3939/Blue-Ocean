@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/Shampers%20Shampers%2C%20Little%20Stoke?hl=en",
+  "ts": "2026-10-22T16:37:08Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 217144,
+  "status": "done",
+  "finished_at": "2026-10-22T16:37:36Z"
+}
