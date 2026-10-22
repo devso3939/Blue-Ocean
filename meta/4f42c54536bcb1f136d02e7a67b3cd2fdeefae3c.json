@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/Viva%20Day%20Spa%20Viva%20Day%20Spa%2C%20The%20Domain?hl=en",
+  "ts": "2026-10-22T17:05:38Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 215832,
+  "status": "done",
+  "finished_at": "2026-10-22T17:06:08Z"
+}
