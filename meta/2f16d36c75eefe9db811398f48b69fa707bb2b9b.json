@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/Peter's%20Barber%20Shop%20Peter's%20Barber%20Shop%2C%20Hanham?hl=en",
+  "ts": "2026-10-22T16:38:16Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 217093,
+  "status": "done",
+  "finished_at": "2026-10-22T16:38:39Z"
+}
