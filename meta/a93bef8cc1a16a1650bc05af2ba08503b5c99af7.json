@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/Nurtur%20The%20Salon%20West%20Lane%20Avenue%2C%201581?hl=en",
+  "ts": "2026-10-22T16:54:28Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 216324,
+  "status": "done",
+  "finished_at": "2026-10-22T16:54:59Z"
+}
