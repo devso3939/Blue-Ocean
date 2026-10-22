@@ -1,0 +1,10 @@
+{
+  "url": "https://www.google.com/maps/search/Cheadle%20Hulme%20MOT%20Test%20Centre%20Cheadle%20Hulme%20MOT%20Test%20Centre%2C%20Adswood?hl=en",
+  "ts": "2026-10-22T17:18:01Z",
+  "camoufox_error": "Browser.new_page() got an unexpected keyword argument 'contrast'",
+  "engine": "chromium",
+  "challenged": false,
+  "bytes": 216437,
+  "status": "done",
+  "finished_at": "2026-10-22T17:18:30Z"
+}
